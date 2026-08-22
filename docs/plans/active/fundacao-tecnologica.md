@@ -24,6 +24,7 @@ Registrar os requisitos do produto, aprovar as decisões tecnológicas materiais
 - [x] Criar o PWA, os pacotes compartilháveis, a API e a camada de dados mínima.
 - [x] Configurar testes, análise estática, CI, imagens OCI, configuração de ambiente e documentação operacional.
 - [x] Executar as validações canônicas e registrar a evidência.
+- [x] Fixar as Actions por SHA completo e bloquear em pull requests a introdução de dependências com vulnerabilidades altas ou críticas.
 
 ## Rastreabilidade
 
@@ -41,6 +42,7 @@ Registrar os requisitos do produto, aprovar as decisões tecnológicas materiais
 ## Evidência de validação
 
 - `pnpm lint`, `pnpm typecheck`, `pnpm test` e `pnpm build` passaram em 2026-08-21.
+- As Actions dos workflows de CI e CodeQL foram fixadas por SHA completo, mantendo o comentário da versão para o Dependabot atualizá-las; o workflow `Dependency review` bloqueia novas dependências com vulnerabilidades altas ou críticas.
 - O teste de autorização foi executado em Red por módulo ausente e passou em Green após a implementação.
 - O build Next gerou `sw.js` e `manifest.webmanifest`.
 - A validação interativa no navegador não foi executada: o ambiente não expõe ferramenta de navegador e o processo de desenvolvimento não permaneceu acessível após o comando. O primeiro fluxo de interface deverá receber validação Playwright/browser antes de ser declarado concluído como feature.

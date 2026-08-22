@@ -33,7 +33,7 @@ Estabelecer uma base técnica que permita iniciar o PWA e evoluir, sem reestrutu
 - [ ] Uma decisão arquitetural aprovada define o gerenciador de pacotes, monorepo, PWA, API, dados, autenticação, qualidade e entrega contínua, com trade-offs explícitos.
 - [ ] A estrutura inicial do repositório permite adicionar um aplicativo Expo sem migrar o PWA ou os pacotes de domínio compartilhados.
 - [ ] O projeto pode ser executado e entregue como imagens OCI e configuração genérica, sem referência a uma plataforma de deploy específica.
-- [ ] A automação de integração contínua valida formatação/lint, tipos, testes, build e vulnerabilidades antes de aceitar mudanças.
+- [ ] A automação de integração contínua valida formatação/lint, tipos, testes, build e vulnerabilidades antes de aceitar mudanças; Actions de terceiros são referenciadas por SHA completo e novas dependências vulneráveis de severidade alta ou crítica bloqueiam a pull request.
 
 ## Limites
 

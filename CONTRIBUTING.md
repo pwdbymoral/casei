@@ -31,6 +31,7 @@ Obrigado por contribuir. O Casei é desenvolvido com requisitos, contratos e val
 A `main` não aceita pushes diretos, force-pushes ou deleção. Pull requests precisam estar atualizados com a base e concluir com sucesso:
 
 - `quality`: auditoria de dependências, lint, typecheck, testes e build;
-- `Analyze (javascript-typescript)`: análise de segurança CodeQL.
+- `Analyze (javascript-typescript)`: análise de segurança CodeQL;
+- `Dependency review`: bloqueia novas dependências com vulnerabilidades conhecidas de severidade alta ou crítica.
 
 O merge é exclusivamente por squash e a branch é apagada após a integração.

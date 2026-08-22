@@ -56,4 +56,6 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 - `pnpm check`: executa lint, typecheck, testes e build em sequência.
 - `pnpm audit --prod --audit-level=high`: falha quando dependências de produção possuem vulnerabilidades de severidade alta ou crítica conhecidas.
 
+No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a adição de dependências com vulnerabilidades conhecidas de severidade alta ou crítica. Esse check é obrigatório para merge na `main`.
+
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
