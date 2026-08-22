@@ -13,6 +13,16 @@ permissions:
 
 jobs:
   analyze:
-    uses: github/codeql-action/.github/workflows/codeql.yml@v4
-    with:
-      languages: javascript-typescript
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4

@@ -54,5 +54,6 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 - `pnpm test`: executa Vitest nos pacotes que possuem testes.
 - `pnpm build`: gera a API e o PWA de produção.
 - `pnpm check`: executa lint, typecheck, testes e build em sequência.
+- `pnpm audit --prod --audit-level=high`: falha quando dependências de produção possuem vulnerabilidades de severidade alta ou crítica conhecidas.
 
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
