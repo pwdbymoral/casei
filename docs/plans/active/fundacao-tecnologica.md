@@ -25,6 +25,7 @@ Registrar os requisitos do produto, aprovar as decisões tecnológicas materiais
 - [x] Configurar testes, análise estática, CI, imagens OCI, configuração de ambiente e documentação operacional.
 - [x] Executar as validações canônicas e registrar a evidência.
 - [x] Fixar as Actions por SHA completo e bloquear em pull requests a introdução de dependências com vulnerabilidades altas ou críticas.
+- [x] Atualizar o Dependency Review para o runtime Node 24 e reconciliar a divergência observada entre build local e CI.
 
 ## Rastreabilidade
 
@@ -43,6 +44,8 @@ Registrar os requisitos do produto, aprovar as decisões tecnológicas materiais
 
 - `pnpm lint`, `pnpm typecheck`, `pnpm test` e `pnpm build` passaram em 2026-08-21.
 - As Actions dos workflows de CI e CodeQL foram fixadas por SHA completo, mantendo o comentário da versão para o Dependabot atualizá-las; o workflow `Dependency review` bloqueia novas dependências com vulnerabilidades altas ou críticas.
+- A `actions/dependency-review-action` usa a release `v5.0.0`, fixada por SHA completo, cujo runtime é Node 24 e cujo requisito mínimo de runner é `2.327.1`; o runner hospedado que validou a PR está na versão `2.336.0`.
+- O build do PWA passa no GitHub Actions com Node `24.19.0`, pnpm `11.3.0`, instalação limpa pelo lockfile e sem cache de build. Neste sandbox local, o `stdout` de processos-filho iniciados por Node é vazio mesmo com exit code zero; como o Next chama `tsc --showConfig` desse modo, ele falha ao interpretar a saída. A chamada direta ao TypeScript emite JSON válido. A divergência é uma limitação do ambiente de execução local, não uma falha reproduzida no projeto; builds locais devem ser validados fora desse sandbox.
 - O teste de autorização foi executado em Red por módulo ausente e passou em Green após a implementação.
 - O build Next gerou `sw.js` e `manifest.webmanifest`.
 - A validação interativa no navegador não foi executada: o ambiente não expõe ferramenta de navegador e o processo de desenvolvimento não permaneceu acessível após o comando. O primeiro fluxo de interface deverá receber validação Playwright/browser antes de ser declarado concluído como feature.
