@@ -51,4 +51,4 @@ docs/           specs, ADRs, planos e estratégia de testes
 
 ## Contribuição
 
-`main` é protegida: mudanças entram por pull request, após o check `quality`. O repositório utiliza squash merge e remove a branch após integração.
+Consulte as [diretrizes de contribuição](CONTRIBUTING.md). A `main` é protegida: mudanças entram por pull request somente após `quality` e `Analyze (javascript-typescript)` passarem. O repositório utiliza squash merge e remove a branch após integração.
