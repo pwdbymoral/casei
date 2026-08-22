@@ -2,6 +2,10 @@
 
 Casei é um PWA para organizar a vida de uma pessoa, casal ou grupo de forma simples e compartilhada. O produto reunirá planejamento financeiro, metas e estoque doméstico em uma experiência segura, responsiva e agradável de usar.
 
+## Código aberto e comunidade
+
+O Casei é um projeto open source construído em comunidade. O código é licenciado sob [GNU AGPL-3.0-or-later](LICENSE): melhorias e versões modificadas oferecidas pela rede devem continuar disponíveis à comunidade sob a mesma licença. Contribuições, discussões e revisões são bem-vindas.
+
 ## Estado atual
 
 O repositório contém a fundação técnica do produto:
