@@ -60,13 +60,13 @@ function statementLabel(statement: Statement): string {
   return "Cancelada";
 }
 
-export type FinanceDashboardProps = {
+type FinanceDashboardProps = {
   adapter?: FinanceAdapter;
   workspaceId?: string;
   role?: WorkspaceRole;
 };
 
-export function FinanceDashboard({
+function FinanceDashboard({
   adapter: providedAdapter,
   workspaceId: providedWorkspaceId,
   role = "owner",
