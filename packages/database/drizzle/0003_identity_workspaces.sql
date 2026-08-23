@@ -112,7 +112,15 @@ CREATE POLICY "job_scope" ON "job"
       AND required_capability = 'system.purge'
     )
   )
-  WITH CHECK (workspace_id = "app"."current_workspace_id"());
+  WITH CHECK (
+    workspace_id = "app"."current_workspace_id"()
+    OR (
+      job_type = 'workspace.purge'
+      AND job_version = 1
+      AND actor_id IS NULL
+      AND required_capability = 'system.purge'
+    )
+  );
 --> statement-breakpoint
 ALTER TABLE "workspace_invitation" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "workspace_invitation" FORCE ROW LEVEL SECURITY;
