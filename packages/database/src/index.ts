@@ -1,3 +1,4 @@
+export type { Pool, PoolClient } from "pg";
 export { createDatabase, getDatabasePool } from "./client.js";
 export * from "./command-infra.js";
 export { type ApplicationRoleOptions, ensureApplicationRole } from "./roles.js";
