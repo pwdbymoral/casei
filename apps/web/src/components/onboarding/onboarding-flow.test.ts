@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type OnboardingDraft, validateOnboardingStep } from "./onboarding-flow";
+import { type OnboardingDraft, validateOnboardingStep } from "../../lib/onboarding";
 
 const draft: OnboardingDraft = {
   displayName: "",
