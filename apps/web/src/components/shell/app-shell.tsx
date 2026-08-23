@@ -154,7 +154,12 @@ function WorkspaceSelect({
         {error}
       </span>
       <span className="sr-only">
-        Papel: {activeWorkspace?.role === "owner" ? "proprietário" : "membro"}
+        Papel{" "}
+        {activeWorkspace?.role === "owner"
+          ? "proprietário"
+          : activeWorkspace?.role === "viewer"
+            ? "leitor"
+            : "membro"}
       </span>
     </div>
   );
@@ -245,7 +250,11 @@ export function AppShell({
         : status;
   const activeWorkspace = useMemo(() => (session ? getActiveWorkspace(session) : null), [session]);
   const addEnabled =
-    !isOffline && visibleStatus !== "permission" && status === "success" && !loggingOut;
+    !isOffline &&
+    visibleStatus !== "permission" &&
+    status === "success" &&
+    activeWorkspace?.role !== "viewer" &&
+    !loggingOut;
 
   async function handleLogout() {
     if (loggingOut) return;
@@ -457,7 +466,11 @@ export function AppShell({
             </div>
             <div className="hidden items-center gap-2 sm:flex">
               <Badge variant="outline">
-                {activeWorkspace?.role === "owner" ? "Proprietário" : "Membro"}
+                {activeWorkspace?.role === "owner"
+                  ? "Proprietário"
+                  : activeWorkspace?.role === "viewer"
+                    ? "Leitor"
+                    : "Membro"}
               </Badge>
               <span
                 className="flex size-9 items-center justify-center rounded-full bg-muted text-sm font-semibold"

@@ -1,4 +1,4 @@
-export type WorkspaceRole = "owner" | "member";
+export type WorkspaceRole = "owner" | "member" | "viewer";
 
 export type WorkspaceSummary = {
   id: string;
