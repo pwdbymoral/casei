@@ -2,6 +2,15 @@ ALTER TABLE "workspace_preference"
   ADD COLUMN "initial_balance_minor" bigint DEFAULT 0 NOT NULL,
   ADD COLUMN "onboarding_completed_at" timestamp with time zone;
 --> statement-breakpoint
+ALTER TABLE "audit_event"
+  ADD COLUMN "retention_until" timestamp with time zone;
+--> statement-breakpoint
+UPDATE "audit_event"
+   SET "retention_until" = "occurred_at" + interval '365 days'
+ WHERE "retention_until" IS NULL;
+--> statement-breakpoint
+CREATE INDEX "audit_event_retention_idx" ON "audit_event" USING btree ("retention_until");
+--> statement-breakpoint
 CREATE TABLE "workspace_invitation" (
   "id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
   "workspace_id" uuid NOT NULL,
@@ -18,6 +27,17 @@ CREATE TABLE "workspace_invitation" (
   "version" integer DEFAULT 0 NOT NULL,
   CONSTRAINT "workspace_invitation_role_check" CHECK ("role" in ('member', 'viewer')),
   CONSTRAINT "workspace_invitation_status_check" CHECK ("status" in ('pending', 'accepted', 'revoked', 'expired'))
+);
+--> statement-breakpoint
+CREATE TABLE "workspace_invitation_rate_limit" (
+  "workspace_id" uuid NOT NULL,
+  "actor_user_id" text NOT NULL,
+  "action" text NOT NULL,
+  "window_started_at" timestamp with time zone NOT NULL,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  CONSTRAINT "workspace_invitation_rate_limit_action_check" CHECK ("action" in ('create', 'resend')),
+  CONSTRAINT "workspace_invitation_rate_limit_attempts_check" CHECK ("attempts" >= 0),
+  CONSTRAINT "workspace_invitation_rate_limit_pk" PRIMARY KEY ("workspace_id", "actor_user_id", "action")
 );
 --> statement-breakpoint
 CREATE TABLE "workspace_deletion_recovery" (
@@ -38,12 +58,18 @@ CREATE TABLE "workspace_tombstone" (
   "status" text DEFAULT 'deactivated' NOT NULL,
   "deactivated_at" timestamp with time zone NOT NULL,
   "purge_at" timestamp with time zone NOT NULL,
+  "backup_expires_at" timestamp with time zone NOT NULL,
   "audit_purge_at" timestamp with time zone NOT NULL,
   CONSTRAINT "workspace_tombstone_status_check" CHECK ("status" = 'deactivated')
 );
 --> statement-breakpoint
 ALTER TABLE "workspace_invitation" ADD CONSTRAINT "workspace_invitation_workspace_id_fk"
   FOREIGN KEY ("workspace_id") REFERENCES "public"."workspace"("id") ON DELETE cascade;
+--> statement-breakpoint
+ALTER TABLE "workspace_invitation_rate_limit" ADD CONSTRAINT "workspace_invitation_rate_limit_workspace_id_fk"
+  FOREIGN KEY ("workspace_id") REFERENCES "public"."workspace"("id") ON DELETE cascade;
+ALTER TABLE "workspace_invitation_rate_limit" ADD CONSTRAINT "workspace_invitation_rate_limit_actor_user_id_fk"
+  FOREIGN KEY ("actor_user_id") REFERENCES "public"."user"("id") ON DELETE cascade;
 --> statement-breakpoint
 ALTER TABLE "workspace_invitation" ADD CONSTRAINT "workspace_invitation_invited_by_fk"
   FOREIGN KEY ("invited_by") REFERENCES "public"."user"("id") ON DELETE restrict;
@@ -61,6 +87,7 @@ CREATE UNIQUE INDEX "workspace_invitation_token_unique" ON "workspace_invitation
 CREATE INDEX "workspace_invitation_workspace_status_idx" ON "workspace_invitation" USING btree ("workspace_id", "status");
 CREATE INDEX "workspace_invitation_email_idx" ON "workspace_invitation" USING btree ("email", "status");
 CREATE UNIQUE INDEX "workspace_invitation_pending_email_unique" ON "workspace_invitation" USING btree ("workspace_id", "email") WHERE "status" = 'pending';
+CREATE INDEX "workspace_invitation_rate_limit_window_idx" ON "workspace_invitation_rate_limit" USING btree ("window_started_at");
 CREATE UNIQUE INDEX "workspace_deletion_recovery_active_unique" ON "workspace_deletion_recovery" USING btree ("workspace_id") WHERE "status" = 'active';
 CREATE INDEX "workspace_deletion_recovery_owner_idx" ON "workspace_deletion_recovery" USING btree ("owner_user_id", "status");
 CREATE UNIQUE INDEX "membership_active_owner_unique" ON "membership" USING btree ("workspace_id") WHERE "role" = 'owner' AND "status" = 'active';
@@ -201,13 +228,64 @@ AFTER INSERT OR UPDATE OR DELETE ON "membership"
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION "app"."check_workspace_owner_invariant"();
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."assert_workspace_restore_allowed"(candidate uuid) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM workspace_tombstone WHERE workspace_id = candidate) THEN
+    RAISE EXCEPTION 'workspace tombstone prevents restore' USING ERRCODE = '23514';
+  END IF;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."assert_workspace_backup_allowed"(candidate uuid, observed_at timestamptz) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM workspace_tombstone
+     WHERE workspace_id = candidate
+       AND observed_at >= backup_expires_at
+  ) THEN
+    RAISE EXCEPTION 'workspace backup retention expired' USING ERRCODE = '22023';
+  END IF;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."detach_workspace_audit"(candidate uuid, until_at timestamptz) RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
+AS $$
+DECLARE
+  detached integer;
+BEGIN
+  UPDATE audit_event
+     SET workspace_id = NULL,
+         retention_until = until_at
+   WHERE workspace_id = candidate;
+  GET DIAGNOSTICS detached = ROW_COUNT;
+  RETURN detached;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."purge_expired_audit_events"(cutoff timestamptz) RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
+AS $$
+DECLARE
+  removed integer;
+BEGIN
+  DELETE FROM audit_event
+   WHERE retention_until IS NOT NULL
+     AND retention_until <= cutoff;
+  GET DIAGNOSTICS removed = ROW_COUNT;
+  RETURN removed;
+END;
+$$;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION "app"."prevent_workspace_tombstone_rehydration"() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
 AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM workspace_tombstone WHERE workspace_id = NEW.id) THEN
-    RAISE EXCEPTION 'workspace tombstone prevents rehydration' USING ERRCODE = '23514';
-  END IF;
+  PERFORM app.assert_workspace_restore_allowed(NEW.id);
   RETURN NEW;
 END;
 $$;
@@ -215,3 +293,16 @@ $$;
 CREATE TRIGGER "workspace_tombstone_rehydration_guard"
 BEFORE INSERT ON "workspace"
 FOR EACH ROW EXECUTE FUNCTION "app"."prevent_workspace_tombstone_rehydration"();
+--> statement-breakpoint
+GRANT SELECT, INSERT, UPDATE, DELETE ON "workspace_invitation_rate_limit" TO casei_app;
+GRANT SELECT, INSERT, DELETE ON "workspace_tombstone" TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."assert_workspace_restore_allowed"(uuid) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."assert_workspace_backup_allowed"(uuid, timestamptz) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."detach_workspace_audit"(uuid, timestamptz) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."purge_expired_audit_events"(timestamptz) TO casei_app;
+--> statement-breakpoint
+ALTER TABLE "workspace_invitation_rate_limit" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "workspace_invitation_rate_limit" FORCE ROW LEVEL SECURITY;
+CREATE POLICY "workspace_invitation_rate_limit_scope" ON "workspace_invitation_rate_limit"
+  USING (workspace_id = "app"."current_workspace_id"())
+  WITH CHECK (workspace_id = "app"."current_workspace_id"());

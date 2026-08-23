@@ -183,7 +183,8 @@ if (!adminUrl) {
              'idempotency_key', 'job', 'membership', 'outbox_event',
              'workspace_preference', 'workspace', 'account', 'session',
              'user', 'verification', 'workspace_invitation',
-             'workspace_deletion_recovery', 'workspace_tombstone'
+             'workspace_deletion_recovery', 'workspace_tombstone',
+             'workspace_invitation_rate_limit'
            )
          ORDER BY tablename`,
       );

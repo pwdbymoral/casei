@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
-import { IdentityPermissionError, IdentityVersionConflictError } from "../src/identity-service.js";
+import {
+  IdentityPermissionError,
+  IdentityVersionConflictError,
+  InvitationRateLimitError,
+} from "../src/identity-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 
@@ -168,6 +172,26 @@ describe("AUTH-002..005 HTTP boundary", () => {
     ).resolves.toHaveProperty("status", 428);
   });
 
+  it("returns a durable invitation rate limit with Retry-After", async () => {
+    const app = createAppWithRole("owner", true, true);
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/invitations`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "invite-rate-limit-01",
+        },
+        body: JSON.stringify({ email: "new@example.com", role: "member" }),
+      },
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("37");
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "rate_limited" },
+    });
+  });
+
   it("retries deactivation through recovery entitlement without an active scope", async () => {
     const app = createAppWithRole("owner", false);
     const response = await app.request(
@@ -183,7 +207,11 @@ describe("AUTH-002..005 HTTP boundary", () => {
   });
 });
 
-function createAppWithRole(role: "owner" | "member" | "viewer", scopeAvailable = true) {
+function createAppWithRole(
+  role: "owner" | "member" | "viewer",
+  scopeAvailable = true,
+  rateLimited = false,
+) {
   const service = {
     resolveScope: async (_actor: unknown, requestedWorkspaceId: string) =>
       scopeAvailable && requestedWorkspaceId === workspaceId
@@ -222,6 +250,20 @@ function createAppWithRole(role: "owner" | "member" | "viewer", scopeAvailable =
             expiresAt: "2030-01-01T00:00:00.000Z",
           },
         ],
+      };
+    },
+    createInvitation: async () => {
+      if (rateLimited) throw new InvitationRateLimitError(37);
+      return {
+        replayed: false,
+        invitation: {
+          id: workspaceId,
+          workspaceId,
+          email: "new@example.com",
+          role: "member",
+          status: "pending",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+        },
       };
     },
     changeMemberRole: async () => {

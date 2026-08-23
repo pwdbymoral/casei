@@ -1,7 +1,12 @@
 DROP TRIGGER IF EXISTS "membership_owner_invariant" ON "membership";
 DROP FUNCTION IF EXISTS "app"."check_workspace_owner_invariant"();
 DROP TRIGGER IF EXISTS "workspace_tombstone_rehydration_guard" ON "workspace";
+DROP FUNCTION IF EXISTS "app"."purge_expired_audit_events"(timestamptz);
+DROP FUNCTION IF EXISTS "app"."detach_workspace_audit"(uuid, timestamptz);
+DROP FUNCTION IF EXISTS "app"."assert_workspace_backup_allowed"(uuid, timestamptz);
+DROP FUNCTION IF EXISTS "app"."assert_workspace_restore_allowed"(uuid);
 DROP FUNCTION IF EXISTS "app"."prevent_workspace_tombstone_rehydration"();
+DROP POLICY IF EXISTS "workspace_invitation_rate_limit_scope" ON "workspace_invitation_rate_limit";
 DROP POLICY IF EXISTS "workspace_deletion_recovery_scope" ON "workspace_deletion_recovery";
 DROP POLICY IF EXISTS "workspace_invitation_scope" ON "workspace_invitation";
 DROP POLICY IF EXISTS "job_scope" ON "job";
@@ -29,14 +34,20 @@ DROP INDEX IF EXISTS "workspace_invitation_email_idx";
 DROP INDEX IF EXISTS "workspace_invitation_pending_email_unique";
 DROP INDEX IF EXISTS "workspace_invitation_workspace_status_idx";
 DROP INDEX IF EXISTS "workspace_invitation_token_unique";
+DROP INDEX IF EXISTS "workspace_invitation_rate_limit_window_idx";
 ALTER TABLE "workspace_deletion_recovery" DROP CONSTRAINT IF EXISTS "workspace_deletion_recovery_owner_user_id_fk";
 ALTER TABLE "workspace_deletion_recovery" DROP CONSTRAINT IF EXISTS "workspace_deletion_recovery_workspace_id_fk";
 ALTER TABLE "workspace_invitation" DROP CONSTRAINT IF EXISTS "workspace_invitation_accepted_by_fk";
 ALTER TABLE "workspace_invitation" DROP CONSTRAINT IF EXISTS "workspace_invitation_invited_by_fk";
 ALTER TABLE "workspace_invitation" DROP CONSTRAINT IF EXISTS "workspace_invitation_workspace_id_fk";
+ALTER TABLE "workspace_invitation_rate_limit" DROP CONSTRAINT IF EXISTS "workspace_invitation_rate_limit_actor_user_id_fk";
+ALTER TABLE "workspace_invitation_rate_limit" DROP CONSTRAINT IF EXISTS "workspace_invitation_rate_limit_workspace_id_fk";
+DROP TABLE IF EXISTS "workspace_invitation_rate_limit";
 DROP TABLE IF EXISTS "workspace_tombstone";
 DROP TABLE IF EXISTS "workspace_deletion_recovery";
 DROP TABLE IF EXISTS "workspace_invitation";
 ALTER TABLE "workspace_preference"
   DROP COLUMN IF EXISTS "onboarding_completed_at",
   DROP COLUMN IF EXISTS "initial_balance_minor";
+DROP INDEX IF EXISTS "audit_event_retention_idx";
+ALTER TABLE "audit_event" DROP COLUMN IF EXISTS "retention_until";

@@ -23,8 +23,11 @@ import {
 } from "./auth-email.js";
 
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const INVITATION_RATE_WINDOW_MS = 10 * 60 * 1_000;
+const INVITATION_RATE_LIMIT = 5;
 const RECOVERY_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1_000;
+const BACKUP_RETENTION_MS = 35 * 24 * 60 * 60 * 1_000;
 
 export interface IdentityActor {
   userId: string;
@@ -118,6 +121,13 @@ export class IdentityRecentAuthError extends Error {
   readonly code = "recent_auth_required" as const;
   constructor() {
     super("Recent authentication is required for this action");
+  }
+}
+
+export class InvitationRateLimitError extends Error {
+  readonly code = "rate_limited" as const;
+  constructor(readonly retryAfterSeconds: number) {
+    super("O limite de convites foi atingido. Tente novamente mais tarde.");
   }
 }
 
@@ -425,6 +435,7 @@ export class IdentityService {
         key: idempotencyKey,
         request: { invitationId },
         execute: async () => {
+          await this.consumeInvitationRateLimit(client, scope, "resend");
           const old = await client.query<{
             email: string;
             role: "member" | "viewer";
@@ -441,7 +452,7 @@ export class IdentityService {
               WHERE workspace_id = $1 AND id = $2`,
             [scope.workspaceId, invitationId],
           );
-          return this.insertInvitation(client, scope, row.email, row.role);
+          return this.insertInvitation(client, scope, row.email, row.role, false);
         },
       }),
     );
@@ -785,7 +796,7 @@ export class IdentityService {
         correlationId: scope.correlationId,
         action: "workspace.deletion_requested",
         targetId: scope.workspaceId,
-        reason: parsed.reason,
+        reason: "deactivation_reason_provided",
       });
       return { recoveryUntil: until.toISOString(), version: row.version + 1 };
     });
@@ -952,14 +963,22 @@ export class IdentityService {
           if (!lease.rows[0]) throw new JobLeaseLostError();
         }
         await client.query(
-          `INSERT INTO workspace_tombstone (workspace_id, pseudonymous_owner_hash, deactivated_at, purge_at, audit_purge_at) VALUES ($1, $2, $3, $3, $4) ON CONFLICT (workspace_id) DO NOTHING`,
+          `INSERT INTO workspace_tombstone
+             (workspace_id, pseudonymous_owner_hash, deactivated_at, purge_at, backup_expires_at, audit_purge_at)
+           VALUES ($1, $2, $3, $3, $4, $5)
+           ON CONFLICT (workspace_id) DO NOTHING`,
           [
             workspaceId,
             createHash("sha256").update(row.owner_user_id).digest("hex"),
             at,
+            new Date(at.getTime() + BACKUP_RETENTION_MS),
             new Date(at.getTime() + AUDIT_RETENTION_MS),
           ],
         );
+        await client.query(`SELECT app.detach_workspace_audit($1, $2)::int`, [
+          workspaceId,
+          new Date(at.getTime() + AUDIT_RETENTION_MS),
+        ]);
         await client.query(
           `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL
              WHERE workspace_id = $1 AND ($2::uuid IS NULL OR id <> $2::uuid)`,
@@ -988,6 +1007,33 @@ export class IdentityService {
         );
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
+      },
+    );
+  }
+
+  /**
+   * Reaps lifecycle metadata only after the one-year cutoff. Both statements
+   * are cutoff-based and therefore safe to retry after a worker interruption.
+   */
+  async purgeExpiredTombstones(
+    at = this.now(),
+  ): Promise<{ tombstones: number; auditEvents: number }> {
+    return withUnitOfWork(
+      this.pool,
+      { applicationRole: this.applicationRole },
+      async ({ client }) => {
+        const audit = await client.query<{ count: number }>(
+          `SELECT app.purge_expired_audit_events($1)::int AS count`,
+          [at],
+        );
+        const tombstones = await client.query(
+          `DELETE FROM workspace_tombstone WHERE audit_purge_at <= $1`,
+          [at],
+        );
+        return {
+          tombstones: tombstones.rowCount ?? 0,
+          auditEvents: Number(audit.rows[0]?.count ?? 0),
+        };
       },
     );
   }
@@ -1021,7 +1067,9 @@ export class IdentityService {
     scope: IdentityScope,
     email: string,
     role: "member" | "viewer",
+    enforceRateLimit = true,
   ) {
+    if (enforceRateLimit) await this.consumeInvitationRateLimit(client, scope, "create");
     const existingUser = await client.query<{ id: string }>(
       `SELECT id FROM "user" WHERE lower(email) = $1`,
       [email],
@@ -1067,6 +1115,42 @@ export class IdentityService {
         inviteUrl: `${this.webOrigin}/invite/${encodeURIComponent(token)}`,
       } satisfies JsonObject,
     };
+  }
+
+  private async consumeInvitationRateLimit(
+    client: PoolClient,
+    scope: IdentityScope,
+    action: "create" | "resend",
+  ): Promise<void> {
+    const now = this.now();
+    const result = await client.query<{ attempts: number; window_started_at: Date }>(
+      `INSERT INTO workspace_invitation_rate_limit
+        (workspace_id, actor_user_id, action, window_started_at, attempts)
+       VALUES ($1, $2, $3, $4, 1)
+       ON CONFLICT (workspace_id, actor_user_id, action) DO UPDATE
+         SET attempts = CASE
+           WHEN workspace_invitation_rate_limit.window_started_at <= $4::timestamptz - interval '10 minutes'
+             THEN 1
+           ELSE workspace_invitation_rate_limit.attempts + 1
+         END,
+         window_started_at = CASE
+           WHEN workspace_invitation_rate_limit.window_started_at <= $4::timestamptz - interval '10 minutes'
+             THEN $4
+           ELSE workspace_invitation_rate_limit.window_started_at
+         END
+       RETURNING attempts, window_started_at`,
+      [scope.workspaceId, scope.actor.userId, action, now],
+    );
+    const row = result.rows[0];
+    if (!row || row.attempts <= INVITATION_RATE_LIMIT) return;
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil(
+        (new Date(row.window_started_at).getTime() + INVITATION_RATE_WINDOW_MS - now.getTime()) /
+          1_000,
+      ),
+    );
+    throw new InvitationRateLimitError(retryAfterSeconds);
   }
 
   private async enqueueInvitationEmail(
@@ -1277,8 +1361,9 @@ async function writeAudit(
   },
 ): Promise<void> {
   await client.query(
-    `INSERT INTO audit_event (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason)
-     VALUES ('identity', $1, $2, $3, 'workspace', $4, 'api', $5, 'success', $6)`,
+    `INSERT INTO audit_event
+      (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason, retention_until)
+     VALUES ('identity', $1, $2, $3, 'workspace', $4, 'api', $5, 'success', $6, now() + interval '365 days')`,
     [
       input.action,
       input.actorId,

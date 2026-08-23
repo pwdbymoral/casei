@@ -165,6 +165,17 @@ function normalizeError(error: unknown): {
       message: "Confirme sua identidade novamente para continuar.",
     };
   }
+  if (hasCode(error, "rate_limited")) {
+    return {
+      status: 429,
+      code: "rate_limited",
+      message: error instanceof Error ? error.message : DEFAULT_MESSAGES.rate_limited,
+      retryAfterSeconds:
+        typeof error === "object" && error !== null && "retryAfterSeconds" in error
+          ? Number((error as { retryAfterSeconds?: unknown }).retryAfterSeconds)
+          : undefined,
+    };
+  }
   if (hasCode(error, "version_conflict")) {
     return {
       status: 412,

@@ -8,6 +8,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -127,9 +128,34 @@ export const workspaceTombstone = pgTable(
     status: text("status").notNull().default("deactivated"),
     deactivatedAt: instant("deactivated_at").notNull(),
     purgeAt: instant("purge_at").notNull(),
+    backupExpiresAt: instant("backup_expires_at").notNull(),
     auditPurgeAt: instant("audit_purge_at").notNull(),
   },
   (table) => [check("workspace_tombstone_status_check", sql`${table.status} = 'deactivated'`)],
+);
+
+export const workspaceInvitationRateLimit = pgTable(
+  "workspace_invitation_rate_limit",
+  {
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    windowStartedAt: instant("window_started_at").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.actorUserId, table.action] }),
+    index("workspace_invitation_rate_limit_window_idx").on(table.windowStartedAt),
+    check(
+      "workspace_invitation_rate_limit_action_check",
+      sql`${table.action} in ('create', 'resend')`,
+    ),
+    check("workspace_invitation_rate_limit_attempts_check", sql`${table.attempts} >= 0`),
+  ],
 );
 
 export const membership = pgTable(
@@ -178,10 +204,12 @@ export const auditEvent = pgTable(
     correlationId: varchar("correlation_id", { length: 26 }).notNull(),
     result: text("result").notNull(),
     reason: text("reason"),
+    retentionUntil: instant("retention_until"),
   },
   (table) => [
     index("audit_event_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),
     index("audit_event_actor_occurred_idx").on(table.actorId, table.occurredAt),
+    index("audit_event_retention_idx").on(table.retentionUntil),
   ],
 );
 

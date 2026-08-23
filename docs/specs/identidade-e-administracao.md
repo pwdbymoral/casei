@@ -44,7 +44,7 @@ Papéis do MVP:
 - Somente o owner pode iniciar a desativação, com autenticação recente, confirmação explícita do nome do espaço e motivo auditado.
 - A operação é idempotente: bloqueia novas mutações, revoga as capacidades/memberships domésticas de membros, cancela ou interrompe jobs pendentes e preserva a trilha append-only durante a retenção definida nesta spec. Ela não revoga a sessão global de identidade nem o acesso da mesma pessoa a outros espaços.
 - O estado `deletion_pending` é visível em rota de recuperação ao owner por uma entitlement `workspace_deletion_recovery` vinculada ao espaço; essa entitlement permite somente visualizar estado e cancelar a desativação, não ler dados domésticos. A entitlement não depende de membership operacional e expira com a janela de recuperação.
-- Política concreta do MVP: a janela de recuperação é de 30 dias corridos; exports, downloads, novos convites e jobs são bloqueados imediatamente; no vencimento, o job de purge remove dados domésticos, memberships, objetos e exports e grava um tombstone `deactivated` sem conteúdo. Backups podem conter o espaço por no máximo 35 dias e, ao restaurar, tombstones de exclusão são reaplicados antes de servir dados. Auditoria e o tombstone conservam somente metadados pseudonimizados da ação por 365 dias, sem conteúdo financeiro/produtos.
+- Política concreta do MVP: a janela de recuperação é de 30 dias corridos; exports, downloads, novos convites e jobs são bloqueados imediatamente; no vencimento, o job de purge remove dados domésticos, memberships, objetos e exports e grava um tombstone `deactivated` sem conteúdo. O tombstone registra `backup_expires_at` (35 dias corridos) como limite verificável para retenção de snapshots. O procedimento de restore deve chamar os guards `app.assert_workspace_backup_allowed` e `app.assert_workspace_restore_allowed` para cada espaço antes de servir dados e reaplicar tombstones antes de abrir o tráfego; não se pode reidratar um espaço tombstonado. Auditoria e o tombstone conservam somente metadados pseudonimizados da ação por 365 dias, sem conteúdo financeiro/produtos; o worker de retenção apaga os eventos detached (`retention_until`) e o tombstone no cutoff.
 - Após o purge, a entitlement expira e não há recuperação. O tombstone `deactivated` permanece somente para impedir reidratação por restore e para auditoria até o 365º dia; então é purgado com os demais metadados. Não há exclusão física parcial nem acesso de membro após a confirmação.
 
 ## Perfil e preferências
@@ -87,6 +87,7 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - Toda consulta de domínio filtra por membership válida e espaço; testes tentam IDs válidos de outro espaço.
 - Respostas de recurso inexistente e não autorizado não permitem enumeração.
 - Rate limiting protege login, recuperação, convite, import e endpoints administrativos.
+- Criação e reenvio de convite usam buckets transacionais duráveis por espaço, owner e ação: no máximo 5 tentativas em 10 minutos. Replays da mesma chave de idempotência não consomem novo bucket; excedentes retornam `429 rate_limited` com `Retry-After` calculado pelo servidor.
 - O rate limit de identidade usa o IP resolvido por `x-forwarded-for` somente quando os CIDRs dos
   proxies reversos estão explicitamente configurados em `CASEI_TRUSTED_PROXIES` (e a origem não é
   alcançável diretamente pelos clientes). Sem proxy confiável configurado, headers de IP enviados
@@ -109,6 +110,6 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - [ ] Convite expirado, revogado, reenviado e aceito concorrentemente permanece consistente.
 - [ ] Owner transfere propriedade antes de sair; último owner/admin não pode ser removido.
 - [ ] Owner desativa/exclui o espaço com confirmação, idempotência, bloqueio de novas mutações, sessão de outros espaços preservada, recuperação por entitlement até 30 dias e retenção/purga auditáveis.
-- [ ] Relógio controlado comprova cutoff de 30 dias, purge retryable de objetos/exports no dia 30, expiração de backups no dia 35 e reaplicação de tombstone em restore.
+- [x] Relógio controlado comprova cutoff de 30 dias, purge retryable de objetos/exports no dia 30, expiração de backups no dia 35 e reaplicação de tombstone em restore; a integração também exerce o reaper de tombstones/auditoria no dia 365.
 - [ ] Console administrativo elimina operações rotineiras via terminal e não expõe conteúdo do espaço.
 - [ ] Suspensão, revogação, promoção e jobs administrativos exigem motivo, proteção reforçada e auditoria.

@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { describe, expect, it } from "vitest";
-import { IdentityService } from "../src/identity-service.js";
+import { IdentityService, InvitationRateLimitError } from "../src/identity-service.js";
+import { runWorkspaceWorkerOnce } from "../src/workspace-worker.js";
 
 const adminUrl = process.env.DATABASE_URL_TEST;
 const integrationIt = adminUrl ? it : it.skip;
@@ -121,6 +122,27 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         ]),
       ).resolves.toMatchObject({ rows: [{ status: "expired" }] });
       clock.now = new Date("2030-01-01T00:00:00.000Z");
+      for (let index = 0; index < 3; index += 1) {
+        await service.createInvitation(
+          scope,
+          { email: `rate-${index}-${suffix}@example.test`, role: "viewer" },
+          `auth005-rate-key-${index}`,
+        );
+      }
+      await expect(
+        service.createInvitation(
+          scope,
+          { email: `rate-blocked-${suffix}@example.test`, role: "viewer" },
+          "auth005-rate-key-blocked",
+        ),
+      ).rejects.toBeInstanceOf(InvitationRateLimitError);
+      await expect(
+        pool.query<{ attempts: number }>(
+          `SELECT attempts FROM workspace_invitation_rate_limit
+            WHERE workspace_id = $1 AND actor_user_id = $2 AND action = 'create'`,
+          [workspaceId, ownerId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ attempts: 6 }] });
 
       const onboardingResults = await Promise.all([
         service.createOnboarding(
@@ -261,11 +283,87 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         pool.query(`SELECT id FROM workspace WHERE id = $1`, [workspaceId]),
       ).resolves.toMatchObject({ rows: [] });
       await expect(
-        pool.query(`SELECT status FROM workspace_tombstone WHERE workspace_id = $1`, [workspaceId]),
-      ).resolves.toMatchObject({ rows: [{ status: "deactivated" }] });
+        pool.query<{
+          status: string;
+          deactivated_at: Date;
+          purge_at: Date;
+          backup_expires_at: Date;
+          audit_purge_at: Date;
+          pseudonymous_owner_hash: string;
+        }>(
+          `SELECT status, deactivated_at, purge_at, backup_expires_at, audit_purge_at,
+                  pseudonymous_owner_hash
+             FROM workspace_tombstone WHERE workspace_id = $1`,
+          [workspaceId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [
+          {
+            status: "deactivated",
+            deactivated_at: new Date("2030-01-31T00:00:00.000Z"),
+            purge_at: new Date("2030-01-31T00:00:00.000Z"),
+            backup_expires_at: new Date("2030-03-07T00:00:00.000Z"),
+            audit_purge_at: new Date("2031-01-31T00:00:00.000Z"),
+          },
+        ],
+      });
+      const tombstone = await pool.query<{
+        pseudonymous_owner_hash: string;
+      }>(`SELECT pseudonymous_owner_hash FROM workspace_tombstone WHERE workspace_id = $1`, [
+        workspaceId,
+      ]);
+      expect(tombstone.rows[0]?.pseudonymous_owner_hash).toMatch(/^[0-9a-f]{64}$/);
+      await expect(
+        pool.query(`SELECT app.assert_workspace_restore_allowed($1)`, [workspaceId]),
+      ).rejects.toBeTruthy();
+      await expect(
+        pool.query(`SELECT app.assert_workspace_backup_allowed($1, $2)`, [
+          workspaceId,
+          "2030-03-06T23:59:59.999Z",
+        ]),
+      ).resolves.toBeTruthy();
+      await expect(
+        pool.query(`SELECT app.assert_workspace_backup_allowed($1, $2)`, [
+          workspaceId,
+          "2030-03-07T00:00:00.000Z",
+        ]),
+      ).rejects.toBeTruthy();
       await expect(
         pool.query(`INSERT INTO workspace (id, name) VALUES ($1, 'rehydration')`, [workspaceId]),
       ).rejects.toBeTruthy();
+      const lifecycleAudit = await pool.query<{ reason: string; retention_until: Date }>(
+        `SELECT reason, retention_until
+           FROM audit_event
+          WHERE action = 'workspace.deletion_requested' AND target_id = $1`,
+        [workspaceId],
+      );
+      expect(lifecycleAudit.rows[0]?.reason).toBe("deactivation_reason_provided");
+      expect(lifecycleAudit.rows[0]?.retention_until).toEqual(new Date("2031-01-31T00:00:00.000Z"));
+      await expect(
+        service.purgeExpiredTombstones(new Date("2031-01-30T23:59:59.999Z")),
+      ).resolves.toMatchObject({ tombstones: 0 });
+      const previousWorkerUrl = process.env.DATABASE_URL_WORKER;
+      process.env.DATABASE_URL_WORKER = databaseUrl.toString();
+      try {
+        await expect(
+          runWorkspaceWorkerOnce(new Date("2031-01-31T00:00:00.000Z")),
+        ).resolves.toBeGreaterThan(0);
+      } finally {
+        if (previousWorkerUrl === undefined) delete process.env.DATABASE_URL_WORKER;
+        else process.env.DATABASE_URL_WORKER = previousWorkerUrl;
+      }
+      await expect(
+        pool.query(`SELECT workspace_id FROM workspace_tombstone WHERE workspace_id = $1`, [
+          workspaceId,
+        ]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(
+          `SELECT id FROM audit_event
+            WHERE action = 'workspace.deletion_requested' AND target_id = $1`,
+          [workspaceId],
+        ),
+      ).resolves.toMatchObject({ rows: [] });
     } finally {
       await pool?.end();
       await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);

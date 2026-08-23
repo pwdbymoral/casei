@@ -9,7 +9,7 @@ const pollMilliseconds = Number.parseInt(process.env.WORKSPACE_WORKER_POLL_MS ??
  * deploy-time worker role allowed to SET ROLE to casei_app; it is never the
  * public HTTP process and never receives an actor session.
  */
-export async function runWorkspaceWorkerOnce(): Promise<number> {
+export async function runWorkspaceWorkerOnce(at = new Date()): Promise<number> {
   const pool = getDatabasePool({
     connectionString: process.env.DATABASE_URL_WORKER ?? process.env.DATABASE_URL,
   });
@@ -28,9 +28,11 @@ export async function runWorkspaceWorkerOnce(): Promise<number> {
     );
     let processed = 0;
     for (const row of result.rows) {
-      const outcome = await worker.runOnce(row.workspace_id, new Date());
+      const outcome = await worker.runOnce(row.workspace_id, at);
       if (outcome.state !== "idle") processed += 1;
     }
+    const retired = await service.purgeExpiredTombstones(at);
+    processed += retired.tombstones + retired.auditEvents;
     return processed;
   } finally {
     await pool.end();
