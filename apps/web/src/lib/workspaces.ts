@@ -30,6 +30,7 @@ export type WorkspaceSession = {
 export interface WorkspaceAdapter {
   getSession(): Promise<WorkspaceSession>;
   switchWorkspace(workspaceId: string): Promise<WorkspaceSession>;
+  signOut?(): Promise<void>;
 }
 
 export type WorkspaceSessionErrorCode = "unauthenticated" | "permission_denied" | "offline";
@@ -51,6 +52,55 @@ export const unauthenticatedWorkspaceAdapter: WorkspaceAdapter = {
   },
   async switchWorkspace() {
     throw new WorkspaceSessionError("unauthenticated");
+  },
+};
+
+function apiOrigin(): string {
+  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
+}
+
+async function workspaceRequest(): Promise<WorkspaceSession> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiOrigin()}/v1/me/workspaces`, {
+      credentials: "include",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    throw new WorkspaceSessionError("offline", "Não foi possível conectar ao Casei.");
+  }
+  if (response.status === 401) throw new WorkspaceSessionError("unauthenticated");
+  if (response.status === 403) throw new WorkspaceSessionError("permission_denied");
+  if (!response.ok)
+    throw new WorkspaceSessionError("offline", "Não foi possível carregar seus espaços.");
+  const body = (await response.json()) as Omit<WorkspaceSession, "activeWorkspaceId">;
+  return withStoredWorkspace({ ...body, activeWorkspaceId: null });
+}
+
+/** Real browser adapter. It never fabricates a workspace when the API denies the session. */
+export const authenticatedWorkspaceAdapter: WorkspaceAdapter = {
+  getSession: workspaceRequest,
+  async switchWorkspace(workspaceId) {
+    const session = await workspaceRequest();
+    if (!session.workspaces.some((workspace) => workspace.id === workspaceId)) {
+      throw new WorkspaceSessionError(
+        "permission_denied",
+        "Este espaço não está disponível para você.",
+      );
+    }
+    persistWorkspaceId(workspaceId);
+    return { ...session, activeWorkspaceId: workspaceId };
+  },
+  async signOut() {
+    const response = await fetch(`${apiOrigin()}/api/auth/sign-out`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok && response.status !== 401) {
+      throw new Error("Não foi possível encerrar a sessão.");
+    }
   },
 };
 

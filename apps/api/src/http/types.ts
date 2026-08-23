@@ -4,6 +4,9 @@ import type { Context, Env } from "hono";
 export interface RequestActor {
   /** Better Auth's user ID is deliberately opaque at this boundary. */
   userId: string;
+  email?: string;
+  displayName?: string;
+  recentAuthentication?: boolean;
 }
 
 export interface WorkspaceScope {

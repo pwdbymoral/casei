@@ -68,6 +68,14 @@ O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`
 
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
 
+## AUTH-002..005
+
+`apps/api/test/identity-routes.test.ts` cobre o boundary de autenticação, a exigência de sessão e a
+chave de idempotência do onboarding. `apps/web/src/lib/workspaces.test.ts` cobre o adapter real,
+troca somente para espaços autorizados e conversão de sessão expirada em estado não autenticado.
+Os cenários que exigem RLS, locks de membership, trigger de owner, expiração de convite e purge
+devem rodar no PostgreSQL descartável do CI junto da migration `0003_identity_workspaces.sql`.
+
 ## Identidade
 
 Os testes de AUTH-001 executam o handler Better Auth 1.6.22 contra o adapter de memória e um

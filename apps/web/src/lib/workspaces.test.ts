@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  authenticatedWorkspaceAdapter,
   getActiveWorkspace,
   unauthenticatedPlatformAdminSessionPort,
   unauthenticatedWorkspaceAdapter,
@@ -22,6 +23,7 @@ const session: WorkspaceSession = {
 };
 
 describe("workspace shell boundary", () => {
+  afterEach(() => vi.restoreAllMocks());
   it("resolves only the active workspace from the session", () => {
     expect(getActiveWorkspace(session)?.name).toBe("Casa");
     expect(getActiveWorkspace({ ...session, activeWorkspaceId: "unknown" })).toBeNull();
@@ -32,5 +34,36 @@ describe("workspace shell boundary", () => {
       code: "unauthenticated",
     });
     await expect(unauthenticatedPlatformAdminSessionPort.getSession()).resolves.toBeNull();
+  });
+
+  it("loads and switches only among API-authorized workspaces", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...session, activeWorkspaceId: undefined }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    await expect(authenticatedWorkspaceAdapter.getSession()).resolves.toMatchObject({
+      activeWorkspaceId: session.activeWorkspaceId,
+    });
+    await expect(
+      authenticatedWorkspaceAdapter.switchWorkspace("not-authorized"),
+    ).rejects.toMatchObject({
+      code: "permission_denied",
+    });
+  });
+
+  it("maps an expired session to an unauthenticated state", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 401 })),
+    );
+    await expect(authenticatedWorkspaceAdapter.getSession()).rejects.toMatchObject({
+      code: "unauthenticated",
+    });
   });
 });

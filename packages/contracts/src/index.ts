@@ -24,6 +24,61 @@ export const workspaceMembershipSchema = z.object({
 
 export type WorkspaceMembership = z.infer<typeof workspaceMembershipSchema>;
 
+export const workspaceSummarySchema = z.object({
+  id: workspaceIdSchema,
+  name: z.string().min(1).max(200),
+  role: workspaceRoleSchema,
+  locale: z.literal("pt-BR"),
+  timeZone: z.string().min(1).max(64),
+  status: z.enum(["active", "deletion_pending", "deactivated"]).default("active"),
+});
+export type WorkspaceSummaryContract = z.infer<typeof workspaceSummarySchema>;
+
+export const workspaceSessionSchema = z.object({
+  user: z.object({
+    id: userIdSchema,
+    displayName: z.string().min(1).max(200),
+    email: z.string().email(),
+  }),
+  workspaces: z.array(workspaceSummarySchema),
+});
+export type WorkspaceSessionContract = z.infer<typeof workspaceSessionSchema>;
+
+export const onboardingSchema = z.object({
+  displayName: z.string().trim().min(2).max(200),
+  workspaceName: z.string().trim().min(2).max(200),
+  currency: z.literal("BRL"),
+  timeZone: z.string().trim().min(1).max(64),
+  initialBalanceMinor: z
+    .string()
+    .regex(/^(0|[1-9][0-9]*)$/, "saldo deve ser um inteiro não negativo")
+    .default("0"),
+  includeInitialBalance: z.boolean().default(false),
+});
+export type OnboardingInput = z.infer<typeof onboardingSchema>;
+
+export const invitationRoleSchema = z.enum(["member", "viewer"]);
+export const createInvitationSchema = z.object({
+  email: z.string().trim().email().max(320),
+  role: invitationRoleSchema,
+});
+export const invitationSchema = z.object({
+  id: workspaceIdSchema,
+  workspaceId: workspaceIdSchema,
+  email: z.string().email(),
+  role: invitationRoleSchema,
+  status: z.enum(["pending", "accepted", "revoked", "expired"]),
+  expiresAt: z.string().datetime({ offset: true }),
+  inviteUrl: z.string().url().optional(),
+});
+export type InvitationContract = z.infer<typeof invitationSchema>;
+
+export const updateMembershipRoleSchema = z.object({ role: invitationRoleSchema });
+export const deactivateWorkspaceSchema = z.object({
+  workspaceName: z.string().trim().min(2).max(200),
+  reason: z.string().trim().min(1).max(500),
+});
+
 /** Correlation IDs are uppercase ULIDs at the trusted HTTP boundary. */
 export const correlationIdSchema = z
   .string()

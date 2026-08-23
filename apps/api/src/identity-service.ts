@@ -1,0 +1,862 @@
+import { createHash, randomBytes } from "node:crypto";
+import {
+  createInvitationSchema,
+  deactivateWorkspaceSchema,
+  onboardingSchema,
+  updateMembershipRoleSchema,
+  type WorkspaceRole,
+} from "@casei/contracts";
+import {
+  executeIdempotent,
+  type JsonValue,
+  type Pool,
+  type PoolClient,
+  withUnitOfWork,
+} from "@casei/database";
+
+const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const RECOVERY_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1_000;
+
+export interface IdentityActor {
+  userId: string;
+  email?: string;
+  displayName?: string;
+  recentAuthentication?: boolean;
+}
+
+export interface IdentityScope {
+  actor: IdentityActor;
+  workspaceId: string;
+  role: WorkspaceRole;
+  correlationId: string;
+}
+
+export interface IdentityServiceOptions {
+  applicationRole?: string;
+  webOrigin?: string;
+  now?: () => Date;
+}
+
+export interface WorkspaceSummaryView {
+  id: string;
+  name: string;
+  role: WorkspaceRole;
+  locale: "pt-BR";
+  timeZone: string;
+  status: "active" | "deletion_pending" | "deactivated";
+}
+
+export interface WorkspaceSessionView {
+  user: { id: string; displayName: string; email: string };
+  workspaces: WorkspaceSummaryView[];
+}
+
+export interface InvitationView {
+  id: string;
+  workspaceId: string;
+  email: string;
+  role: "member" | "viewer";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expiresAt: string;
+  inviteUrl?: string;
+}
+
+export class IdentityNotFoundError extends Error {
+  readonly code = "not_found" as const;
+  constructor() {
+    super("Workspace or membership not found");
+  }
+}
+
+export class IdentityPermissionError extends Error {
+  readonly code = "permission_denied" as const;
+  constructor() {
+    super("The actor is not allowed to perform this action");
+  }
+}
+
+export class IdentityConflictError extends Error {
+  readonly code = "conflict" as const;
+}
+
+export class IdentityRecentAuthError extends Error {
+  readonly code = "recent_auth_required" as const;
+  constructor() {
+    super("Recent authentication is required for this action");
+  }
+}
+
+type JsonObject = { [key: string]: JsonValue };
+
+export class IdentityService {
+  private readonly applicationRole: string;
+  private readonly webOrigin: string;
+  private readonly now: () => Date;
+
+  constructor(
+    private readonly pool: Pool,
+    options: IdentityServiceOptions = {},
+  ) {
+    this.applicationRole = options.applicationRole ?? "casei_app";
+    this.webOrigin = (
+      options.webOrigin ??
+      process.env.CASEI_WEB_ORIGIN ??
+      "http://localhost:3000"
+    ).replace(/\/$/, "");
+    this.now = options.now ?? (() => new Date());
+  }
+
+  async getSession(actor: IdentityActor): Promise<WorkspaceSessionView> {
+    if (!actor.email) throw new IdentityNotFoundError();
+    return withUnitOfWork(
+      this.pool,
+      {
+        actorId: actor.userId,
+        actorEmail: normalizeEmail(actor.email),
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const user = await client.query<{ name: string; email: string }>(
+          `SELECT name, email FROM "user" WHERE id = $1`,
+          [actor.userId],
+        );
+        const userRow = user.rows[0];
+        if (!userRow) throw new IdentityNotFoundError();
+        const memberships = await client.query<WorkspaceSummaryRow>(
+          `SELECT w.id, w.name, w.status, m.role, p.timezone
+             FROM membership m
+             JOIN workspace w ON w.id = m.workspace_id
+             JOIN workspace_preference p ON p.workspace_id = w.id
+            WHERE m.user_id = $1 AND m.status = 'active' AND w.status = 'active'
+            ORDER BY w.created_at ASC, w.id ASC`,
+          [actor.userId],
+        );
+        return {
+          user: {
+            id: actor.userId,
+            displayName: userRow.name,
+            email: userRow.email,
+          },
+          workspaces: memberships.rows.map(toWorkspaceSummary),
+        };
+      },
+    );
+  }
+
+  async resolveScope(
+    actor: IdentityActor,
+    workspaceId: string,
+    correlationId = "",
+  ): Promise<IdentityScope | null> {
+    return withUnitOfWork(
+      this.pool,
+      {
+        workspaceId,
+        actorId: actor.userId,
+        actorEmail: actor.email ? normalizeEmail(actor.email) : undefined,
+        correlationId,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const result = await client.query<{ role: WorkspaceRole }>(
+          `SELECT m.role
+             FROM membership m
+             JOIN workspace w ON w.id = m.workspace_id
+            WHERE m.workspace_id = $1 AND m.user_id = $2
+              AND m.status = 'active' AND w.status = 'active'`,
+          [workspaceId, actor.userId],
+        );
+        const role = result.rows[0]?.role;
+        return role ? { actor, workspaceId, role, correlationId } : null;
+      },
+    );
+  }
+
+  async createOnboarding(
+    actor: IdentityActor,
+    input: unknown,
+    idempotencyKey: string,
+    correlationId: string,
+  ): Promise<{ replayed: boolean; workspace: WorkspaceSummaryView }> {
+    const parsed = onboardingSchema.parse(input);
+    if (!isValidTimeZone(parsed.timeZone)) {
+      throw new IdentityConflictError("O fuso horário informado não é válido.");
+    }
+    const initialBalanceMinor = parsed.includeInitialBalance
+      ? BigInt(parsed.initialBalanceMinor)
+      : 0n;
+    const result = await withUnitOfWork(
+      this.pool,
+      {
+        actorId: actor.userId,
+        actorEmail: actor.email ? normalizeEmail(actor.email) : undefined,
+        correlationId,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) =>
+        executeIdempotent(client, {
+          scope: `${actor.userId}:global:POST:/onboarding`,
+          key: idempotencyKey,
+          request: parsed,
+          execute: async () => {
+            const existing = await client.query<WorkspaceSummaryRow>(
+              `SELECT w.id, w.name, w.status, m.role, p.timezone
+                 FROM membership m
+                 JOIN workspace w ON w.id = m.workspace_id
+                 JOIN workspace_preference p ON p.workspace_id = w.id
+                WHERE m.user_id = $1 AND m.role = 'owner' AND m.status = 'active'
+                ORDER BY w.created_at ASC, w.id ASC
+                LIMIT 1`,
+              [actor.userId],
+            );
+            if (existing.rows[0]) {
+              return {
+                statusCode: 200,
+                response: toWorkspaceSummary(existing.rows[0]) as unknown as JsonObject,
+              };
+            }
+
+            const workspace = await client.query<{ id: string }>(`SELECT uuidv7() AS id`);
+            const workspaceId = workspace.rows[0]?.id;
+            if (!workspaceId) throw new Error("Could not allocate workspace ID");
+            await setWorkspaceContext(client, workspaceId, actor);
+            const inserted = await client.query<WorkspaceSummaryRow>(
+              `INSERT INTO workspace (id, name) VALUES ($1, $2)
+               RETURNING id, name, status`,
+              [workspaceId, parsed.workspaceName],
+            );
+            await client.query(
+              `INSERT INTO workspace_preference
+                 (workspace_id, currency_code, timezone, initial_balance_minor, onboarding_completed_at)
+               VALUES ($1, $2, $3, $4, now())`,
+              [workspaceId, parsed.currency, parsed.timeZone, initialBalanceMinor],
+            );
+            await client.query(
+              `INSERT INTO membership (workspace_id, user_id, role, status)
+               VALUES ($1, $2, 'owner', 'active')`,
+              [workspaceId, actor.userId],
+            );
+            await client.query(`UPDATE "user" SET name = $2, updated_at = now() WHERE id = $1`, [
+              actor.userId,
+              parsed.displayName,
+            ]);
+            await writeAudit(client, {
+              actorId: actor.userId,
+              workspaceId,
+              correlationId,
+              action: "workspace.onboarded",
+              targetId: workspaceId,
+              reason: "onboarding",
+            });
+            const row = inserted.rows[0];
+            if (!row) throw new Error("Workspace insert did not return a row");
+            return {
+              statusCode: 201,
+              response: {
+                id: row.id,
+                name: row.name,
+                status: row.status,
+                role: "owner",
+                timezone: parsed.timeZone,
+              },
+            };
+          },
+        }),
+    );
+    return {
+      replayed: result.replayed,
+      workspace: {
+        id: String(result.response.id),
+        name: String(result.response.name),
+        status: String(result.response.status) as WorkspaceSummaryView["status"],
+        role: "owner",
+        locale: "pt-BR",
+        timeZone: String(result.response.timezone),
+      },
+    };
+  }
+
+  async createInvitation(
+    scope: IdentityScope,
+    input: unknown,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; invitation: InvitationView }> {
+    const parsed = createInvitationSchema.parse(input);
+    assertRole(scope, "owner");
+    const email = normalizeEmail(parsed.email);
+    const result = await this.withScoped(scope, async (client) =>
+      executeIdempotent(client, {
+        scope: `${scope.actor.userId}:${scope.workspaceId}:POST:/invitations`,
+        key: idempotencyKey,
+        request: parsed,
+        execute: () => this.insertInvitation(client, scope, email, parsed.role),
+      }),
+    );
+    return { replayed: result.replayed, invitation: result.response as unknown as InvitationView };
+  }
+
+  async resendInvitation(
+    scope: IdentityScope,
+    invitationId: string,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; invitation: InvitationView }> {
+    assertRole(scope, "owner");
+    const result = await this.withScoped(scope, async (client) =>
+      executeIdempotent(client, {
+        scope: `${scope.actor.userId}:${scope.workspaceId}:POST:/invitations/${invitationId}/resend`,
+        key: idempotencyKey,
+        request: { invitationId },
+        execute: async () => {
+          const old = await client.query<{
+            email: string;
+            role: "member" | "viewer";
+            status: string;
+          }>(
+            `SELECT email, role, status FROM workspace_invitation
+              WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            [scope.workspaceId, invitationId],
+          );
+          const row = old.rows[0];
+          if (row?.status !== "pending") throw new IdentityNotFoundError();
+          await client.query(
+            `UPDATE workspace_invitation SET status = 'revoked', updated_at = now(), version = version + 1
+              WHERE workspace_id = $1 AND id = $2`,
+            [scope.workspaceId, invitationId],
+          );
+          return this.insertInvitation(client, scope, row.email, row.role);
+        },
+      }),
+    );
+    return { replayed: result.replayed, invitation: result.response as unknown as InvitationView };
+  }
+
+  async acceptInvitation(
+    actor: IdentityActor,
+    token: string,
+    correlationId: string,
+  ): Promise<WorkspaceSummaryView> {
+    const parts = token.split(".");
+    const workspaceId = parts[0];
+    const invitationId = parts[1];
+    const actorEmail = actor.email;
+    if (!workspaceId || !invitationId || !actorEmail || !/^[0-9a-f-]{36}$/.test(workspaceId)) {
+      throw new IdentityNotFoundError();
+    }
+    return withUnitOfWork(
+      this.pool,
+      {
+        workspaceId,
+        actorId: actor.userId,
+        actorEmail: normalizeEmail(actorEmail),
+        correlationId,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const result = await client.query<
+          InvitationRow & { workspace_name: string; workspace_status: string; timezone: string }
+        >(
+          `SELECT i.*, w.name AS workspace_name, w.status AS workspace_status, p.timezone
+             FROM workspace_invitation i
+             JOIN workspace w ON w.id = i.workspace_id
+             JOIN workspace_preference p ON p.workspace_id = w.id
+            WHERE i.workspace_id = $1 AND i.id = $2
+            FOR UPDATE`,
+          [workspaceId, invitationId],
+        );
+        const invite = result.rows[0];
+        if (!invite) throw new IdentityNotFoundError();
+        if (invite.status !== "pending") {
+          if (invite.status === "accepted" && invite.accepted_by === actor.userId) {
+            return toWorkspaceSummary({
+              id: workspaceId,
+              name: invite.workspace_name,
+              status: invite.workspace_status,
+              role: invite.role,
+              timezone: invite.timezone,
+            });
+          }
+          throw new IdentityNotFoundError();
+        }
+        if (new Date(invite.expires_at).getTime() <= this.now().getTime()) {
+          await client.query(
+            `UPDATE workspace_invitation SET status = 'expired', updated_at = now() WHERE id = $1`,
+            [invitationId],
+          );
+          throw new IdentityNotFoundError();
+        }
+        const expectedHash = hashToken(token);
+        if (invite.token_hash !== expectedHash || invite.email !== normalizeEmail(actorEmail)) {
+          throw new IdentityNotFoundError();
+        }
+        if (invite.workspace_status !== "active")
+          throw new IdentityConflictError("O espaço não está disponível.");
+        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
+          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+          [workspaceId, actor.userId],
+        );
+        if (current.rows[0]?.status === "active") {
+          if (current.rows[0].role !== invite.role) {
+            await client.query(
+              `UPDATE membership SET role = $3, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+              [workspaceId, actor.userId, invite.role],
+            );
+          }
+        } else if (current.rows[0]) {
+          await client.query(
+            `UPDATE membership SET role = $3, status = 'active', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+            [workspaceId, actor.userId, invite.role],
+          );
+        } else {
+          await client.query(
+            `INSERT INTO membership (workspace_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`,
+            [workspaceId, actor.userId, invite.role],
+          );
+        }
+        await client.query(
+          `UPDATE workspace_invitation SET status = 'accepted', accepted_by = $3, accepted_at = now(), updated_at = now(), version = version + 1 WHERE workspace_id = $1 AND id = $2`,
+          [workspaceId, invitationId, actor.userId],
+        );
+        await writeAudit(client, {
+          actorId: actor.userId,
+          workspaceId,
+          correlationId,
+          action: "workspace.invitation_accepted",
+          targetId: invitationId,
+        });
+        return toWorkspaceSummary({
+          id: workspaceId,
+          name: invite.workspace_name,
+          status: invite.workspace_status,
+          role: invite.role,
+          timezone: invite.timezone,
+        });
+      },
+    );
+  }
+
+  async removeMember(scope: IdentityScope, userId: string): Promise<void> {
+    assertRole(scope, "owner");
+    await this.withScoped(scope, async (client) => {
+      const result = await client.query<{ role: WorkspaceRole; status: string }>(
+        `SELECT role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+        [scope.workspaceId, userId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new IdentityNotFoundError();
+      if (row.role === "owner")
+        throw new IdentityConflictError("Transfira a propriedade antes de remover o owner.");
+      if (row.status === "revoked") return;
+      await client.query(
+        `UPDATE membership SET status = 'revoked', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+        [scope.workspaceId, userId],
+      );
+      await writeAudit(client, {
+        actorId: scope.actor.userId,
+        workspaceId: scope.workspaceId,
+        correlationId: scope.correlationId,
+        action: "membership.revoked",
+        targetId: userId,
+      });
+    });
+  }
+
+  async changeMemberRole(
+    scope: IdentityScope,
+    userId: string,
+    input: unknown,
+  ): Promise<WorkspaceRole> {
+    assertRole(scope, "owner");
+    const { role } = updateMembershipRoleSchema.parse(input);
+    return this.withScoped(scope, async (client) => {
+      const result = await client.query<{ role: WorkspaceRole; status: string }>(
+        `SELECT role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+        [scope.workspaceId, userId],
+      );
+      const row = result.rows[0];
+      if (row?.status !== "active") throw new IdentityNotFoundError();
+      if (row.role === "owner")
+        throw new IdentityConflictError("Use a transferência de propriedade para alterar o owner.");
+      await client.query(
+        `UPDATE membership SET role = $3, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+        [scope.workspaceId, userId, role],
+      );
+      await writeAudit(client, {
+        actorId: scope.actor.userId,
+        workspaceId: scope.workspaceId,
+        correlationId: scope.correlationId,
+        action: "membership.role_changed",
+        targetId: userId,
+        reason: role,
+      });
+      return role;
+    });
+  }
+
+  async transferOwnership(scope: IdentityScope, userId: string): Promise<void> {
+    assertRole(scope, "owner");
+    if (userId === scope.actor.userId) return;
+    await this.withScoped(scope, async (client) => {
+      const target = await client.query<{ role: WorkspaceRole; status: string }>(
+        `SELECT role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+        [scope.workspaceId, userId],
+      );
+      if (target.rows[0]?.status !== "active") throw new IdentityNotFoundError();
+      await client.query(
+        `UPDATE membership SET role = 'member', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+        [scope.workspaceId, scope.actor.userId],
+      );
+      await client.query(
+        `UPDATE membership SET role = 'owner', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+        [scope.workspaceId, userId],
+      );
+      await writeAudit(client, {
+        actorId: scope.actor.userId,
+        workspaceId: scope.workspaceId,
+        correlationId: scope.correlationId,
+        action: "membership.ownership_transferred",
+        targetId: userId,
+      });
+    });
+  }
+
+  async deactivateWorkspace(
+    scope: IdentityScope,
+    input: unknown,
+  ): Promise<{ recoveryUntil: string }> {
+    assertRole(scope, "owner");
+    if (!scope.actor.recentAuthentication) throw new IdentityRecentAuthError();
+    const parsed = deactivateWorkspaceSchema.parse(input);
+    return this.withScoped(scope, async (client) => {
+      const workspace = await client.query<{ name: string; status: string }>(
+        `SELECT name, status FROM workspace WHERE id = $1 FOR UPDATE`,
+        [scope.workspaceId],
+      );
+      const row = workspace.rows[0];
+      if (!row) throw new IdentityNotFoundError();
+      if (row.status === "deletion_pending") {
+        const recovery = await client.query<{ expires_at: Date }>(
+          `SELECT expires_at FROM workspace_deletion_recovery WHERE workspace_id = $1 AND status = 'active'`,
+          [scope.workspaceId],
+        );
+        if (recovery.rows[0])
+          return { recoveryUntil: new Date(recovery.rows[0].expires_at).toISOString() };
+      }
+      if (row.status !== "active") throw new IdentityConflictError("O espaço já foi desativado.");
+      if (row.name !== parsed.workspaceName)
+        throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
+      const until = new Date(this.now().getTime() + RECOVERY_TTL_MS);
+      await client.query(
+        `UPDATE workspace SET status = 'deletion_pending', updated_at = now(), version = version + 1 WHERE id = $1`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `UPDATE membership SET status = CASE WHEN role = 'owner' THEN 'recovery_only' ELSE 'revoked' END, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND status = 'active'`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `UPDATE workspace_invitation SET status = 'revoked', updated_at = now(), version = version + 1 WHERE workspace_id = $1 AND status = 'pending'`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL, updated_at = now(), last_error = 'workspace_deletion_pending' WHERE workspace_id = $1 AND state IN ('pending', 'running', 'failed')`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1 AND status = 'pending'`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `INSERT INTO workspace_deletion_recovery (workspace_id, owner_user_id, expires_at) VALUES ($1, $2, $3) ON CONFLICT (workspace_id) WHERE status = 'active' DO NOTHING`,
+        [scope.workspaceId, scope.actor.userId, until],
+      );
+      await writeAudit(client, {
+        actorId: scope.actor.userId,
+        workspaceId: scope.workspaceId,
+        correlationId: scope.correlationId,
+        action: "workspace.deletion_requested",
+        targetId: scope.workspaceId,
+        reason: parsed.reason,
+      });
+      return { recoveryUntil: until.toISOString() };
+    });
+  }
+
+  async getRecovery(
+    actor: IdentityActor,
+    workspaceId: string,
+  ): Promise<{ status: string; recoveryUntil: string } | null> {
+    return withUnitOfWork(
+      this.pool,
+      { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole },
+      async ({ client }) => {
+        const result = await client.query<{ status: string; expires_at: Date }>(
+          `SELECT r.status, r.expires_at FROM workspace_deletion_recovery r JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1 AND r.owner_user_id = $2 AND r.status = 'active'`,
+          [workspaceId, actor.userId],
+        );
+        const row = result.rows[0];
+        if (!row) return null;
+        if (new Date(row.expires_at).getTime() <= this.now().getTime()) {
+          await client.query(
+            `UPDATE workspace_deletion_recovery SET status = 'expired' WHERE workspace_id = $1 AND status = 'active'`,
+            [workspaceId],
+          );
+          return null;
+        }
+        return { status: row.status, recoveryUntil: new Date(row.expires_at).toISOString() };
+      },
+    );
+  }
+
+  async cancelDeactivation(
+    actor: IdentityActor,
+    workspaceId: string,
+    correlationId: string,
+  ): Promise<void> {
+    await withUnitOfWork(
+      this.pool,
+      { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole, correlationId },
+      async ({ client }) => {
+        const result = await client.query<{ status: string; expires_at: Date }>(
+          `SELECT w.status, r.expires_at FROM workspace w JOIN workspace_deletion_recovery r ON r.workspace_id = w.id WHERE w.id = $1 AND r.owner_user_id = $2 AND r.status = 'active' FOR UPDATE`,
+          [workspaceId, actor.userId],
+        );
+        const row = result.rows[0];
+        if (
+          row?.status !== "deletion_pending" ||
+          new Date(row.expires_at).getTime() <= this.now().getTime()
+        )
+          throw new IdentityNotFoundError();
+        await client.query(
+          `UPDATE workspace SET status = 'active', updated_at = now(), version = version + 1 WHERE id = $1`,
+          [workspaceId],
+        );
+        await client.query(
+          `UPDATE membership SET status = 'active', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2 AND role = 'owner' AND status = 'recovery_only'`,
+          [workspaceId, actor.userId],
+        );
+        await client.query(
+          `UPDATE workspace_deletion_recovery SET status = 'canceled', canceled_at = now() WHERE workspace_id = $1 AND status = 'active'`,
+          [workspaceId],
+        );
+        await writeAudit(client, {
+          actorId: actor.userId,
+          workspaceId,
+          correlationId,
+          action: "workspace.deletion_canceled",
+          targetId: workspaceId,
+        });
+      },
+    );
+  }
+
+  /** Called by the scheduled purge job after it has selected a due workspace. */
+  async purgeWorkspace(
+    workspaceId: string,
+    correlationId: string,
+    at = this.now(),
+  ): Promise<boolean> {
+    return withUnitOfWork(
+      this.pool,
+      { workspaceId, correlationId, applicationRole: this.applicationRole },
+      async ({ client }) => {
+        const result = await client.query<{ owner_user_id: string; expires_at: Date }>(
+          `SELECT owner_user_id, expires_at FROM workspace_deletion_recovery WHERE workspace_id = $1 AND status = 'active' FOR UPDATE`,
+          [workspaceId],
+        );
+        const row = result.rows[0];
+        if (!row || new Date(row.expires_at).getTime() > at.getTime()) return false;
+        await client.query(
+          `INSERT INTO workspace_tombstone (workspace_id, pseudonymous_owner_hash, deactivated_at, purge_at, audit_purge_at) VALUES ($1, $2, $3, $3, $4) ON CONFLICT (workspace_id) DO NOTHING`,
+          [
+            workspaceId,
+            createHash("sha256").update(row.owner_user_id).digest("hex"),
+            at,
+            new Date(at.getTime() + AUDIT_RETENTION_MS),
+          ],
+        );
+        await client.query(
+          `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL WHERE workspace_id = $1`,
+          [workspaceId],
+        );
+        await client.query(`UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1`, [
+          workspaceId,
+        ]);
+        await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
+        return true;
+      },
+    );
+  }
+
+  private async insertInvitation(
+    client: PoolClient,
+    scope: IdentityScope,
+    email: string,
+    role: "member" | "viewer",
+  ) {
+    const existingUser = await client.query<{ id: string }>(
+      `SELECT id FROM "user" WHERE lower(email) = $1`,
+      [email],
+    );
+    if (existingUser.rows[0]) {
+      const member = await client.query<{ status: string }>(
+        `SELECT status FROM membership WHERE workspace_id = $1 AND user_id = $2`,
+        [scope.workspaceId, existingUser.rows[0].id],
+      );
+      if (member.rows[0]?.status === "active")
+        throw new IdentityConflictError("Essa pessoa já faz parte do espaço.");
+    }
+    await client.query(
+      `UPDATE workspace_invitation SET status = 'revoked', updated_at = now(), version = version + 1 WHERE workspace_id = $1 AND email = $2 AND status = 'pending'`,
+      [scope.workspaceId, email],
+    );
+    const idResult = await client.query<{ id: string }>(`SELECT uuidv7() AS id`);
+    const id = idResult.rows[0]?.id;
+    if (!id) throw new Error("Could not allocate invitation ID");
+    const token = `${scope.workspaceId}.${id}.${randomBytes(24).toString("base64url")}`;
+    const expiresAt = new Date(this.now().getTime() + INVITATION_TTL_MS);
+    await client.query(
+      `INSERT INTO workspace_invitation (id, workspace_id, email, token_hash, role, invited_by, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [id, scope.workspaceId, email, hashToken(token), role, scope.actor.userId, expiresAt],
+    );
+    await writeAudit(client, {
+      actorId: scope.actor.userId,
+      workspaceId: scope.workspaceId,
+      correlationId: scope.correlationId,
+      action: "membership.invitation_created",
+      targetId: id,
+    });
+    return {
+      statusCode: 201,
+      response: {
+        id,
+        workspaceId: scope.workspaceId,
+        email,
+        role,
+        status: "pending",
+        expiresAt: expiresAt.toISOString(),
+        inviteUrl: `${this.webOrigin}/invite/${encodeURIComponent(token)}`,
+      } satisfies JsonObject,
+    };
+  }
+
+  private async withScoped<T>(
+    scope: IdentityScope,
+    callback: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    return withUnitOfWork(
+      this.pool,
+      {
+        workspaceId: scope.workspaceId,
+        actorId: scope.actor.userId,
+        actorEmail: scope.actor.email ? normalizeEmail(scope.actor.email) : undefined,
+        correlationId: scope.correlationId,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        await assertActiveMembership(client, scope);
+        return callback(client);
+      },
+    );
+  }
+}
+
+interface WorkspaceSummaryRow {
+  id: string;
+  name: string;
+  status: string;
+  role: WorkspaceRole;
+  timezone: string;
+}
+
+interface InvitationRow {
+  id: string;
+  workspace_id: string;
+  email: string;
+  token_hash: string;
+  role: "member" | "viewer";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expires_at: Date;
+  accepted_by: string | null;
+}
+
+function toWorkspaceSummary(row: WorkspaceSummaryRow): WorkspaceSummaryView {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role,
+    locale: "pt-BR",
+    timeZone: row.timezone,
+    status: row.status as WorkspaceSummaryView["status"],
+  };
+}
+
+async function assertActiveMembership(
+  client: PoolClient,
+  scope: IdentityScope,
+  lock = true,
+): Promise<void> {
+  const result = await client.query<{ role: WorkspaceRole }>(
+    `SELECT m.role FROM membership m JOIN workspace w ON w.id = m.workspace_id WHERE m.workspace_id = $1 AND m.user_id = $2 AND m.status = 'active' AND w.status = 'active'${lock ? " FOR UPDATE OF m" : ""}`,
+    [scope.workspaceId, scope.actor.userId],
+  );
+  if (!result.rows[0]) throw new IdentityNotFoundError();
+  if (result.rows[0].role !== scope.role) throw new IdentityPermissionError();
+}
+
+function assertRole(scope: IdentityScope, role: WorkspaceRole): void {
+  if (scope.role !== role) throw new IdentityPermissionError();
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function setWorkspaceContext(
+  client: PoolClient,
+  workspaceId: string,
+  actor: IdentityActor,
+): Promise<void> {
+  await client.query(
+    `SELECT set_config('app.workspace_id', $1, true), set_config('app.actor_id', $2, true), set_config('app.actor_email', $3, true)`,
+    [workspaceId, actor.userId, actor.email ? normalizeEmail(actor.email) : ""],
+  );
+}
+
+async function writeAudit(
+  client: PoolClient,
+  input: {
+    actorId: string;
+    workspaceId: string;
+    correlationId: string;
+    action: string;
+    targetId?: string;
+    reason?: string;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO audit_event (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason)
+     VALUES ('identity', $1, $2, $3, 'workspace', $4, 'api', $5, 'success', $6)`,
+    [
+      input.action,
+      input.actorId,
+      input.workspaceId,
+      input.targetId ?? input.workspaceId,
+      input.correlationId || "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      input.reason ?? null,
+    ],
+  );
+}

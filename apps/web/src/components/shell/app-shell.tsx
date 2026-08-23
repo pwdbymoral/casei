@@ -264,7 +264,8 @@ export function AppShell({
     setLoggingOut(true);
     setLogoutError(null);
     try {
-      await onLogout?.();
+      if (onLogout) await onLogout();
+      else await adapter.signOut?.();
       clearWorkspaceClientState();
       setSession(null);
       router.replace("/");

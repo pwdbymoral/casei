@@ -152,7 +152,37 @@ function normalizeError(error: unknown): {
     };
   }
 
+  if (hasCode(error, "permission_denied")) {
+    return { status: 403, code: "permission_denied", message: DEFAULT_MESSAGES.permission_denied };
+  }
+  if (hasCode(error, "not_found")) {
+    return { status: 404, code: "not_found", message: DEFAULT_MESSAGES.not_found };
+  }
+  if (hasCode(error, "recent_auth_required")) {
+    return {
+      status: 401,
+      code: "unauthenticated",
+      message: "Confirme sua identidade novamente para continuar.",
+    };
+  }
+  if (hasCode(error, "conflict")) {
+    return {
+      status: 409,
+      code: "validation_failed",
+      message: error instanceof Error ? error.message : DEFAULT_MESSAGES.validation_failed,
+    };
+  }
+
   return { status: 500, code: "internal_error", message: DEFAULT_MESSAGES.internal_error };
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }
 
 function normalizeRetryAfter(value: number | undefined): number {

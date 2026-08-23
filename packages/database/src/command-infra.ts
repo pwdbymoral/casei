@@ -14,6 +14,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export interface CommandScope {
   workspaceId?: string;
   actorId?: string;
+  actorEmail?: string;
   correlationId?: string;
   applicationRole?: string;
 }
@@ -59,8 +60,14 @@ async function setLocalContext(client: PoolClient, scope: CommandScope): Promise
     `SELECT
        set_config('app.workspace_id', $1, true),
        set_config('app.actor_id', $2, true),
-       set_config('app.correlation_id', $3, true)`,
-    [scope.workspaceId ?? "", scope.actorId ?? "", scope.correlationId ?? ""],
+       set_config('app.actor_email', $3, true),
+       set_config('app.correlation_id', $4, true)`,
+    [
+      scope.workspaceId ?? "",
+      scope.actorId ?? "",
+      scope.actorEmail ?? "",
+      scope.correlationId ?? "",
+    ],
   );
 }
 

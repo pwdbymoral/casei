@@ -47,9 +47,87 @@ export const workspacePreference = pgTable("workspace_preference", {
   currencyCode: varchar("currency_code", { length: 3 }).notNull(),
   timezone: text("timezone").notNull(),
   safetyMarginMinor: bigint("safety_margin_minor", { mode: "bigint" }).notNull().default(sql`0`),
+  initialBalanceMinor: bigint("initial_balance_minor", { mode: "bigint" })
+    .notNull()
+    .default(sql`0`),
+  onboardingCompletedAt: instant("onboarding_completed_at"),
   createdAt: instant("created_at").defaultNow().notNull(),
   updatedAt: instant("updated_at").defaultNow().notNull(),
 });
+
+export const workspaceInvitation = pgTable(
+  "workspace_invitation",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    role: text("role").notNull(),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("pending"),
+    expiresAt: instant("expires_at").notNull(),
+    acceptedBy: text("accepted_by").references(() => user.id, { onDelete: "set null" }),
+    acceptedAt: instant("accepted_at"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    uniqueIndex("workspace_invitation_token_unique").on(table.tokenHash),
+    index("workspace_invitation_workspace_status_idx").on(table.workspaceId, table.status),
+    index("workspace_invitation_email_idx").on(table.email, table.status),
+    check("workspace_invitation_role_check", sql`${table.role} in ('member', 'viewer')`),
+    check(
+      "workspace_invitation_status_check",
+      sql`${table.status} in ('pending', 'accepted', 'revoked', 'expired')`,
+    ),
+  ],
+);
+
+export const workspaceDeletionRecovery = pgTable(
+  "workspace_deletion_recovery",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    entitlement: text("entitlement").notNull().default("workspace_deletion_recovery"),
+    status: text("status").notNull().default("active"),
+    expiresAt: instant("expires_at").notNull(),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    canceledAt: instant("canceled_at"),
+  },
+  (table) => [
+    uniqueIndex("workspace_deletion_recovery_active_unique")
+      .on(table.workspaceId)
+      .where(sql`${table.status} = 'active'`),
+    index("workspace_deletion_recovery_owner_idx").on(table.ownerUserId, table.status),
+    check(
+      "workspace_deletion_recovery_status_check",
+      sql`${table.status} in ('active', 'canceled', 'expired')`,
+    ),
+  ],
+);
+
+export const workspaceTombstone = pgTable(
+  "workspace_tombstone",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    pseudonymousOwnerHash: text("pseudonymous_owner_hash").notNull(),
+    status: text("status").notNull().default("deactivated"),
+    deactivatedAt: instant("deactivated_at").notNull(),
+    purgeAt: instant("purge_at").notNull(),
+    auditPurgeAt: instant("audit_purge_at").notNull(),
+  },
+  (table) => [check("workspace_tombstone_status_check", sql`${table.status} = 'deactivated'`)],
+);
 
 export const membership = pgTable(
   "membership",
