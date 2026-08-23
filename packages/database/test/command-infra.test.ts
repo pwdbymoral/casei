@@ -42,7 +42,7 @@ if (!adminUrl) {
 } else {
   test("unit of work, idempotência, outbox e worker respeitam lease e membership", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
-    const suffix = randomUUID();
+    const suffix = randomUUID().replaceAll("-", "");
     const databaseName = `casei_plat004_${suffix}`;
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;

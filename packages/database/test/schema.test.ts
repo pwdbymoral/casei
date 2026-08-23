@@ -22,7 +22,7 @@ if (!adminUrl) {
 } else {
   test("aplica e reverte migration, isola dois espaços e preserva auditoria", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
-    const suffix = randomUUID();
+    const suffix = randomUUID().replaceAll("-", "");
     const databaseName = `casei_plat001_${suffix}`;
     const databaseIdentifier = `"${databaseName}"`;
     const databaseUrl = new URL(adminUrl);

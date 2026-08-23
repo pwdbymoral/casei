@@ -18,7 +18,7 @@ if (!adminUrl) {
 } else {
   test("executa ledger financeiro com casei_app e impede mutação de evento publicado", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
-    const databaseName = `casei_fin_${randomUUID()}`;
+    const databaseName = `casei_fin_${randomUUID().replaceAll("-", "")}`;
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;
     let pool: Pool | undefined;
