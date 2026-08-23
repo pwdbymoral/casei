@@ -11,9 +11,10 @@ import { executeIdempotent, type JsonValue, withUnitOfWork } from "@casei/databa
 import {
   assertBalancedLedgerEvent,
   calculateStatementDates,
+  canonicalCardPaymentPostings,
+  canonicalTransactionPostings,
   distributeInstallments,
   generateRecurrenceDates,
-  type LedgerPosting,
   Money,
 } from "@casei/domain";
 
@@ -328,10 +329,11 @@ export class FinanceService {
             txId,
             "statement.payment.v1",
             row.currency_code,
-            [
-              { accountId: wallet, amount: -amount },
-              { accountId: liability, amount },
-            ],
+            canonicalCardPaymentPostings({
+              amount: Money.fromTrusted(amount, row.currency_code as never),
+              wallet,
+              cardLiability: liability,
+            }).map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
             new Date().toISOString().slice(0, 10),
           );
           await client.query(
@@ -493,6 +495,8 @@ export class FinanceService {
   ): Promise<TransactionView> {
     const occurredOn = input.occurredOn ?? new Date().toISOString().slice(0, 10);
     const currency = input.amount.currency;
+    if (input.kind === "transfer")
+      throw new FinanceConflictError("Uma transferência exige uma operação de origem e destino.");
     if (input.cardId && input.kind !== "expense")
       throw new FinanceConflictError("Somente despesas podem usar cartão.");
     if (input.cardId) {
@@ -557,25 +561,31 @@ export class FinanceService {
         `Cartão ${row.card_id}`,
         row.currency_code,
       );
+      const postings = canonicalTransactionPostings({
+        kind: "expense",
+        instrument: "card",
+        amount: Money.fromTrusted(amount, row.currency_code as never),
+        accounts: {
+          wallet,
+          income: "unused-income",
+          expense: await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "expense",
+            "Despesas",
+            row.currency_code,
+          ),
+          adjustment: "unused-adjustment",
+          cardLiability: liability,
+        },
+      });
       await this.publishEvent(
         client,
         scope,
         row.id,
         "transaction.posted.v1",
         row.currency_code,
-        [
-          {
-            accountId: await this.ensureAccount(
-              client,
-              scope.workspaceId,
-              "expense",
-              "Despesas",
-              row.currency_code,
-            ),
-            amount,
-          },
-          { accountId: liability, amount: -amount },
-        ],
+        postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
         row.occurred_on,
       );
       await this.ensureStatementForPurchase(
@@ -597,16 +607,17 @@ export class FinanceService {
       accountKind === "income" ? "Receitas" : accountKind === "expense" ? "Despesas" : "Ajustes",
       row.currency_code,
     );
-    const entries: LedgerPosting[] =
-      row.kind === "income"
-        ? [
-            { accountId: wallet, amount: Money.fromTrusted(amount, row.currency_code as never) },
-            { accountId: account, amount: Money.fromTrusted(-amount, row.currency_code as never) },
-          ]
-        : [
-            { accountId: account, amount: Money.fromTrusted(amount, row.currency_code as never) },
-            { accountId: wallet, amount: Money.fromTrusted(-amount, row.currency_code as never) },
-          ];
+    const entries = canonicalTransactionPostings({
+      kind: row.kind as "income" | "expense" | "adjustment",
+      instrument: "wallet",
+      amount: Money.fromTrusted(amount, row.currency_code as never),
+      accounts: {
+        wallet,
+        income: accountKind === "income" ? account : "unused-income",
+        expense: accountKind === "expense" ? account : "unused-expense",
+        adjustment: accountKind === "adjustment" ? account : "unused-adjustment",
+      },
+    });
     await this.publishEvent(
       client,
       scope,

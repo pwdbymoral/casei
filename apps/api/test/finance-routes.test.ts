@@ -66,5 +66,24 @@ describe("finance HTTP composition", () => {
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toMatchObject({ id: transactionId, workspaceId });
+
+    const missingIdempotency = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "expense", amount: { currency: "BRL", minor: "100" } }),
+      },
+    );
+    expect(missingIdempotency.status).toBe(422);
+
+    const missingVersion = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions/${transactionId}/post`,
+      {
+        method: "POST",
+        headers: { "idempotency-key": "finance-route-post-001" },
+      },
+    );
+    expect(missingVersion.status).toBe(428);
   });
 });
