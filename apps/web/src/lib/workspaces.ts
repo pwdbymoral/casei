@@ -60,8 +60,14 @@ export interface WorkspaceManagementAdapter {
     input: { email: string; role: "member" | "viewer" },
   ): Promise<WorkspaceInvitation>;
   resendInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation>;
+  revokeInvitation(workspaceId: string, invitationId: string): Promise<void>;
   removeMember(workspaceId: string, userId: string): Promise<void>;
-  changeMemberRole(workspaceId: string, userId: string, role: "member" | "viewer"): Promise<void>;
+  changeMemberRole(
+    workspaceId: string,
+    userId: string,
+    role: "member" | "viewer",
+    version: number,
+  ): Promise<void>;
   transferOwnership(workspaceId: string, userId: string): Promise<void>;
 }
 
@@ -196,16 +202,25 @@ export const authenticatedWorkspaceManagementAdapter: WorkspaceManagementAdapter
       },
     );
   },
+  async revokeInvitation(workspaceId, invitationId) {
+    await managementRequest<void>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": managementIdempotencyKey("revoke-invite") },
+      },
+    );
+  },
   async removeMember(workspaceId, userId) {
     await managementRequest<void>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
       { method: "DELETE" },
     );
   },
-  async changeMemberRole(workspaceId, userId, role) {
+  async changeMemberRole(workspaceId, userId, role, version) {
     await managementRequest<{ userId: string; role: WorkspaceRole }>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
-      { method: "PATCH", body: JSON.stringify({ role }) },
+      { method: "PATCH", headers: { "If-Match": `"v${version}"` }, body: JSON.stringify({ role }) },
     );
   },
   async transferOwnership(workspaceId, userId) {

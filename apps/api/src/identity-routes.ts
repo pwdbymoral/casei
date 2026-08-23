@@ -7,6 +7,7 @@ import {
 import type { Hono, MiddlewareHandler } from "hono";
 import { ApiHttpError, notFoundError } from "./http/index.js";
 import { parseJsonBody } from "./http/parsing.js";
+import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiEnv, RequestActor } from "./http/types.js";
 import type { IdentityScope, IdentityService } from "./identity-service.js";
 
@@ -30,7 +31,6 @@ export function configureIdentityRoutes(
   router.use("/workspaces/:workspaceId/members", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/members/*", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/ownership/*", options.scopeMiddleware);
-  router.use("/workspaces/:workspaceId/deactivation", options.scopeMiddleware);
 
   router.get("/me/workspaces", async (context) => {
     const actor = actorOf(context);
@@ -77,6 +77,16 @@ export function configureIdentityRoutes(
     return context.json(result.invitation, result.replayed ? 200 : 201);
   });
 
+  router.delete("/workspaces/:workspaceId/invitations/:invitationId", async (context) => {
+    const result = await service.revokeInvitation(
+      scopeOf(context),
+      context.req.param("invitationId"),
+      requiredIdempotencyKey(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.body(null, 204);
+  });
+
   router.delete("/workspaces/:workspaceId/members/:userId", async (context) => {
     await service.removeMember(scopeOf(context), context.req.param("userId"));
     return context.body(null, 204);
@@ -91,8 +101,10 @@ export function configureIdentityRoutes(
       scopeOf(context),
       context.req.param("userId"),
       await parseJsonBody(context, updateMembershipRoleSchema),
+      requireIfMatch(context),
     );
-    return context.json({ userId: context.req.param("userId"), role });
+    setVersionHeaders(context, role.version);
+    return context.json({ userId: context.req.param("userId"), role: role.role });
   });
 
   router.post("/workspaces/:workspaceId/ownership/transfer", async (context) => {
@@ -105,10 +117,13 @@ export function configureIdentityRoutes(
   });
 
   router.post("/workspaces/:workspaceId/deactivation", async (context) => {
-    const result = await service.deactivateWorkspace(
-      scopeOf(context),
-      await parseJsonBody(context, deactivateWorkspaceSchema),
-    );
+    const actor = actorOf(context);
+    const workspaceId = context.req.param("workspaceId");
+    const input = await parseJsonBody(context, deactivateWorkspaceSchema);
+    const scope = await service.resolveScope(actor, workspaceId, context.get("correlationId"));
+    const result = scope
+      ? await service.deactivateWorkspace(scope, input)
+      : await service.retryDeactivation(actor, workspaceId, input, context.get("correlationId"));
     return context.json(result);
   });
 

@@ -509,7 +509,7 @@ export class PostgresJobWorker {
 
   private async assertAuthorized(job: JobRecord): Promise<void> {
     if (!job.workspaceId || !job.actorId) {
-      if (job.requiredCapability) throw new JobAuthorizationError();
+      if (job.requiredCapability !== "system.purge") throw new JobAuthorizationError();
       return;
     }
     await withUnitOfWork(
@@ -544,20 +544,24 @@ export class PostgresJobWorker {
       },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        await assertMembership(
-          client,
-          job,
-          this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
-        );
+        if (!isSystemPurgeJob(job)) {
+          await assertMembership(
+            client,
+            job,
+            this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
+          );
+        }
         const result = await callback({
           client,
           beforeTransition: async () => {
             await assertLeaseFenced(client, job);
-            await assertMembership(
-              client,
-              job,
-              this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
-            );
+            if (!isSystemPurgeJob(job)) {
+              await assertMembership(
+                client,
+                job,
+                this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
+              );
+            }
           },
         });
         await assertLeaseFenced(client, job);
@@ -595,24 +599,26 @@ export class PostgresJobWorker {
       },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        try {
-          await assertMembership(
-            client,
-            job,
-            this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
-          );
-        } catch (error) {
-          if (error instanceof JobAuthorizationError) {
-            await client.query(
-              `UPDATE "job"
-               SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
-                   last_error = $3, updated_at = now()
-               WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
-              [job.id, job.leaseToken, "job_authorization_revoked"],
+        if (!isSystemPurgeJob(job)) {
+          try {
+            await assertMembership(
+              client,
+              job,
+              this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
             );
-            return false;
+          } catch (error) {
+            if (error instanceof JobAuthorizationError) {
+              await client.query(
+                `UPDATE "job"
+                 SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
+                     last_error = $3, updated_at = now()
+                 WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
+                [job.id, job.leaseToken, "job_authorization_revoked"],
+              );
+              return false;
+            }
+            throw error;
           }
-          throw error;
         }
         const result = await client.query(
           `UPDATE "job"
@@ -712,6 +718,15 @@ function handlerKey(jobType: string, version: number): string {
 }
 
 const defaultCapabilityAuthorizer: CapabilityAuthorizer = ({ role }) => role === "owner";
+
+function isSystemPurgeJob(job: JobRecord): boolean {
+  return (
+    job.jobType === "workspace.purge" &&
+    job.jobVersion === 1 &&
+    job.requiredCapability === "system.purge" &&
+    job.actorId === null
+  );
+}
 
 async function assertLeaseFenced(client: PoolClient, job: JobRecord): Promise<void> {
   const result = await client.query<{

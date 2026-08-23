@@ -60,6 +60,7 @@ ALTER TABLE "workspace_deletion_recovery" ADD CONSTRAINT "workspace_deletion_rec
 CREATE UNIQUE INDEX "workspace_invitation_token_unique" ON "workspace_invitation" USING btree ("token_hash");
 CREATE INDEX "workspace_invitation_workspace_status_idx" ON "workspace_invitation" USING btree ("workspace_id", "status");
 CREATE INDEX "workspace_invitation_email_idx" ON "workspace_invitation" USING btree ("email", "status");
+CREATE UNIQUE INDEX "workspace_invitation_pending_email_unique" ON "workspace_invitation" USING btree ("workspace_id", "email") WHERE "status" = 'pending';
 CREATE UNIQUE INDEX "workspace_deletion_recovery_active_unique" ON "workspace_deletion_recovery" USING btree ("workspace_id") WHERE "status" = 'active';
 CREATE INDEX "workspace_deletion_recovery_owner_idx" ON "workspace_deletion_recovery" USING btree ("owner_user_id", "status");
 CREATE UNIQUE INDEX "membership_active_owner_unique" ON "membership" USING btree ("workspace_id") WHERE "role" = 'owner' AND "status" = 'active';

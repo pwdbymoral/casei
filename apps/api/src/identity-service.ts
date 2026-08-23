@@ -11,6 +11,7 @@ import {
   type JsonValue,
   type Pool,
   type PoolClient,
+  PostgresJobWorker,
   withUnitOfWork,
 } from "@casei/database";
 
@@ -95,6 +96,13 @@ export class IdentityPermissionError extends Error {
 
 export class IdentityConflictError extends Error {
   readonly code = "conflict" as const;
+}
+
+export class IdentityVersionConflictError extends Error {
+  readonly code = "version_conflict" as const;
+  constructor(readonly currentVersion: number) {
+    super("O membro foi alterado. Recarregue a lista antes de tentar novamente.");
+  }
 }
 
 export class IdentityRecentAuthError extends Error {
@@ -356,14 +364,22 @@ export class IdentityService {
     const parsed = createInvitationSchema.parse(input);
     assertRole(scope, "owner");
     const email = normalizeEmail(parsed.email);
-    const result = await this.withScoped(scope, async (client) =>
-      executeIdempotent(client, {
-        scope: `${scope.actor.userId}:${scope.workspaceId}:POST:/invitations`,
-        key: idempotencyKey,
-        request: parsed,
-        execute: () => this.insertInvitation(client, scope, email, parsed.role),
-      }),
-    );
+    let result: { replayed: boolean; statusCode: number; response: JsonValue };
+    try {
+      result = await this.withScoped(scope, async (client) =>
+        executeIdempotent(client, {
+          scope: `${scope.actor.userId}:${scope.workspaceId}:POST:/invitations`,
+          key: idempotencyKey,
+          request: parsed,
+          execute: () => this.insertInvitation(client, scope, email, parsed.role),
+        }),
+      );
+    } catch (error) {
+      if (isPendingInvitationUniqueViolation(error)) {
+        throw new IdentityConflictError("Já existe um convite pendente para este e-mail.");
+      }
+      throw error;
+    }
     return { replayed: result.replayed, invitation: result.response as unknown as InvitationView };
   }
 
@@ -400,6 +416,47 @@ export class IdentityService {
       }),
     );
     return { replayed: result.replayed, invitation: result.response as unknown as InvitationView };
+  }
+
+  async revokeInvitation(
+    scope: IdentityScope,
+    invitationId: string,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean }> {
+    assertRole(scope, "owner");
+    const result = await this.withScoped(scope, async (client) =>
+      executeIdempotent(client, {
+        scope: `${scope.actor.userId}:${scope.workspaceId}:DELETE:/invitations/${invitationId}`,
+        key: idempotencyKey,
+        request: { invitationId },
+        execute: async () => {
+          const invitation = await client.query<{ status: string }>(
+            `SELECT status FROM workspace_invitation
+              WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            [scope.workspaceId, invitationId],
+          );
+          const row = invitation.rows[0];
+          if (!row) throw new IdentityNotFoundError();
+          if (row.status === "pending") {
+            await client.query(
+              `UPDATE workspace_invitation
+                  SET status = 'revoked', updated_at = now(), version = version + 1
+                WHERE workspace_id = $1 AND id = $2 AND status = 'pending'`,
+              [scope.workspaceId, invitationId],
+            );
+            await writeAudit(client, {
+              actorId: scope.actor.userId,
+              workspaceId: scope.workspaceId,
+              correlationId: scope.correlationId,
+              action: "membership.invitation_revoked",
+              targetId: invitationId,
+            });
+          }
+          return { statusCode: 204, response: null };
+        },
+      }),
+    );
+    return { replayed: result.replayed };
   }
 
   async acceptInvitation(
@@ -509,8 +566,8 @@ export class IdentityService {
   async removeMember(scope: IdentityScope, userId: string): Promise<void> {
     assertRole(scope, "owner");
     await this.withScoped(scope, async (client) => {
-      const result = await client.query<{ role: WorkspaceRole; status: string }>(
-        `SELECT role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+      const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
+        `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
         [scope.workspaceId, userId],
       );
       const row = result.rows[0];
@@ -536,16 +593,18 @@ export class IdentityService {
     scope: IdentityScope,
     userId: string,
     input: unknown,
-  ): Promise<WorkspaceRole> {
+    expectedVersion: number,
+  ): Promise<{ role: WorkspaceRole; version: number }> {
     assertRole(scope, "owner");
     const { role } = updateMembershipRoleSchema.parse(input);
     return this.withScoped(scope, async (client) => {
-      const result = await client.query<{ role: WorkspaceRole; status: string }>(
-        `SELECT role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+      const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
+        `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
         [scope.workspaceId, userId],
       );
       const row = result.rows[0];
       if (row?.status !== "active") throw new IdentityNotFoundError();
+      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
       if (row.role === "owner")
         throw new IdentityConflictError("Use a transferência de propriedade para alterar o owner.");
       await client.query(
@@ -560,7 +619,7 @@ export class IdentityService {
         targetId: userId,
         reason: role,
       });
-      return role;
+      return { role, version: row.version + 1 };
     });
   }
 
@@ -605,14 +664,6 @@ export class IdentityService {
       );
       const row = workspace.rows[0];
       if (!row) throw new IdentityNotFoundError();
-      if (row.status === "deletion_pending") {
-        const recovery = await client.query<{ expires_at: Date }>(
-          `SELECT expires_at FROM workspace_deletion_recovery WHERE workspace_id = $1 AND status = 'active'`,
-          [scope.workspaceId],
-        );
-        if (recovery.rows[0])
-          return { recoveryUntil: new Date(recovery.rows[0].expires_at).toISOString() };
-      }
       if (row.status !== "active") throw new IdentityConflictError("O espaço já foi desativado.");
       if (row.name !== parsed.workspaceName)
         throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
@@ -622,7 +673,7 @@ export class IdentityService {
         [scope.workspaceId],
       );
       await client.query(
-        `UPDATE membership SET status = CASE WHEN role = 'owner' THEN 'recovery_only' ELSE 'revoked' END, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND status = 'active'`,
+        `UPDATE membership SET status = 'recovery_only', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND status = 'active'`,
         [scope.workspaceId],
       );
       await client.query(
@@ -641,6 +692,7 @@ export class IdentityService {
         `INSERT INTO workspace_deletion_recovery (workspace_id, owner_user_id, expires_at) VALUES ($1, $2, $3) ON CONFLICT (workspace_id) WHERE status = 'active' DO NOTHING`,
         [scope.workspaceId, scope.actor.userId, until],
       );
+      await ensurePurgeJob(client, scope.workspaceId, until, scope.correlationId);
       await writeAudit(client, {
         actorId: scope.actor.userId,
         workspaceId: scope.workspaceId,
@@ -651,6 +703,45 @@ export class IdentityService {
       });
       return { recoveryUntil: until.toISOString() };
     });
+  }
+
+  /** Retries a deactivation after the owner membership has entered recovery_only. */
+  async retryDeactivation(
+    actor: IdentityActor,
+    workspaceId: string,
+    input: unknown,
+    correlationId: string,
+  ): Promise<{ recoveryUntil: string }> {
+    if (!actor.recentAuthentication) throw new IdentityRecentAuthError();
+    const parsed = deactivateWorkspaceSchema.parse(input);
+    return withUnitOfWork(
+      this.pool,
+      {
+        workspaceId,
+        actorId: actor.userId,
+        actorEmail: actor.email ? normalizeEmail(actor.email) : undefined,
+        correlationId,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const result = await client.query<{ name: string; status: string; expires_at: Date }>(
+          `SELECT w.name, w.status, r.expires_at
+             FROM workspace w
+             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
+                                                  AND r.owner_user_id = $2
+                                                  AND r.status = 'active'
+            WHERE w.id = $1
+            FOR UPDATE OF w, r`,
+          [workspaceId, actor.userId],
+        );
+        const row = result.rows[0];
+        if (row?.status !== "deletion_pending") throw new IdentityNotFoundError();
+        if (row.name !== parsed.workspaceName)
+          throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
+        await ensurePurgeJob(client, workspaceId, row.expires_at, correlationId);
+        return { recoveryUntil: new Date(row.expires_at).toISOString() };
+      },
+    );
   }
 
   async getRecovery(
@@ -667,14 +758,11 @@ export class IdentityService {
         );
         const row = result.rows[0];
         if (!row) return null;
-        if (new Date(row.expires_at).getTime() <= this.now().getTime()) {
-          await client.query(
-            `UPDATE workspace_deletion_recovery SET status = 'expired' WHERE workspace_id = $1 AND status = 'active'`,
-            [workspaceId],
-          );
-          return null;
-        }
-        return { status: row.status, recoveryUntil: new Date(row.expires_at).toISOString() };
+        return {
+          status:
+            new Date(row.expires_at).getTime() <= this.now().getTime() ? "expired" : row.status,
+          recoveryUntil: new Date(row.expires_at).toISOString(),
+        };
       },
     );
   }
@@ -703,8 +791,8 @@ export class IdentityService {
           [workspaceId],
         );
         await client.query(
-          `UPDATE membership SET status = 'active', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2 AND role = 'owner' AND status = 'recovery_only'`,
-          [workspaceId, actor.userId],
+          `UPDATE membership SET status = 'active', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND status = 'recovery_only'`,
+          [workspaceId],
         );
         await client.query(
           `UPDATE workspace_deletion_recovery SET status = 'canceled', canceled_at = now() WHERE workspace_id = $1 AND status = 'active'`,
@@ -732,7 +820,7 @@ export class IdentityService {
       { workspaceId, correlationId, applicationRole: this.applicationRole },
       async ({ client }) => {
         const result = await client.query<{ owner_user_id: string; expires_at: Date }>(
-          `SELECT owner_user_id, expires_at FROM workspace_deletion_recovery WHERE workspace_id = $1 AND status = 'active' FOR UPDATE`,
+          `SELECT owner_user_id, expires_at FROM workspace_deletion_recovery WHERE workspace_id = $1 AND status IN ('active', 'expired') FOR UPDATE`,
           [workspaceId],
         );
         const row = result.rows[0];
@@ -756,6 +844,23 @@ export class IdentityService {
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
       },
+    );
+  }
+
+  /** Worker registry for the durable purge job; the API only enqueues it. */
+  createPurgeWorker(): PostgresJobWorker {
+    return new PostgresJobWorker(
+      this.pool,
+      new Map([
+        [
+          "workspace.purge:1",
+          async (job) => {
+            if (!job.workspaceId) throw new Error("Purge job is missing a workspace");
+            await this.purgeWorkspace(job.workspaceId, job.correlationId, this.now());
+          },
+        ],
+      ]),
+      { applicationRole: this.applicationRole },
     );
   }
 
@@ -903,6 +1008,43 @@ function normalizeEmail(email: string): string {
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function isPendingInvitationUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "23505" &&
+    "constraint" in error &&
+    (error as { constraint?: unknown }).constraint === "workspace_invitation_pending_email_unique"
+  );
+}
+
+async function ensurePurgeJob(
+  client: PoolClient,
+  workspaceId: string,
+  purgeAt: Date,
+  correlationId: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO job
+      (job_type, job_version, workspace_id, actor_id, required_capability,
+       idempotency_key, payload, available_at, correlation_id)
+     VALUES ('workspace.purge', 1, $1, NULL, 'system.purge', $2, $3::jsonb, $4, $5)
+     ON CONFLICT (job_type, idempotency_key) DO UPDATE
+       SET available_at = EXCLUDED.available_at,
+           state = CASE WHEN job.state IN ('cancelled', 'failed') THEN 'pending' ELSE job.state END,
+           last_error = NULL,
+           updated_at = now()`,
+    [
+      workspaceId,
+      `workspace-purge:${workspaceId}`,
+      JSON.stringify({ workspaceId, purgeAt: purgeAt.toISOString() }),
+      purgeAt,
+      correlationId || "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ],
+  );
 }
 
 function isValidTimeZone(timeZone: string): boolean {

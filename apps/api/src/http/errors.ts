@@ -165,6 +165,17 @@ function normalizeError(error: unknown): {
       message: "Confirme sua identidade novamente para continuar.",
     };
   }
+  if (hasCode(error, "version_conflict")) {
+    return {
+      status: 412,
+      code: "version_conflict",
+      message: error instanceof Error ? error.message : DEFAULT_MESSAGES.version_conflict,
+      currentVersion:
+        typeof error === "object" && error !== null && "currentVersion" in error
+          ? Number((error as { currentVersion?: unknown }).currentVersion)
+          : undefined,
+    };
+  }
   if (hasCode(error, "conflict")) {
     return {
       status: 409,

@@ -80,6 +80,9 @@ export const workspaceInvitation = pgTable(
     uniqueIndex("workspace_invitation_token_unique").on(table.tokenHash),
     index("workspace_invitation_workspace_status_idx").on(table.workspaceId, table.status),
     index("workspace_invitation_email_idx").on(table.email, table.status),
+    uniqueIndex("workspace_invitation_pending_email_unique")
+      .on(table.workspaceId, table.email)
+      .where(sql`${table.status} = 'pending'`),
     check("workspace_invitation_role_check", sql`${table.role} in ('member', 'viewer')`),
     check(
       "workspace_invitation_status_check",

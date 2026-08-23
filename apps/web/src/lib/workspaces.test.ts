@@ -123,5 +123,26 @@ describe("workspace shell boundary", () => {
     await expect(
       authenticatedWorkspaceManagementAdapter.listMembers("workspace-1"),
     ).rejects.toMatchObject({ code: "permission_denied" });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 404 })),
+    );
+    await expect(
+      authenticatedWorkspaceManagementAdapter.listInvitations("workspace-1"),
+    ).rejects.toMatchObject({ code: "permission_denied" });
+  });
+
+  it("revokes an invitation with an idempotency key", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await authenticatedWorkspaceManagementAdapter.revokeInvitation("workspace-1", "invite-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/v1/workspaces/workspace-1/invitations/invite-1"),
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+      }),
+    );
   });
 });

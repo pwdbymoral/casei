@@ -21,6 +21,7 @@ DROP INDEX IF EXISTS "membership_active_owner_unique";
 DROP INDEX IF EXISTS "workspace_deletion_recovery_active_unique";
 DROP INDEX IF EXISTS "workspace_deletion_recovery_owner_idx";
 DROP INDEX IF EXISTS "workspace_invitation_email_idx";
+DROP INDEX IF EXISTS "workspace_invitation_pending_email_unique";
 DROP INDEX IF EXISTS "workspace_invitation_workspace_status_idx";
 DROP INDEX IF EXISTS "workspace_invitation_token_unique";
 ALTER TABLE "workspace_deletion_recovery" DROP CONSTRAINT IF EXISTS "workspace_deletion_recovery_owner_user_id_fk";
