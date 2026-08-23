@@ -108,6 +108,11 @@ export class FinanceService {
   ): Promise<{ replayed: boolean; transaction: TransactionView }> {
     assertFinanceCapability(scope, "finance.write");
     const parsed = createTransactionSchema.parse(input);
+    if (parsed.kind === "adjustment") {
+      throw new FinanceConflictError(
+        "Ajustes exigem o comando de conferência com motivo e saldo observado.",
+      );
+    }
     const result = await this.withUnitOfWork(scope, async ({ client }) => {
       return executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/${command}`,
@@ -656,6 +661,10 @@ export class FinanceService {
     }
     if (input.kind === "transfer")
       throw new FinanceConflictError("Uma transferência exige uma operação de origem e destino.");
+    if (input.kind === "adjustment")
+      throw new FinanceConflictError(
+        "Ajustes exigem o comando de conferência com motivo e saldo observado.",
+      );
     if (input.cardId && input.kind !== "expense")
       throw new FinanceConflictError("Somente despesas podem usar cartão.");
     if (input.categoryId) {
@@ -675,8 +684,7 @@ export class FinanceService {
       }
       if (
         (input.kind === "income" && !["income", "both"].includes(categoryRow.kind)) ||
-        (input.kind === "expense" && !["expense", "both"].includes(categoryRow.kind)) ||
-        input.kind === "adjustment"
+        (input.kind === "expense" && !["expense", "both"].includes(categoryRow.kind))
       ) {
         throw new FinanceConflictError("A categoria não é compatível com o tipo da transação.");
       }
