@@ -54,7 +54,7 @@ Gate concluído documentalmente em 2026-08-23, com as decisões de concorrência
 Executar schema/base antes das fatias paralelas.
 
 - [x] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.22`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Migration up/down, isolamento/RLS, auditoria append-only, role segura e versões pinadas são exercitados no teste PostgreSQL descartável do CI.
-- [ ] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade.
+- [x] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade. `packages/domain/src` implementa UUIDv7/ULID/UserId opacos, `Money` em `bigint` com JSON canônico e largest remainder, datas civis/fuso IANA/instante UTC com `Clock`, além de `Result`/erros seguros; `packages/domain/test/kernel.test.ts` cobre propriedades de conservação, round trip e rejeições de contrato.
 - [ ] **PLAT-003 Boundary HTTP:** `/v1`, parsing Zod, envelope de erro, correlation ID, auth actor, workspace scope, cursor e versionamento.
 - [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter; persistir ator/capacidade de jobs e revalidar membership antes de cada lote/transição.
 - [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit; spike contra `better-auth@1.6.22` para `auth_email_intent`/outbox, callback pós-commit, recovery de token, reenvio, expiração, falha de persistência, idempotência e callback URL.
