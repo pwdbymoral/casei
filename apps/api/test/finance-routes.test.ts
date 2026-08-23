@@ -7,6 +7,8 @@ import { createActorMiddleware, createWorkspaceScopeMiddleware } from "../src/ht
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
+const cardId = "0190f3c8-2a10-7abc-8def-1234567890ad";
+const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
 
 describe("finance HTTP composition", () => {
   it("mounts the scoped transaction command below /v1", async () => {
@@ -85,5 +87,103 @@ describe("finance HTTP composition", () => {
       },
     );
     expect(missingVersion.status).toBe(428);
+  });
+
+  it("lists cards and statements and closes an open statement with a version", async () => {
+    const fakeService = {
+      listCards: async () => [
+        {
+          id: cardId,
+          workspaceId,
+          name: "Nubank",
+          closingDay: 10,
+          dueDay: 17,
+          holder: null,
+          lastFour: "1234",
+          limit: { currency: "BRL", minor: "100000" },
+          archived: false,
+          version: 0,
+        },
+      ],
+      listStatements: async () => [
+        {
+          id: statementId,
+          workspaceId,
+          cardId,
+          periodStart: "2026-08-11",
+          closingOn: "2026-09-10",
+          dueOn: "2026-09-17",
+          state: "open",
+          total: { currency: "BRL", minor: "2500" },
+          paid: { currency: "BRL", minor: "0" },
+          openAmount: { currency: "BRL", minor: "2500" },
+          version: 0,
+        },
+      ],
+      closeStatement: async () => ({
+        id: statementId,
+        workspaceId,
+        cardId,
+        periodStart: "2026-08-11",
+        closingOn: "2026-09-10",
+        dueOn: "2026-09-17",
+        state: "closed",
+        total: { currency: "BRL", minor: "2500" },
+        paid: { currency: "BRL", minor: "0" },
+        openAmount: { currency: "BRL", minor: "2500" },
+        version: 1,
+      }),
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const cards = await app.request(`http://localhost/v1/workspaces/${workspaceId}/cards`);
+    expect(cards.status).toBe(200);
+    await expect(cards.json()).resolves.toEqual({
+      items: [expect.objectContaining({ id: cardId, name: "Nubank" })],
+      page: { nextCursor: null, hasMore: false },
+    });
+
+    const statements = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements?cardId=${cardId}`,
+    );
+    expect(statements.status).toBe(200);
+    await expect(statements.json()).resolves.toEqual({
+      items: [
+        expect.objectContaining({
+          id: statementId,
+          openAmount: { currency: "BRL", minor: "2500" },
+        }),
+      ],
+      page: { nextCursor: null, hasMore: false },
+    });
+
+    const closed = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/close`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "statement-close-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+    expect(closed.status).toBe(200);
+    expect(closed.headers.get("etag")).toBe('"v1"');
+    await expect(closed.json()).resolves.toMatchObject({ id: statementId, state: "closed" });
   });
 });

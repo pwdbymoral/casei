@@ -71,6 +71,20 @@ export interface CreditCardView {
   version: number;
 }
 
+export interface StatementView {
+  id: string;
+  workspaceId: string;
+  cardId: string;
+  periodStart: string;
+  closingOn: string;
+  dueOn: string;
+  state: "open" | "closed" | "partially_paid" | "paid" | "canceled";
+  total: { currency: string; minor: string };
+  paid: { currency: string; minor: string };
+  openAmount: { currency: string; minor: string };
+  version: number;
+}
+
 interface TransactionRow {
   id: string;
   workspace_id: string;
@@ -155,6 +169,107 @@ export class FinanceService {
       );
       return result.rows[0] ? toTransactionView(result.rows[0]) : null;
     });
+  }
+
+  async listCategories(scope: FinanceScope, limit = 100): Promise<CategoryView[]> {
+    return this.withScopedClient(scope, async (client) => {
+      const result = await client.query(
+        `SELECT id, workspace_id, name, kind, archived, version
+           FROM finance_category
+          WHERE workspace_id = $1
+          ORDER BY archived ASC, lower(name) ASC, id ASC
+          LIMIT $2`,
+        [scope.workspaceId, Math.min(Math.max(limit, 1), 100)],
+      );
+      return result.rows.map(toCategoryView);
+    });
+  }
+
+  async listCards(scope: FinanceScope, limit = 100): Promise<CreditCardView[]> {
+    return this.withScopedClient(scope, async (client) => {
+      const result = await client.query(
+        `SELECT id, workspace_id, name, closing_day, due_day, holder, last_four,
+                limit_minor, currency_code, archived, version
+           FROM credit_card
+          WHERE workspace_id = $1
+          ORDER BY archived ASC, lower(name) ASC, id ASC
+          LIMIT $2`,
+        [scope.workspaceId, Math.min(Math.max(limit, 1), 100)],
+      );
+      return result.rows.map(toCreditCardView);
+    });
+  }
+
+  async listStatements(
+    scope: FinanceScope,
+    cardId?: string,
+    limit = 100,
+  ): Promise<StatementView[]> {
+    return this.withScopedClient(scope, async (client) => {
+      const result = await client.query(
+        `SELECT id, workspace_id, card_id, period_start, closing_on, due_on, state,
+                total_minor, paid_minor, currency_code, version
+           FROM (
+             SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+               FROM credit_statement s
+               JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
+              WHERE s.workspace_id = $1
+                AND ($2::uuid IS NULL OR s.card_id = $2::uuid)
+           ) statements
+          ORDER BY closing_on DESC, id DESC
+          LIMIT $3`,
+        [scope.workspaceId, cardId ?? null, Math.min(Math.max(limit, 1), 100)],
+      );
+      return result.rows.map(toStatementView);
+    });
+  }
+
+  async closeStatement(
+    scope: FinanceScope,
+    statementId: string,
+    idempotencyKey: string,
+    expectedVersion?: number,
+  ): Promise<StatementView> {
+    assertFinanceCapability(scope, "finance.write");
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/statements/${statementId}/close`,
+        key: idempotencyKey,
+        request: { statementId, expectedVersion },
+        execute: async () => {
+          const current = await client.query(
+            `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+               FROM credit_statement s
+               JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
+              WHERE s.workspace_id = $1 AND s.id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, statementId],
+          );
+          const row = current.rows[0] as Record<string, unknown> | undefined;
+          if (!row) throw new FinanceNotFoundError();
+          if (expectedVersion !== undefined && Number(row.version) !== expectedVersion) {
+            throw new VersionConflictError();
+          }
+          if (row.state !== "open") {
+            throw new FinanceConflictError("Somente uma fatura aberta pode ser fechada.");
+          }
+          const updated = await client.query(
+            `UPDATE credit_statement
+                SET state = 'closed', version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $3
+              RETURNING id, workspace_id, card_id, period_start, closing_on, due_on,
+                        state, total_minor, paid_minor, $4::varchar AS currency_code, version`,
+            [scope.workspaceId, statementId, Number(row.version), row.currency_code],
+          );
+          const value = updated.rows[0];
+          if (!value) throw new VersionConflictError();
+          return { statusCode: 200, response: toStatementView(value) as unknown as JsonValue };
+        },
+      }),
+    );
+    return result.response as unknown as StatementView;
   }
 
   async postTransaction(
@@ -1099,6 +1214,36 @@ function toCreditCardView(row: {
         ? null
         : { currency: row.currency_code, minor: row.limit_minor.toString() },
     archived: row.archived,
+    version: row.version,
+  };
+}
+
+function toStatementView(row: {
+  id: string;
+  workspace_id: string;
+  card_id: string;
+  period_start: string;
+  closing_on: string;
+  due_on: string;
+  state: StatementView["state"];
+  total_minor: string | bigint;
+  paid_minor: string | bigint;
+  currency_code: string;
+  version: number;
+}): StatementView {
+  const total = BigInt(row.total_minor);
+  const paid = BigInt(row.paid_minor);
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    cardId: row.card_id,
+    periodStart: row.period_start,
+    closingOn: row.closing_on,
+    dueOn: row.due_on,
+    state: row.state,
+    total: { currency: row.currency_code, minor: total.toString() },
+    paid: { currency: row.currency_code, minor: paid.toString() },
+    openAmount: { currency: row.currency_code, minor: (total - paid).toString() },
     version: row.version,
   };
 }
