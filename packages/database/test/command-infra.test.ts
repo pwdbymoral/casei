@@ -336,7 +336,7 @@ if (!adminUrl) {
             async (_job, context) =>
               context.runBatch(async ({ client, beforeTransition }) => {
                 callbackEntered();
-                await new Promise((resolve) => setTimeout(resolve, 50));
+                await new Promise((resolve) => setTimeout(resolve, 250));
                 await beforeTransition();
                 await client.query(
                   `INSERT INTO "audit_event"
@@ -349,7 +349,7 @@ if (!adminUrl) {
         ]),
         {
           applicationRole: "casei_app",
-          leaseMs: 20,
+          leaseMs: 100,
           authorizeCapability: ({ role }) => role === "owner",
         },
       );
