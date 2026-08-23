@@ -12,6 +12,9 @@ import { ensureApplicationRole } from "../src/roles.js";
 const adminUrl = process.env.DATABASE_URL_TEST;
 
 if (!adminUrl) {
+  if (process.env.CI) {
+    throw new Error("DATABASE_URL_TEST is required for database integration tests in CI");
+  }
   test.skip("aplica e reverte migration, isola dois espaços e preserva auditoria");
 } else {
   test("aplica e reverte migration, isola dois espaços e preserva auditoria", async () => {
