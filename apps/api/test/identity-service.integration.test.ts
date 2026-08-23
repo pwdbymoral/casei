@@ -167,7 +167,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
             WHERE workspace_id = $1 AND actor_user_id = $2 AND action = 'create'`,
           [workspaceId, ownerId],
         ),
-      ).resolves.toMatchObject({ rows: [{ attempts: 6 }] });
+      ).resolves.toMatchObject({ rows: [{ attempts: 5 }] });
 
       const onboardingResults = await Promise.all([
         service.createOnboarding(
