@@ -119,6 +119,22 @@ describe("datas civis, fuso e relógio", () => {
     if (isOk(leap)) expect(addLocalDateDays(leap.value, 1)).toBe("2024-03-01");
   });
 
+  it("faz aritmética civil correta para anos de quatro dígitos baixos e limita o domínio", () => {
+    const first = parseLocalDate("0001-01-01");
+    const ninetyNine = parseLocalDate("0099-12-31");
+    const last = parseLocalDate("9999-12-31");
+
+    expect(first).toMatchObject({ ok: true });
+    expect(ninetyNine).toMatchObject({ ok: true });
+    expect(last).toMatchObject({ ok: true });
+    if (isOk(first) && isOk(ninetyNine) && isOk(last)) {
+      expect(addLocalDateDays(first.value, 1)).toBe("0001-01-02");
+      expect(addLocalDateDays(ninetyNine.value, 1)).toBe("0100-01-01");
+      expect(() => addLocalDateDays(first.value, -1)).toThrow(RangeError);
+      expect(() => addLocalDateDays(last.value, 1)).toThrow(RangeError);
+    }
+  });
+
   it("valida nomes IANA e rejeita offsets persistidos", () => {
     expect(parseTimeZone("America/Sao_Paulo")).toMatchObject({ ok: true });
     expect(parseTimeZone("-03:00")).toMatchObject({ ok: false });

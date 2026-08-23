@@ -32,10 +32,23 @@ export function parseLocalDate(value: unknown): Result<LocalDate, DomainError> {
 
 export function addLocalDateDays(date: LocalDate, days: number): LocalDate {
   if (!Number.isSafeInteger(days)) throw new RangeError("days must be a safe integer");
+  const parsed = parseLocalDate(date);
+  if (!parsed.ok) throw new RangeError("date must be a valid LocalDate");
   const [yearText, monthText, dayText] = date.split("-");
-  const dateAtUtc = new Date(Date.UTC(Number(yearText), Number(monthText) - 1, Number(dayText)));
+  const dateAtUtc = new Date(0);
+  dateAtUtc.setUTCHours(0, 0, 0, 0);
+  dateAtUtc.setUTCFullYear(Number(yearText), Number(monthText) - 1, Number(dayText));
   dateAtUtc.setUTCDate(dateAtUtc.getUTCDate() + days);
-  return dateAtUtc.toISOString().slice(0, 10) as LocalDate;
+  const resultYear = dateAtUtc.getUTCFullYear();
+  if (resultYear < 1 || resultYear > 9999) {
+    throw new RangeError("LocalDate result must stay within years 0001-9999");
+  }
+  const result = `${resultYear.toString().padStart(4, "0")}-${(dateAtUtc.getUTCMonth() + 1)
+    .toString()
+    .padStart(2, "0")}-${dateAtUtc.getUTCDate().toString().padStart(2, "0")}`;
+  const parsedResult = parseLocalDate(result);
+  if (!parsedResult.ok) throw new RangeError("LocalDate result must be a real civil date");
+  return parsedResult.value;
 }
 
 export function parseInstant(value: unknown): Result<Instant, DomainError> {
