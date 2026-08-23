@@ -33,6 +33,38 @@ export interface WorkspaceAdapter {
   signOut?(): Promise<void>;
 }
 
+export type WorkspaceMember = {
+  userId: string;
+  displayName: string;
+  email: string;
+  role: WorkspaceRole;
+  status: "active" | "revoked" | "recovery_only";
+  version: number;
+};
+
+export type WorkspaceInvitation = {
+  id: string;
+  workspaceId: string;
+  email: string;
+  role: "member" | "viewer";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expiresAt: string;
+  inviteUrl?: string;
+};
+
+export interface WorkspaceManagementAdapter {
+  listMembers(workspaceId: string): Promise<WorkspaceMember[]>;
+  listInvitations(workspaceId: string): Promise<WorkspaceInvitation[]>;
+  createInvitation(
+    workspaceId: string,
+    input: { email: string; role: "member" | "viewer" },
+  ): Promise<WorkspaceInvitation>;
+  resendInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation>;
+  removeMember(workspaceId: string, userId: string): Promise<void>;
+  changeMemberRole(workspaceId: string, userId: string, role: "member" | "viewer"): Promise<void>;
+  transferOwnership(workspaceId: string, userId: string): Promise<void>;
+}
+
 export type WorkspaceSessionErrorCode = "unauthenticated" | "permission_denied" | "offline";
 
 export class WorkspaceSessionError extends Error {
@@ -101,6 +133,86 @@ export const authenticatedWorkspaceAdapter: WorkspaceAdapter = {
     if (!response.ok && response.status !== 401) {
       throw new Error("Não foi possível encerrar a sessão.");
     }
+  },
+};
+
+async function managementRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiOrigin()}${path}`, {
+      ...init,
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...(init.headers ?? {}),
+      },
+    });
+  } catch {
+    throw new WorkspaceSessionError("offline", "Não foi possível conectar ao Casei.");
+  }
+  if (response.status === 401) throw new WorkspaceSessionError("unauthenticated");
+  if (response.status === 403) throw new WorkspaceSessionError("permission_denied");
+  if (response.status === 404) throw new WorkspaceSessionError("permission_denied");
+  if (!response.ok) throw new Error("Não foi possível atualizar a gestão do espaço.");
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+function managementIdempotencyKey(prefix: string): string {
+  return `${prefix}-${globalThis.crypto.randomUUID()}`;
+}
+
+/** Typed HTTP boundary for owner-only member and invitation management. */
+export const authenticatedWorkspaceManagementAdapter: WorkspaceManagementAdapter = {
+  async listMembers(workspaceId) {
+    const response = await managementRequest<{ members: WorkspaceMember[] }>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/members`,
+    );
+    return response.members;
+  },
+  async listInvitations(workspaceId) {
+    const response = await managementRequest<{ invitations: WorkspaceInvitation[] }>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+    );
+    return response.invitations;
+  },
+  async createInvitation(workspaceId, input) {
+    return managementRequest<WorkspaceInvitation>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": managementIdempotencyKey("invite") },
+        body: JSON.stringify(input),
+      },
+    );
+  },
+  async resendInvitation(workspaceId, invitationId) {
+    return managementRequest<WorkspaceInvitation>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": managementIdempotencyKey("resend-invite") },
+      },
+    );
+  },
+  async removeMember(workspaceId, userId) {
+    await managementRequest<void>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    );
+  },
+  async changeMemberRole(workspaceId, userId, role) {
+    await managementRequest<{ userId: string; role: WorkspaceRole }>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+      { method: "PATCH", body: JSON.stringify({ role }) },
+    );
+  },
+  async transferOwnership(workspaceId, userId) {
+    await managementRequest<void>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/ownership/transfer`,
+      { method: "POST", body: JSON.stringify({ userId }) },
+    );
   },
 };
 

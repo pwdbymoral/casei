@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
+import { IdentityPermissionError } from "../src/identity-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 
@@ -62,4 +63,103 @@ describe("AUTH-002..005 HTTP boundary", () => {
     const response = await app.request(`http://localhost/v1/workspaces/${workspaceId}/recovery`);
     expect(response.status).toBe(401);
   });
+
+  it("lists members and invitations only for an owner-scoped workspace", async () => {
+    const owner = createAppWithRole("owner");
+    const members = await owner.request(`http://localhost/v1/workspaces/${workspaceId}/members`);
+    expect(members.status).toBe(200);
+    expect(await members.json()).toEqual({
+      members: [
+        {
+          userId: "user-member",
+          displayName: "Pessoa membro",
+          email: "member@example.com",
+          role: "member",
+          status: "active",
+          version: 0,
+        },
+      ],
+    });
+
+    const invitations = await owner.request(
+      `http://localhost/v1/workspaces/${workspaceId}/invitations`,
+    );
+    expect(invitations.status).toBe(200);
+    expect(await invitations.json()).toEqual({
+      invitations: [
+        {
+          id: workspaceId,
+          workspaceId,
+          email: "pending@example.com",
+          role: "viewer",
+          status: "pending",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const member = createAppWithRole("member");
+    const denied = await member.request(`http://localhost/v1/workspaces/${workspaceId}/members`);
+    expect(denied.status).toBe(403);
+
+    const foreign = await owner.request(
+      "http://localhost/v1/workspaces/0190f3c8-2a10-7abc-8def-1234567890ac/members",
+    );
+    expect(foreign.status).toBe(404);
+  });
 });
+
+function createAppWithRole(role: "owner" | "member" | "viewer") {
+  const service = {
+    resolveScope: async (_actor: unknown, requestedWorkspaceId: string) =>
+      requestedWorkspaceId === workspaceId
+        ? {
+            actor: { userId: "user-owner", email: "owner@example.com" },
+            workspaceId,
+            role,
+            correlationId: "",
+          }
+        : null,
+    listMembers: async (scope: { role: string }) => {
+      if (scope.role !== "owner") throw new IdentityPermissionError();
+      return {
+        members: [
+          {
+            userId: "user-member",
+            displayName: "Pessoa membro",
+            email: "member@example.com",
+            role: "member",
+            status: "active",
+            version: 0,
+          },
+        ],
+      };
+    },
+    listInvitations: async (scope: { role: string }) => {
+      if (scope.role !== "owner") throw new IdentityPermissionError();
+      return {
+        invitations: [
+          {
+            id: workspaceId,
+            workspaceId,
+            email: "pending@example.com",
+            role: "viewer",
+            status: "pending",
+            expiresAt: "2030-01-01T00:00:00.000Z",
+          },
+        ],
+      };
+    },
+  };
+  return createApp(undefined, {
+    identity: {
+      pool: {} as never,
+      service: service as never,
+      actorResolver: async () => ({
+        userId: "user-owner",
+        email: "owner@example.com",
+        displayName: "Pessoa owner",
+      }),
+    },
+  });
+}

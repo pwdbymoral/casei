@@ -62,6 +62,23 @@ export interface InvitationView {
   inviteUrl?: string;
 }
 
+export interface WorkspaceMemberView {
+  userId: string;
+  displayName: string;
+  email: string;
+  role: WorkspaceRole;
+  status: "active" | "revoked" | "recovery_only";
+  version: number;
+}
+
+export interface WorkspaceMembersView {
+  members: WorkspaceMemberView[];
+}
+
+export interface WorkspaceInvitationsView {
+  invitations: InvitationView[];
+}
+
 export class IdentityNotFoundError extends Error {
   readonly code = "not_found" as const;
   constructor() {
@@ -171,6 +188,60 @@ export class IdentityService {
         return role ? { actor, workspaceId, role, correlationId } : null;
       },
     );
+  }
+
+  async listMembers(scope: IdentityScope): Promise<WorkspaceMembersView> {
+    assertRole(scope, "owner");
+    return this.withScoped(scope, async (client) => {
+      const result = await client.query<WorkspaceMemberRow>(
+        `SELECT m.user_id, u.name AS display_name, u.email, m.role, m.status, m.version
+           FROM membership m
+           JOIN "user" u ON u.id = m.user_id
+          WHERE m.workspace_id = $1
+          ORDER BY CASE m.status WHEN 'active' THEN 0 WHEN 'recovery_only' THEN 1 ELSE 2 END,
+                   u.name ASC, m.user_id ASC`,
+        [scope.workspaceId],
+      );
+      return {
+        members: result.rows.map((row) => ({
+          userId: row.user_id,
+          displayName: row.display_name,
+          email: row.email,
+          role: row.role,
+          status: row.status,
+          version: row.version,
+        })),
+      };
+    });
+  }
+
+  async listInvitations(scope: IdentityScope): Promise<WorkspaceInvitationsView> {
+    assertRole(scope, "owner");
+    return this.withScoped(scope, async (client) => {
+      await client.query(
+        `UPDATE workspace_invitation
+            SET status = 'expired', updated_at = now(), version = version + 1
+          WHERE workspace_id = $1 AND status = 'pending' AND expires_at <= $2`,
+        [scope.workspaceId, this.now()],
+      );
+      const result = await client.query<InvitationListRow>(
+        `SELECT id, workspace_id, email, role, status, expires_at
+           FROM workspace_invitation
+          WHERE workspace_id = $1
+          ORDER BY created_at DESC, id DESC`,
+        [scope.workspaceId],
+      );
+      return {
+        invitations: result.rows.map((row) => ({
+          id: row.id,
+          workspaceId: row.workspace_id,
+          email: row.email,
+          role: row.role,
+          status: row.status,
+          expiresAt: new Date(row.expires_at).toISOString(),
+        })),
+      };
+    });
   }
 
   async createOnboarding(
@@ -778,6 +849,24 @@ interface InvitationRow {
   status: "pending" | "accepted" | "revoked" | "expired";
   expires_at: Date;
   accepted_by: string | null;
+}
+
+interface WorkspaceMemberRow {
+  user_id: string;
+  display_name: string;
+  email: string;
+  role: WorkspaceRole;
+  status: "active" | "revoked" | "recovery_only";
+  version: number;
+}
+
+interface InvitationListRow {
+  id: string;
+  workspace_id: string;
+  email: string;
+  role: "member" | "viewer";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expires_at: Date;
 }
 
 function toWorkspaceSummary(row: WorkspaceSummaryRow): WorkspaceSummaryView {

@@ -25,7 +25,9 @@ export function configureIdentityRoutes(
   router.use("/onboarding", options.actorMiddleware);
   router.use("/invitations/*", options.actorMiddleware);
   router.use("/workspaces/:workspaceId/*", options.actorMiddleware);
+  router.use("/workspaces/:workspaceId/invitations", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/invitations/*", options.scopeMiddleware);
+  router.use("/workspaces/:workspaceId/members", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/members/*", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/ownership/*", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/deactivation", options.scopeMiddleware);
@@ -61,6 +63,10 @@ export function configureIdentityRoutes(
     return context.json(result.invitation, result.replayed ? 200 : 201);
   });
 
+  router.get("/workspaces/:workspaceId/invitations", async (context) => {
+    return context.json(await service.listInvitations(scopeOf(context)));
+  });
+
   router.post("/workspaces/:workspaceId/invitations/:invitationId/resend", async (context) => {
     const result = await service.resendInvitation(
       scopeOf(context),
@@ -74,6 +80,10 @@ export function configureIdentityRoutes(
   router.delete("/workspaces/:workspaceId/members/:userId", async (context) => {
     await service.removeMember(scopeOf(context), context.req.param("userId"));
     return context.body(null, 204);
+  });
+
+  router.get("/workspaces/:workspaceId/members", async (context) => {
+    return context.json(await service.listMembers(scopeOf(context)));
   });
 
   router.patch("/workspaces/:workspaceId/members/:userId", async (context) => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   authenticatedWorkspaceAdapter,
+  authenticatedWorkspaceManagementAdapter,
   getActiveWorkspace,
   unauthenticatedPlatformAdminSessionPort,
   unauthenticatedWorkspaceAdapter,
@@ -65,5 +66,62 @@ describe("workspace shell boundary", () => {
     await expect(authenticatedWorkspaceAdapter.getSession()).rejects.toMatchObject({
       code: "unauthenticated",
     });
+  });
+
+  it("keeps member and invitation management behind the typed HTTP boundary", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/members")) {
+        return new Response(
+          JSON.stringify({
+            members: [
+              {
+                userId: "user-member",
+                displayName: "Pessoa membro",
+                email: "member@example.com",
+                role: "member",
+                status: "active",
+                version: 0,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/invitations")) {
+        return new Response(JSON.stringify({ invitations: [] }), { status: 200 });
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      authenticatedWorkspaceManagementAdapter.listMembers("workspace/1"),
+    ).resolves.toHaveLength(1);
+    await expect(
+      authenticatedWorkspaceManagementAdapter.listInvitations("workspace/1"),
+    ).resolves.toEqual([]);
+    await authenticatedWorkspaceManagementAdapter.createInvitation("workspace/1", {
+      email: "new@example.com",
+      role: "viewer",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/v1/workspaces/workspace%2F1/invitations"),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+      }),
+    );
+  });
+
+  it("maps owner-management authorization failures without leaking details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 403 })),
+    );
+    await expect(
+      authenticatedWorkspaceManagementAdapter.listMembers("workspace-1"),
+    ).rejects.toMatchObject({ code: "permission_denied" });
   });
 });

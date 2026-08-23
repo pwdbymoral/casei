@@ -73,6 +73,27 @@ export const invitationSchema = z.object({
 });
 export type InvitationContract = z.infer<typeof invitationSchema>;
 
+export const membershipStatusSchema = z.enum(["active", "revoked", "recovery_only"]);
+export const workspaceMemberSchema = z.object({
+  userId: userIdSchema,
+  displayName: z.string().min(1).max(200),
+  email: z.string().email(),
+  role: workspaceRoleSchema,
+  status: membershipStatusSchema,
+  version: z.number().int().nonnegative(),
+});
+export const workspaceMembersSchema = z.object({
+  members: z.array(workspaceMemberSchema),
+});
+export type WorkspaceMemberContract = z.infer<typeof workspaceMemberSchema>;
+
+/** Invitation listings never include the bearer token or invite URL. */
+export const workspaceInvitationListItemSchema = invitationSchema.omit({ inviteUrl: true });
+export const workspaceInvitationsSchema = z.object({
+  invitations: z.array(workspaceInvitationListItemSchema),
+});
+export type WorkspaceInvitationListItemContract = z.infer<typeof workspaceInvitationListItemSchema>;
+
 export const updateMembershipRoleSchema = z.object({ role: invitationRoleSchema });
 export const deactivateWorkspaceSchema = z.object({
   workspaceName: z.string().trim().min(2).max(200),

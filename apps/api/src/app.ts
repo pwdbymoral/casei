@@ -31,6 +31,8 @@ export interface AppOptions {
 
 export interface IdentityAppOptions {
   pool: Pool;
+  /** Injectable service boundary for HTTP contract tests; production uses the pool-backed service. */
+  service?: IdentityService;
   applicationRole?: string;
   webOrigin?: string;
   actorResolver?: (context: Parameters<MiddlewareHandler<ApiEnv>>[0]) => Promise<{
@@ -100,10 +102,12 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
     });
   }
   if (options.identity) {
-    const service = new IdentityService(options.identity.pool, {
-      applicationRole: options.identity.applicationRole,
-      webOrigin: options.identity.webOrigin,
-    });
+    const service =
+      options.identity.service ??
+      new IdentityService(options.identity.pool, {
+        applicationRole: options.identity.applicationRole,
+        webOrigin: options.identity.webOrigin,
+      });
     const actorResolver = options.identity.actorResolver ?? defaultActorResolver;
     const actorMiddleware = createActorMiddleware(actorResolver);
     const scopeMiddleware = createWorkspaceScopeMiddleware(
