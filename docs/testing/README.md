@@ -67,3 +67,12 @@ No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a 
 O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`. Além desse gate de execução, o ruleset `CodeQL merge protection` exige resultados de code scanning para a `main` e bloqueia alertas de code scanning classificados como erro ou alertas de segurança `high` ou superiores. O ruleset não possui bypass configurado.
 
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
+
+## Identidade
+
+Os testes de AUTH-001 executam o handler Better Auth 1.6.22 contra o adapter de memória e um
+`CaptureTransactionalEmailPort`; nenhum teste abre conexão SMTP. A integração cobre cadastro,
+verificação, login, logout, recuperação, revogação/listagem de sessões, callback externo,
+rate limit e reprocessamento idempotente da outbox. Em produção, `SMTP_HOST`, `SMTP_FROM` e
+`BETTER_AUTH_SECRET` são obrigatórios; o adapter Nodemailer usa TLS por padrão e falha no
+startup com diagnóstico sanitizado quando a configuração está incompleta.
