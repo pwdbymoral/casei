@@ -99,6 +99,16 @@ export class WorkspaceSessionError extends Error {
   }
 }
 
+export class WorkspaceManagementError extends Error {
+  constructor(
+    readonly status: number,
+    message = "Não foi possível atualizar a gestão do espaço.",
+  ) {
+    super(message);
+    this.name = "WorkspaceManagementError";
+  }
+}
+
 /** Production-safe default until AUTH-002 provides the authenticated adapter. */
 export const unauthenticatedWorkspaceAdapter: WorkspaceAdapter = {
   async getSession() {
@@ -184,7 +194,7 @@ async function managementRequest<T>(path: string, init: RequestInit = {}): Promi
   if (response.status === 401) throw new WorkspaceSessionError("unauthenticated");
   if (response.status === 403) throw new WorkspaceSessionError("permission_denied");
   if (response.status === 404) throw new WorkspaceSessionError("permission_denied");
-  if (!response.ok) throw new Error("Não foi possível atualizar a gestão do espaço.");
+  if (!response.ok) throw new WorkspaceManagementError(response.status);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }

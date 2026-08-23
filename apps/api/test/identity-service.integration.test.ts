@@ -100,6 +100,31 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       );
       expect(outboxState.rows).toEqual([{ state: "pending" }]);
 
+      const resent = await service.resendInvitation(
+        scope,
+        invitation.invitation.id,
+        "auth005-resend-invite-key",
+      );
+      await expect(
+        pool.query(
+          `SELECT id FROM auth_email_outbox WHERE message_kind = 'invitation' AND source_id = $1`,
+          [invitation.invitation.id],
+        ),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(
+          `SELECT id FROM auth_email_outbox WHERE message_kind = 'invitation' AND source_id = $1`,
+          [resent.invitation.id],
+        ),
+      ).resolves.toMatchObject({ rows: [{ id: expect.any(String) }] });
+      await service.revokeInvitation(scope, resent.invitation.id, "auth005-revoke-invite-key");
+      await expect(
+        pool.query(
+          `SELECT id FROM auth_email_outbox WHERE message_kind = 'invitation' AND source_id = $1`,
+          [resent.invitation.id],
+        ),
+      ).resolves.toMatchObject({ rows: [] });
+
       const expiringInvitation = await service.createInvitation(
         scope,
         { email: `expired-${suffix}@example.test`, role: "viewer" },
@@ -189,6 +214,18 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         0,
       );
       expect(first.recoveryUntil).toBe("2030-01-31T00:00:00.000Z");
+      await expect(
+        service.retryDeactivation(
+          owner,
+          workspaceId,
+          {
+            workspaceName: "Casa lifecycle",
+            reason: "retry após perda de resposta",
+          },
+          "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          0,
+        ),
+      ).resolves.toEqual(first);
       await expect(
         service.retryDeactivation(
           owner,

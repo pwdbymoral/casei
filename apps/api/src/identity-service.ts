@@ -452,6 +452,7 @@ export class IdentityService {
               WHERE workspace_id = $1 AND id = $2`,
             [scope.workspaceId, invitationId],
           );
+          await this.deleteInvitationEmailArtifacts(client, scope.workspaceId, invitationId);
           return this.insertInvitation(client, scope, row.email, row.role, false);
         },
       }),
@@ -478,6 +479,7 @@ export class IdentityService {
           );
           const row = invitation.rows[0];
           if (!row) throw new IdentityNotFoundError();
+          await this.deleteInvitationEmailArtifacts(client, scope.workspaceId, invitationId);
           if (row.status === "pending") {
             await client.query(
               `UPDATE workspace_invitation
@@ -759,30 +761,13 @@ export class IdentityService {
         `UPDATE workspace_invitation SET status = 'revoked', updated_at = now(), version = version + 1 WHERE workspace_id = $1 AND status = 'pending'`,
         [scope.workspaceId],
       );
+      await this.deleteInvitationEmailArtifacts(client, scope.workspaceId);
       await client.query(
         `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL, updated_at = now(), last_error = 'workspace_deletion_pending' WHERE workspace_id = $1 AND state IN ('pending', 'running', 'failed')`,
         [scope.workspaceId],
       );
       await client.query(
         `UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1 AND status = 'pending'`,
-        [scope.workspaceId],
-      );
-      await client.query(
-        `UPDATE auth_email_outbox o
-            SET state = 'failed', available_at = '9999-12-31T00:00:00.000Z',
-                last_error = 'workspace_deletion_pending'
-          FROM workspace_invitation i
-         WHERE o.source_id = i.id::text AND i.workspace_id = $1 AND o.state = 'pending'`,
-        [scope.workspaceId],
-      );
-      await client.query(
-        `UPDATE auth_email_intent e
-            SET state = 'expired', updated_at = now()
-          WHERE e.id IN (
-            SELECT o.intent_id FROM auth_email_outbox o
-            JOIN workspace_invitation i ON i.id::text = o.source_id
-            WHERE i.workspace_id = $1
-          ) AND e.state = 'queued'`,
         [scope.workspaceId],
       );
       await client.query(
@@ -839,6 +824,12 @@ export class IdentityService {
         );
         const row = result.rows[0];
         if (row?.status !== "deletion_pending") throw new IdentityNotFoundError();
+        if (row.version === expectedVersion + 1) {
+          if (row.name !== parsed.workspaceName)
+            throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
+          await ensurePurgeJob(client, workspaceId, row.expires_at, correlationId);
+          return { recoveryUntil: new Date(row.expires_at).toISOString(), version: row.version };
+        }
         if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
         if (row.name !== parsed.workspaceName)
           throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
@@ -987,24 +978,7 @@ export class IdentityService {
         await client.query(`UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1`, [
           workspaceId,
         ]);
-        await client.query(
-          `UPDATE auth_email_outbox o
-              SET state = 'failed', available_at = '9999-12-31T00:00:00.000Z',
-                  last_error = 'workspace_purged'
-            FROM workspace_invitation i
-           WHERE o.source_id = i.id::text AND i.workspace_id = $1`,
-          [workspaceId],
-        );
-        await client.query(
-          `UPDATE auth_email_intent e
-              SET state = 'expired', updated_at = now()
-            WHERE e.id IN (
-              SELECT o.intent_id FROM auth_email_outbox o
-              JOIN workspace_invitation i ON i.id::text = o.source_id
-              WHERE i.workspace_id = $1
-            )`,
-          [workspaceId],
-        );
+        await this.deleteInvitationEmailArtifacts(client, workspaceId);
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
       },
@@ -1194,6 +1168,26 @@ export class IdentityService {
        VALUES ($1, 'invitation', $2, $3)`,
       [intentId, invitationId, encryptAuthEmailPayload(message, this.authEmailSecret)],
     );
+  }
+
+  private async deleteInvitationEmailArtifacts(
+    client: PoolClient,
+    workspaceId: string,
+    invitationId?: string,
+  ): Promise<void> {
+    const deleted = await client.query<{ intent_id: string }>(
+      `DELETE FROM auth_email_outbox o
+        USING workspace_invitation i
+       WHERE o.source_id = i.id::text
+         AND i.workspace_id = $1
+         AND ($2::uuid IS NULL OR i.id = $2::uuid)
+       RETURNING o.intent_id`,
+      [workspaceId, invitationId ?? null],
+    );
+    const intentIds = deleted.rows.map(({ intent_id }) => intent_id);
+    if (intentIds.length > 0) {
+      await client.query(`DELETE FROM auth_email_intent WHERE id = ANY($1::uuid[])`, [intentIds]);
+    }
   }
 
   private async withScoped<T>(

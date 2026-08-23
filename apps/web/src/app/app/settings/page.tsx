@@ -20,8 +20,10 @@ import {
   authenticatedWorkspaceAdapter,
   authenticatedWorkspaceManagementAdapter,
   type WorkspaceInvitation,
+  WorkspaceManagementError,
   type WorkspaceMember,
   type WorkspaceSession,
+  WorkspaceSessionError,
 } from "@/lib/workspaces";
 
 const roleLabels = { owner: "proprietário", member: "membro", viewer: "leitor" } as const;
@@ -49,6 +51,13 @@ export default function SettingsPage() {
     [session],
   );
   const isOwner = workspace?.role === "owner";
+
+  function isTerminalActionError(error: unknown): boolean {
+    if (error instanceof WorkspaceManagementError) {
+      return ![408, 425, 429].includes(error.status) && error.status >= 400 && error.status < 500;
+    }
+    return error instanceof WorkspaceSessionError && error.code !== "offline";
+  }
 
   function actionIdempotencyKey(action: string): string {
     const existing = actionKeys.current.get(action);
@@ -116,6 +125,7 @@ export default function SettingsPage() {
       actionKeys.current.delete("invite");
       await load(workspace.id);
     } catch (error) {
+      if (isTerminalActionError(error)) actionKeys.current.delete("invite");
       setMessage(error instanceof Error ? error.message : "Não foi possível criar o convite.");
     } finally {
       setBusy(null);
@@ -132,6 +142,7 @@ export default function SettingsPage() {
       setMessage("Alteração salva.");
       if (workspace) await load(workspace.id);
     } catch (error) {
+      if (isTerminalActionError(error)) actionKeys.current.delete(action);
       setMessage(error instanceof Error ? error.message : "Não foi possível salvar a alteração.");
     } finally {
       setBusy(null);
