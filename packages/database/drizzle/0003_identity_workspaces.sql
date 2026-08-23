@@ -126,7 +126,7 @@ CREATE POLICY "workspace_deletion_recovery_scope" ON "workspace_deletion_recover
   USING (
     workspace_id = "app"."current_workspace_id"()
     OR (
-      owner_user_id = "app"."current_actor_id"
+      owner_user_id = "app"."current_actor_id"()
       AND status = 'active'
       AND expires_at > now()
       AND EXISTS (
