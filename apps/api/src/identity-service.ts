@@ -761,7 +761,7 @@ export class IdentityService {
             SET state = 'failed', available_at = '9999-12-31T00:00:00.000Z',
                 last_error = 'workspace_deletion_pending'
           FROM workspace_invitation i
-         WHERE o.source_id = i.id AND i.workspace_id = $1 AND o.state = 'pending'`,
+         WHERE o.source_id = i.id::text AND i.workspace_id = $1 AND o.state = 'pending'`,
         [scope.workspaceId],
       );
       await client.query(
@@ -769,7 +769,7 @@ export class IdentityService {
             SET state = 'expired', updated_at = now()
           WHERE e.id IN (
             SELECT o.intent_id FROM auth_email_outbox o
-            JOIN workspace_invitation i ON i.id = o.source_id
+            JOIN workspace_invitation i ON i.id::text = o.source_id
             WHERE i.workspace_id = $1
           ) AND e.state = 'queued'`,
         [scope.workspaceId],
@@ -973,7 +973,7 @@ export class IdentityService {
               SET state = 'failed', available_at = '9999-12-31T00:00:00.000Z',
                   last_error = 'workspace_purged'
             FROM workspace_invitation i
-           WHERE o.source_id = i.id AND i.workspace_id = $1`,
+           WHERE o.source_id = i.id::text AND i.workspace_id = $1`,
           [workspaceId],
         );
         await client.query(
@@ -981,7 +981,7 @@ export class IdentityService {
               SET state = 'expired', updated_at = now()
             WHERE e.id IN (
               SELECT o.intent_id FROM auth_email_outbox o
-              JOIN workspace_invitation i ON i.id = o.source_id
+              JOIN workspace_invitation i ON i.id::text = o.source_id
               WHERE i.workspace_id = $1
             )`,
           [workspaceId],
