@@ -242,10 +242,10 @@ if (!adminUrl) {
             role === "owner" && capability === "test.run",
         },
       );
-      assert.deepEqual(
-        await worker.runOnce(workspaceId, new Date(Date.now() + 60_000)),
-        { state: "succeeded", jobId },
-      );
+      assert.deepEqual(await worker.runOnce(workspaceId, new Date(Date.now() + 60_000)), {
+        state: "succeeded",
+        jobId,
+      });
       assert.equal(handled, 1);
 
       const success = await pool.query<{ state: string; attempts: number }>(
