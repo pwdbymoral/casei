@@ -41,7 +41,7 @@ Cada item abaixo é uma unidade de PR por padrão. Um agente deve:
 - [x] **MVP-000 Aprovar produto:** revisar e confirmar as oito [decisões de produto](../../specs/mvp-casei.md#decisões-de-produto-aprovadas), terminologia, escopo e non-goals.
 - [x] **MVP-001 Resolver drift documental:** marcar specs como vigentes, encerrar questões substituídas na spec de fundação e atualizar README/mapa de documentação.
 - [x] **MVP-002 ADR ledger:** aprovar dupla entrada, reconhecimento, reversão e projeções; incluir exemplos canônicos e invariantes SQL com FK composta de moeda, checks e constraint trigger `DEFERRABLE INITIALLY DEFERRED` de soma zero.
-- [x] **MVP-003 ADR operação:** decidir e-mail (`better-auth@1.6.16`, `nodemailer@9.0.5`), objeto temporário, executor de jobs e RLS/defesa em profundidade com versões, revalidação de jobs/downloads e documentação oficial.
+- [x] **MVP-003 ADR operação:** decidir e-mail (`better-auth@1.6.22`, `nodemailer@9.0.5`), objeto temporário, executor de jobs e RLS/defesa em profundidade com versões, revalidação de jobs/downloads e documentação oficial.
 - [x] **MVP-004 Mapa de jornadas:** produzir [wireflows de baixa fidelidade](../../ux/wireflows-mvp.md) para onboarding, captura rápida, fatura, import, lista de compras e admin; revisar por tarefa, não por estética.
 - [x] **MVP-005 Contratos transversais:** aprovar [IDs, Money, datas civis, erro HTTP, paginação, idempotência, optimistic concurrency e eventos de auditoria](../../architecture/contratos-transversais-mvp.md).
 
@@ -53,11 +53,11 @@ Gate concluído documentalmente em 2026-08-23, com as decisões de concorrência
 
 Executar schema/base antes das fatias paralelas.
 
-- [ ] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.16`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Testar migration up/down em banco descartável e verificar versões pinadas.
+- [x] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.22`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Migration up/down, isolamento/RLS, auditoria append-only, role segura e versões pinadas são exercitados no teste PostgreSQL descartável do CI.
 - [ ] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade.
 - [ ] **PLAT-003 Boundary HTTP:** `/v1`, parsing Zod, envelope de erro, correlation ID, auth actor, workspace scope, cursor e versionamento.
 - [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter; persistir ator/capacidade de jobs e revalidar membership antes de cada lote/transição.
-- [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit; spike contra `better-auth@1.6.16` para `auth_email_intent`/outbox, callback pós-commit, recovery de token, reenvio, expiração, falha de persistência, idempotência e callback URL.
+- [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit; spike contra `better-auth@1.6.22` para `auth_email_intent`/outbox, callback pós-commit, recovery de token, reenvio, expiração, falha de persistência, idempotência e callback URL.
 - [ ] **AUTH-002 Onboarding:** criação idempotente de espaço/owner, moeda/fuso/saldo inicial opcional e retomada após falha.
 - [ ] **AUTH-003 Memberships:** convite, reenvio, expiração, aceite, remoção e transferência de propriedade.
 - [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped, lock de membership e suíte negativa/concorrente entre dois espaços.

@@ -9,6 +9,8 @@
   "scripts": {
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/migrate.ts",
+    "db:auth-schema": "pnpm dlx --yes auth@1.6.22 generate --config ../../apps/api/src/auth.ts --output src/generated-auth-schema.ts --yes",
+    "test": "node --import tsx --test test/schema.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

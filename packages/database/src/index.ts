@@ -1,2 +1,3 @@
-/** Boundary reservado para conexão, schema e migrações PostgreSQL. */
-export {};
+export { createDatabase, getDatabasePool } from "./client.js";
+export { ensureApplicationRole } from "./roles.js";
+export * from "./schema.js";

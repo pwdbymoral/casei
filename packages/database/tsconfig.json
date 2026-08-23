@@ -5,5 +5,5 @@
     "moduleResolution": "NodeNext",
     "target": "ES2024"
   },
-  "include": ["src/**/*.ts", "drizzle.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "drizzle.config.ts"]
 }

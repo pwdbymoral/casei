@@ -12,6 +12,7 @@
     },
     "test": {
       "dependsOn": ["^build"],
+      "env": ["DATABASE_URL_TEST"],
       "outputs": ["coverage/**"]
     },
     "typecheck": {
