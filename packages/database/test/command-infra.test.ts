@@ -326,9 +326,7 @@ if (!adminUrl) {
       assert.equal(delayedRetry.rows[0]?.delayed, true);
       // The fixture only verifies backoff.  Retire it before exercising the
       // remaining jobs so a later worker cannot claim it after the delay.
-      await pool.query(
-        `UPDATE "job" SET state = 'cancelled' WHERE job_type = 'slow-failure.job'`,
-      );
+      await pool.query(`UPDATE "job" SET state = 'cancelled' WHERE job_type = 'slow-failure.job'`);
 
       await pool.query(
         `INSERT INTO "job"
