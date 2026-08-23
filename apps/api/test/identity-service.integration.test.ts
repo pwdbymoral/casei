@@ -181,7 +181,12 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         rows: [{ actor_id: null, required_capability: "system.purge", state: "pending" }],
       });
 
-      await service.cancelDeactivation(owner, workspaceId, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+      await service.cancelDeactivation(
+        owner,
+        workspaceId,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        first.version,
+      );
       const afterCancel = await pool.query<{ user_id: string; status: string }>(
         `SELECT user_id, status FROM membership WHERE workspace_id = $1 ORDER BY user_id`,
         [workspaceId],
@@ -191,6 +196,12 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         { user_id: ownerId, status: "active" },
         { user_id: revokedId, status: "revoked" },
       ]);
+      await expect(
+        pool.query<{ state: string }>(
+          `SELECT state FROM job WHERE job_type = 'workspace.purge' AND workspace_id = $1`,
+          [workspaceId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ state: "cancelled" }] });
 
       const scopeAfterCancel = await service.resolveScope(
         owner,

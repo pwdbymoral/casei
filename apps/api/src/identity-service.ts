@@ -9,6 +9,8 @@ import {
 import {
   enqueueOutboxEvent,
   executeIdempotent,
+  JobAuthorizationError,
+  JobLeaseLostError,
   type JsonValue,
   type Pool,
   type PoolClient,
@@ -807,13 +809,16 @@ export class IdentityService {
   async getRecovery(
     actor: IdentityActor,
     workspaceId: string,
-  ): Promise<{ status: string; recoveryUntil: string } | null> {
+  ): Promise<{ status: string; recoveryUntil: string; version: number } | null> {
     return withUnitOfWork(
       this.pool,
       { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole },
       async ({ client }) => {
-        const result = await client.query<{ status: string; expires_at: Date }>(
-          `SELECT r.status, r.expires_at FROM workspace_deletion_recovery r JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1 AND r.owner_user_id = $2 AND r.status = 'active'`,
+        const result = await client.query<{ status: string; expires_at: Date; version: number }>(
+          `SELECT r.status, r.expires_at, w.version
+             FROM workspace_deletion_recovery r
+             JOIN workspace w ON w.id = r.workspace_id
+            WHERE r.workspace_id = $1 AND r.owner_user_id = $2 AND r.status = 'active'`,
           [workspaceId, actor.userId],
         );
         const row = result.rows[0];
@@ -822,6 +827,7 @@ export class IdentityService {
           status:
             new Date(row.expires_at).getTime() <= this.now().getTime() ? "expired" : row.status,
           recoveryUntil: new Date(row.expires_at).toISOString(),
+          version: row.version,
         };
       },
     );
@@ -831,13 +837,18 @@ export class IdentityService {
     actor: IdentityActor,
     workspaceId: string,
     correlationId: string,
-  ): Promise<void> {
-    await withUnitOfWork(
+    expectedVersion: number,
+  ): Promise<{ version: number }> {
+    return withUnitOfWork(
       this.pool,
       { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole, correlationId },
       async ({ client }) => {
-        const result = await client.query<{ status: string; expires_at: Date }>(
-          `SELECT w.status, r.expires_at FROM workspace w JOIN workspace_deletion_recovery r ON r.workspace_id = w.id WHERE w.id = $1 AND r.owner_user_id = $2 AND r.status = 'active' FOR UPDATE`,
+        const result = await client.query<{ status: string; expires_at: Date; version: number }>(
+          `SELECT w.status, w.version, r.expires_at
+             FROM workspace w
+             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
+            WHERE w.id = $1 AND r.owner_user_id = $2 AND r.status = 'active'
+            FOR UPDATE OF w, r`,
           [workspaceId, actor.userId],
         );
         const row = result.rows[0];
@@ -846,8 +857,18 @@ export class IdentityService {
           new Date(row.expires_at).getTime() <= this.now().getTime()
         )
           throw new IdentityNotFoundError();
+        if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
         await client.query(
           `UPDATE workspace SET status = 'active', updated_at = now(), version = version + 1 WHERE id = $1`,
+          [workspaceId],
+        );
+        await client.query(
+          `UPDATE job
+              SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
+                  updated_at = now(), last_error = 'workspace_deletion_cancelled'
+            WHERE workspace_id = $1
+              AND job_type = 'workspace.purge' AND job_version = 1
+              AND state IN ('pending', 'running', 'failed')`,
           [workspaceId],
         );
         await client.query(
@@ -865,6 +886,7 @@ export class IdentityService {
           action: "workspace.deletion_canceled",
           targetId: workspaceId,
         });
+        return { version: row.version + 1 };
       },
     );
   }
@@ -874,6 +896,8 @@ export class IdentityService {
     workspaceId: string,
     correlationId: string,
     at = this.now(),
+    preserveJobId?: string,
+    preserveLeaseToken?: string,
   ): Promise<boolean> {
     return withUnitOfWork(
       this.pool,
@@ -885,6 +909,17 @@ export class IdentityService {
         );
         const row = result.rows[0];
         if (!row || new Date(row.expires_at).getTime() > at.getTime()) return false;
+        if (preserveJobId) {
+          const lease = await client.query(
+            `SELECT id FROM job
+              WHERE id = $1 AND workspace_id = $2
+                AND state = 'running' AND lease_token = $3
+                AND lease_until > clock_timestamp()
+              FOR UPDATE`,
+            [preserveJobId, workspaceId, preserveLeaseToken ?? ""],
+          );
+          if (!lease.rows[0]) throw new JobLeaseLostError();
+        }
         await client.query(
           `INSERT INTO workspace_tombstone (workspace_id, pseudonymous_owner_hash, deactivated_at, purge_at, audit_purge_at) VALUES ($1, $2, $3, $3, $4) ON CONFLICT (workspace_id) DO NOTHING`,
           [
@@ -895,8 +930,9 @@ export class IdentityService {
           ],
         );
         await client.query(
-          `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL WHERE workspace_id = $1`,
-          [workspaceId],
+          `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL
+             WHERE workspace_id = $1 AND ($2::uuid IS NULL OR id <> $2::uuid)`,
+          [workspaceId, preserveJobId ?? null],
         );
         await client.query(`UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1`, [
           workspaceId,
@@ -916,7 +952,14 @@ export class IdentityService {
           "workspace.purge:1",
           async (job) => {
             if (!job.workspaceId) throw new Error("Purge job is missing a workspace");
-            await this.purgeWorkspace(job.workspaceId, job.correlationId, this.now());
+            const purged = await this.purgeWorkspace(
+              job.workspaceId,
+              job.correlationId,
+              this.now(),
+              job.id,
+              job.leaseToken,
+            );
+            if (!purged) throw new JobAuthorizationError();
           },
         ],
       ]),

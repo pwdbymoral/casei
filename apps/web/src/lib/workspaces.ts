@@ -308,9 +308,13 @@ function getStoredWorkspaceId(): string | null {
 
 function withStoredWorkspace(session: WorkspaceSession): WorkspaceSession {
   const storedId = getStoredWorkspaceId();
-  const activeWorkspaceId = session.workspaces.some(({ id }) => id === storedId)
-    ? storedId
-    : (session.activeWorkspaceId ?? session.workspaces[0]?.id ?? null);
+  const storedWorkspace = session.workspaces.find(({ id }) => id === storedId);
+  const activeWorkspaceId =
+    (storedWorkspace?.status === "active" ? storedWorkspace.id : undefined) ??
+    session.workspaces.find(({ status }) => status === "active")?.id ??
+    session.activeWorkspaceId ??
+    session.workspaces[0]?.id ??
+    null;
 
   return { ...session, activeWorkspaceId };
 }

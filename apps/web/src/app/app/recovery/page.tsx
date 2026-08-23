@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { cn } from "@/lib/utils";
 import { authenticatedWorkspaceAdapter, type WorkspaceSession } from "@/lib/workspaces";
 
-type RecoveryView = { status: "active" | "expired"; recoveryUntil: string };
+type RecoveryView = { status: "active" | "expired"; recoveryUntil: string; version: number };
 
 function apiOrigin(): string {
   return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
@@ -26,6 +26,7 @@ export default function RecoveryPage() {
   const [error, setError] = useState<string | null>(null);
   const workspace = useMemo(
     () =>
+      session?.workspaces.find(({ status }) => status === "deletion_pending") ??
       session?.workspaces.find(({ id }) => id === session.activeWorkspaceId) ??
       session?.workspaces[0] ??
       null,
@@ -40,6 +41,7 @@ export default function RecoveryPage() {
         if (!mounted) return;
         setSession(nextSession);
         const nextWorkspace =
+          nextSession.workspaces.find(({ status }) => status === "deletion_pending") ??
           nextSession.workspaces.find(({ id }) => id === nextSession.activeWorkspaceId) ??
           nextSession.workspaces[0];
         if (nextWorkspace?.status !== "deletion_pending") {
@@ -64,13 +66,17 @@ export default function RecoveryPage() {
   }, [router]);
 
   async function cancel() {
-    if (!workspace || busy) return;
+    if (!workspace || !recovery || busy) return;
     setBusy(true);
     setError(null);
     try {
       const response = await fetch(
         `${apiOrigin()}/v1/workspaces/${encodeURIComponent(workspace.id)}/recovery/cancel`,
-        { method: "POST", credentials: "include", headers: { Accept: "application/json" } },
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { Accept: "application/json", "If-Match": `"v${recovery.version}"` },
+        },
       );
       if (!response.ok) throw new Error("A janela de recuperação pode ter expirado.");
       window.location.assign("/app");

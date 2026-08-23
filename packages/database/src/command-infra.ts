@@ -590,16 +590,19 @@ export class PostgresJobWorker {
 
   private async markSucceeded(job: JobRecord): Promise<boolean> {
     if (!job.workspaceId) return false;
+    const systemPurge = isSystemPurgeJob(job);
     return withUnitOfWork(
       this.pool,
-      {
-        workspaceId: job.workspaceId,
-        actorId: job.actorId ?? undefined,
-        applicationRole: this.options.applicationRole,
-      },
+      systemPurge
+        ? { applicationRole: this.options.applicationRole }
+        : {
+            workspaceId: job.workspaceId,
+            actorId: job.actorId ?? undefined,
+            applicationRole: this.options.applicationRole,
+          },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        if (!isSystemPurgeJob(job)) {
+        if (!systemPurge) {
           try {
             await assertMembership(
               client,

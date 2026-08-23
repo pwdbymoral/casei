@@ -151,15 +151,18 @@ export function configureIdentityRoutes(
     const actor = actorOf(context);
     const result = await service.getRecovery(actor, context.req.param("workspaceId"));
     if (!result) throw notFoundError();
+    setVersionHeaders(context, result.version);
     return context.json(result);
   });
 
   router.post("/workspaces/:workspaceId/recovery/cancel", async (context) => {
-    await service.cancelDeactivation(
+    const result = await service.cancelDeactivation(
       actorOf(context),
       context.req.param("workspaceId"),
       context.get("correlationId"),
+      requireIfMatch(context),
     );
+    setVersionHeaders(context, result.version);
     return context.body(null, 204);
   });
 }
