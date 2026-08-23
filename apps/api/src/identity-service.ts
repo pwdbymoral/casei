@@ -7,6 +7,7 @@ import {
   type WorkspaceRole,
 } from "@casei/contracts";
 import {
+  enqueueOutboxEvent,
   executeIdempotent,
   type JsonValue,
   type Pool,
@@ -46,6 +47,7 @@ export interface WorkspaceSummaryView {
   locale: "pt-BR";
   timeZone: string;
   status: "active" | "deletion_pending" | "deactivated";
+  version: number;
 }
 
 export interface WorkspaceSessionView {
@@ -149,11 +151,25 @@ export class IdentityService {
         const userRow = user.rows[0];
         if (!userRow) throw new IdentityNotFoundError();
         const memberships = await client.query<WorkspaceSummaryRow>(
-          `SELECT w.id, w.name, w.status, m.role, p.timezone
+          `SELECT w.id, w.name, w.status, w.version, m.role, p.timezone
              FROM membership m
              JOIN workspace w ON w.id = m.workspace_id
              JOIN workspace_preference p ON p.workspace_id = w.id
-            WHERE m.user_id = $1 AND m.status = 'active' AND w.status = 'active'
+            WHERE m.user_id = $1
+              AND (
+                (m.status = 'active' AND w.status = 'active')
+                OR (
+                  m.role = 'owner' AND m.status = 'recovery_only'
+                  AND w.status = 'deletion_pending'
+                  AND EXISTS (
+                    SELECT 1 FROM workspace_deletion_recovery r
+                     WHERE r.workspace_id = w.id
+                       AND r.owner_user_id = $1
+                       AND r.status = 'active'
+                       AND r.expires_at > now()
+                  )
+                )
+              )
             ORDER BY w.created_at ASC, w.id ASC`,
           [actor.userId],
         );
@@ -279,8 +295,11 @@ export class IdentityService {
           key: idempotencyKey,
           request: parsed,
           execute: async () => {
+            await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+              actor.userId,
+            ]);
             const existing = await client.query<WorkspaceSummaryRow>(
-              `SELECT w.id, w.name, w.status, m.role, p.timezone
+              `SELECT w.id, w.name, w.status, w.version, m.role, p.timezone
                  FROM membership m
                  JOIN workspace w ON w.id = m.workspace_id
                  JOIN workspace_preference p ON p.workspace_id = w.id
@@ -302,7 +321,7 @@ export class IdentityService {
             await setWorkspaceContext(client, workspaceId, actor);
             const inserted = await client.query<WorkspaceSummaryRow>(
               `INSERT INTO workspace (id, name) VALUES ($1, $2)
-               RETURNING id, name, status`,
+               RETURNING id, name, status, version`,
               [workspaceId, parsed.workspaceName],
             );
             await client.query(
@@ -338,6 +357,7 @@ export class IdentityService {
                 status: row.status,
                 role: "owner",
                 timezone: parsed.timeZone,
+                version: row.version,
               },
             };
           },
@@ -349,6 +369,7 @@ export class IdentityService {
         id: String(result.response.id),
         name: String(result.response.name),
         status: String(result.response.status) as WorkspaceSummaryView["status"],
+        version: Number(result.response.version ?? 0),
         role: "owner",
         locale: "pt-BR",
         timeZone: String(result.response.timezone),
@@ -482,9 +503,14 @@ export class IdentityService {
       },
       async ({ client }) => {
         const result = await client.query<
-          InvitationRow & { workspace_name: string; workspace_status: string; timezone: string }
+          InvitationRow & {
+            workspace_name: string;
+            workspace_status: string;
+            workspace_version: number;
+            timezone: string;
+          }
         >(
-          `SELECT i.*, w.name AS workspace_name, w.status AS workspace_status, p.timezone
+          `SELECT i.*, w.name AS workspace_name, w.status AS workspace_status, w.version AS workspace_version, p.timezone
              FROM workspace_invitation i
              JOIN workspace w ON w.id = i.workspace_id
              JOIN workspace_preference p ON p.workspace_id = w.id
@@ -502,6 +528,7 @@ export class IdentityService {
               status: invite.workspace_status,
               role: invite.role,
               timezone: invite.timezone,
+              version: invite.workspace_version,
             });
           }
           throw new IdentityNotFoundError();
@@ -558,23 +585,29 @@ export class IdentityService {
           status: invite.workspace_status,
           role: invite.role,
           timezone: invite.timezone,
+          version: invite.workspace_version,
         });
       },
     );
   }
 
-  async removeMember(scope: IdentityScope, userId: string): Promise<void> {
+  async removeMember(
+    scope: IdentityScope,
+    userId: string,
+    expectedVersion: number,
+  ): Promise<{ version: number }> {
     assertRole(scope, "owner");
-    await this.withScoped(scope, async (client) => {
+    return this.withScoped(scope, async (client) => {
       const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
         `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
         [scope.workspaceId, userId],
       );
       const row = result.rows[0];
       if (!row) throw new IdentityNotFoundError();
+      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
       if (row.role === "owner")
         throw new IdentityConflictError("Transfira a propriedade antes de remover o owner.");
-      if (row.status === "revoked") return;
+      if (row.status === "revoked") return { version: row.version };
       await client.query(
         `UPDATE membership SET status = 'revoked', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
         [scope.workspaceId, userId],
@@ -586,6 +619,7 @@ export class IdentityService {
         action: "membership.revoked",
         targetId: userId,
       });
+      return { version: row.version + 1 };
     });
   }
 
@@ -623,10 +657,22 @@ export class IdentityService {
     });
   }
 
-  async transferOwnership(scope: IdentityScope, userId: string): Promise<void> {
+  async transferOwnership(
+    scope: IdentityScope,
+    userId: string,
+    expectedVersion: number,
+  ): Promise<{ version: number }> {
     assertRole(scope, "owner");
-    if (userId === scope.actor.userId) return;
-    await this.withScoped(scope, async (client) => {
+    return this.withScoped(scope, async (client) => {
+      const workspace = await client.query<{ version: number }>(
+        `SELECT version FROM workspace WHERE id = $1 FOR UPDATE`,
+        [scope.workspaceId],
+      );
+      const workspaceRow = workspace.rows[0];
+      if (!workspaceRow) throw new IdentityNotFoundError();
+      if (workspaceRow.version !== expectedVersion)
+        throw new IdentityVersionConflictError(workspaceRow.version);
+      if (userId === scope.actor.userId) return { version: workspaceRow.version };
       const target = await client.query<{ role: WorkspaceRole; status: string }>(
         `SELECT role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
         [scope.workspaceId, userId],
@@ -640,6 +686,10 @@ export class IdentityService {
         `UPDATE membership SET role = 'owner', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
         [scope.workspaceId, userId],
       );
+      await client.query(
+        `UPDATE workspace SET version = version + 1, updated_at = now() WHERE id = $1`,
+        [scope.workspaceId],
+      );
       await writeAudit(client, {
         actorId: scope.actor.userId,
         workspaceId: scope.workspaceId,
@@ -647,23 +697,26 @@ export class IdentityService {
         action: "membership.ownership_transferred",
         targetId: userId,
       });
+      return { version: workspaceRow.version + 1 };
     });
   }
 
   async deactivateWorkspace(
     scope: IdentityScope,
     input: unknown,
-  ): Promise<{ recoveryUntil: string }> {
+    expectedVersion: number,
+  ): Promise<{ recoveryUntil: string; version: number }> {
     assertRole(scope, "owner");
     if (!scope.actor.recentAuthentication) throw new IdentityRecentAuthError();
     const parsed = deactivateWorkspaceSchema.parse(input);
     return this.withScoped(scope, async (client) => {
-      const workspace = await client.query<{ name: string; status: string }>(
-        `SELECT name, status FROM workspace WHERE id = $1 FOR UPDATE`,
+      const workspace = await client.query<{ name: string; status: string; version: number }>(
+        `SELECT name, status, version FROM workspace WHERE id = $1 FOR UPDATE`,
         [scope.workspaceId],
       );
       const row = workspace.rows[0];
       if (!row) throw new IdentityNotFoundError();
+      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
       if (row.status !== "active") throw new IdentityConflictError("O espaço já foi desativado.");
       if (row.name !== parsed.workspaceName)
         throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
@@ -701,7 +754,7 @@ export class IdentityService {
         targetId: scope.workspaceId,
         reason: parsed.reason,
       });
-      return { recoveryUntil: until.toISOString() };
+      return { recoveryUntil: until.toISOString(), version: row.version + 1 };
     });
   }
 
@@ -711,7 +764,8 @@ export class IdentityService {
     workspaceId: string,
     input: unknown,
     correlationId: string,
-  ): Promise<{ recoveryUntil: string }> {
+    expectedVersion: number,
+  ): Promise<{ recoveryUntil: string; version: number }> {
     if (!actor.recentAuthentication) throw new IdentityRecentAuthError();
     const parsed = deactivateWorkspaceSchema.parse(input);
     return withUnitOfWork(
@@ -724,8 +778,13 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
-        const result = await client.query<{ name: string; status: string; expires_at: Date }>(
-          `SELECT w.name, w.status, r.expires_at
+        const result = await client.query<{
+          name: string;
+          status: string;
+          expires_at: Date;
+          version: number;
+        }>(
+          `SELECT w.name, w.status, w.version, r.expires_at
              FROM workspace w
              JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
                                                   AND r.owner_user_id = $2
@@ -736,10 +795,11 @@ export class IdentityService {
         );
         const row = result.rows[0];
         if (row?.status !== "deletion_pending") throw new IdentityNotFoundError();
+        if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
         if (row.name !== parsed.workspaceName)
           throw new IdentityConflictError("Confirme o nome atual do espaço para continuar.");
         await ensurePurgeJob(client, workspaceId, row.expires_at, correlationId);
-        return { recoveryUntil: new Date(row.expires_at).toISOString() };
+        return { recoveryUntil: new Date(row.expires_at).toISOString(), version: row.version };
       },
     );
   }
@@ -895,6 +955,18 @@ export class IdentityService {
       `INSERT INTO workspace_invitation (id, workspace_id, email, token_hash, role, invited_by, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [id, scope.workspaceId, email, hashToken(token), role, scope.actor.userId, expiresAt],
     );
+    await enqueueOutboxEvent(client, {
+      eventType: "workspace.invitation_created",
+      eventVersion: 1,
+      workspaceId: scope.workspaceId,
+      actorId: scope.actor.userId,
+      requiredCapability: "membership.invite",
+      correlationId: scope.correlationId,
+      // This is a metadata-only notification intent. The bearer token remains
+      // in the command response for explicit owner copy/share and is never
+      // persisted in outbox payloads or operational logs.
+      payload: { invitationId: id, email, role },
+    });
     await writeAudit(client, {
       actorId: scope.actor.userId,
       workspaceId: scope.workspaceId,
@@ -943,6 +1015,7 @@ interface WorkspaceSummaryRow {
   status: string;
   role: WorkspaceRole;
   timezone: string;
+  version: number;
 }
 
 interface InvitationRow {
@@ -982,6 +1055,7 @@ function toWorkspaceSummary(row: WorkspaceSummaryRow): WorkspaceSummaryView {
     locale: "pt-BR",
     timeZone: row.timezone,
     status: row.status as WorkspaceSummaryView["status"],
+    version: row.version,
   };
 }
 

@@ -6,6 +6,8 @@ export type WorkspaceSummary = {
   role: WorkspaceRole;
   locale: "pt-BR";
   timeZone: string;
+  status: "active" | "deletion_pending" | "deactivated";
+  version: number;
 };
 
 export type WorkspaceUser = {
@@ -61,14 +63,14 @@ export interface WorkspaceManagementAdapter {
   ): Promise<WorkspaceInvitation>;
   resendInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation>;
   revokeInvitation(workspaceId: string, invitationId: string): Promise<void>;
-  removeMember(workspaceId: string, userId: string): Promise<void>;
+  removeMember(workspaceId: string, userId: string, version: number): Promise<void>;
   changeMemberRole(
     workspaceId: string,
     userId: string,
     role: "member" | "viewer",
     version: number,
   ): Promise<void>;
-  transferOwnership(workspaceId: string, userId: string): Promise<void>;
+  transferOwnership(workspaceId: string, userId: string, version: number): Promise<void>;
 }
 
 export type WorkspaceSessionErrorCode = "unauthenticated" | "permission_denied" | "offline";
@@ -113,7 +115,15 @@ async function workspaceRequest(): Promise<WorkspaceSession> {
   if (!response.ok)
     throw new WorkspaceSessionError("offline", "Não foi possível carregar seus espaços.");
   const body = (await response.json()) as Omit<WorkspaceSession, "activeWorkspaceId">;
-  return withStoredWorkspace({ ...body, activeWorkspaceId: null });
+  return withStoredWorkspace({
+    ...body,
+    workspaces: body.workspaces.map((workspace) => ({
+      ...workspace,
+      status: workspace.status ?? "active",
+      version: workspace.version ?? 0,
+    })),
+    activeWorkspaceId: null,
+  });
 }
 
 /** Real browser adapter. It never fabricates a workspace when the API denies the session. */
@@ -211,10 +221,10 @@ export const authenticatedWorkspaceManagementAdapter: WorkspaceManagementAdapter
       },
     );
   },
-  async removeMember(workspaceId, userId) {
+  async removeMember(workspaceId, userId, version) {
     await managementRequest<void>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
-      { method: "DELETE" },
+      { method: "DELETE", headers: { "If-Match": `"v${version}"` } },
     );
   },
   async changeMemberRole(workspaceId, userId, role, version) {
@@ -223,10 +233,14 @@ export const authenticatedWorkspaceManagementAdapter: WorkspaceManagementAdapter
       { method: "PATCH", headers: { "If-Match": `"v${version}"` }, body: JSON.stringify({ role }) },
     );
   },
-  async transferOwnership(workspaceId, userId) {
+  async transferOwnership(workspaceId, userId, version) {
     await managementRequest<void>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/ownership/transfer`,
-      { method: "POST", body: JSON.stringify({ userId }) },
+      {
+        method: "POST",
+        headers: { "If-Match": `"v${version}"` },
+        body: JSON.stringify({ userId }),
+      },
     );
   },
 };
@@ -269,6 +283,8 @@ const fixtureSession: WorkspaceSession = {
       role: "owner",
       locale: "pt-BR",
       timeZone: "America/Fortaleza",
+      status: "active",
+      version: 0,
     },
     {
       id: "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202",
@@ -276,6 +292,8 @@ const fixtureSession: WorkspaceSession = {
       role: "member",
       locale: "pt-BR",
       timeZone: "America/Sao_Paulo",
+      status: "active",
+      version: 0,
     },
   ],
   activeWorkspaceId: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201",

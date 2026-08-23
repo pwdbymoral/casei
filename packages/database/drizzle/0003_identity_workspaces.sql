@@ -73,10 +73,26 @@ CREATE OR REPLACE FUNCTION "app"."actor_has_workspace"(candidate uuid) RETURNS b
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, app
 AS $$
   SELECT EXISTS (
-    SELECT 1 FROM membership
-     WHERE workspace_id = candidate
-       AND user_id = app.current_actor_id()
-       AND status = 'active'
+    SELECT 1
+      FROM membership m
+      JOIN workspace w ON w.id = m.workspace_id
+     WHERE m.workspace_id = candidate
+       AND m.user_id = app.current_actor_id()
+       AND m.status = 'active'
+       AND w.status = 'active'
+    UNION ALL
+    SELECT 1
+      FROM membership m
+      JOIN workspace w ON w.id = m.workspace_id
+      JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
+     WHERE m.workspace_id = candidate
+       AND m.user_id = app.current_actor_id()
+       AND m.role = 'owner'
+       AND m.status = 'recovery_only'
+       AND w.status = 'deletion_pending'
+       AND r.owner_user_id = m.user_id
+       AND r.status = 'active'
+       AND r.expires_at > now()
   );
 $$;
 --> statement-breakpoint
@@ -84,6 +100,19 @@ GRANT EXECUTE ON FUNCTION "app"."current_actor_email"() TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."actor_has_workspace"(uuid) TO casei_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON "workspace_invitation", "workspace_deletion_recovery" TO casei_app;
 GRANT SELECT, INSERT ON "workspace_tombstone" TO casei_app;
+--> statement-breakpoint
+DROP POLICY "job_scope" ON "job";
+CREATE POLICY "job_scope" ON "job"
+  USING (
+    workspace_id = "app"."current_workspace_id"()
+    OR (
+      job_type = 'workspace.purge'
+      AND job_version = 1
+      AND actor_id IS NULL
+      AND required_capability = 'system.purge'
+    )
+  )
+  WITH CHECK (workspace_id = "app"."current_workspace_id"());
 --> statement-breakpoint
 ALTER TABLE "workspace_invitation" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "workspace_invitation" FORCE ROW LEVEL SECURITY;
@@ -94,7 +123,19 @@ CREATE POLICY "workspace_invitation_scope" ON "workspace_invitation"
 ALTER TABLE "workspace_deletion_recovery" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "workspace_deletion_recovery" FORCE ROW LEVEL SECURITY;
 CREATE POLICY "workspace_deletion_recovery_scope" ON "workspace_deletion_recovery"
-  USING (workspace_id = "app"."current_workspace_id"())
+  USING (
+    workspace_id = "app"."current_workspace_id"()
+    OR (
+      owner_user_id = "app"."current_actor_id"
+      AND status = 'active'
+      AND expires_at > now()
+      AND EXISTS (
+        SELECT 1 FROM workspace w
+        WHERE w.id = workspace_deletion_recovery.workspace_id
+          AND w.status = 'deletion_pending'
+      )
+    )
+  )
   WITH CHECK (workspace_id = "app"."current_workspace_id"());
 --> statement-breakpoint
 DROP POLICY "workspace_scope" ON "workspace";
@@ -110,7 +151,20 @@ DROP POLICY "membership_scope" ON "membership";
 CREATE POLICY "membership_scope" ON "membership"
   USING (
     workspace_id = "app"."current_workspace_id"()
-    OR (user_id = "app"."current_actor_id"() AND status = 'active')
+    OR (
+      user_id = "app"."current_actor_id"()
+      AND status = 'active'
+    )
+    OR (
+      user_id = "app"."current_actor_id"()
+      AND status = 'recovery_only'
+      AND role = 'owner'
+      AND EXISTS (
+        SELECT 1 FROM workspace w
+        WHERE w.id = membership.workspace_id
+          AND w.status = 'deletion_pending'
+      )
+    )
   )
   WITH CHECK (workspace_id = "app"."current_workspace_id"());
 --> statement-breakpoint

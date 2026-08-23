@@ -70,7 +70,7 @@ export default function SettingsPage() {
         const nextWorkspace =
           nextSession.workspaces.find(({ id }) => id === nextSession.activeWorkspaceId) ??
           nextSession.workspaces[0];
-        if (nextWorkspace) void load(nextWorkspace.id);
+        if (nextWorkspace?.role === "owner") void load(nextWorkspace.id);
       })
       .catch((error) => {
         if (!active) return;
@@ -142,6 +142,15 @@ export default function SettingsPage() {
         status="empty"
         title="Nenhum espaço ativo"
         description="Crie ou aceite um convite para continuar."
+      />
+    );
+  }
+  if (!isOwner) {
+    return (
+      <AsyncState
+        status="permission"
+        title="Configurações do owner"
+        description="Somente o proprietário pode gerenciar pessoas, convites e permissões deste espaço."
       />
     );
   }
@@ -295,7 +304,7 @@ export default function SettingsPage() {
                           if (!window.confirm(`Remover ${member.displayName} deste espaço?`))
                             return;
                           void run(`remove-${member.userId}`, () =>
-                            management.removeMember(workspace.id, member.userId),
+                            management.removeMember(workspace.id, member.userId, member.version),
                           );
                         }}
                       >

@@ -19,7 +19,15 @@ export async function getServerWorkspaceSession(): Promise<WorkspaceSession | nu
     if (!response.ok) return null;
     const body = (await response.json()) as Omit<WorkspaceSession, "activeWorkspaceId">;
     const activeWorkspaceId = body.workspaces[0]?.id ?? null;
-    return { ...body, activeWorkspaceId };
+    return {
+      ...body,
+      workspaces: body.workspaces.map((workspace) => ({
+        ...workspace,
+        status: workspace.status ?? "active",
+        version: workspace.version ?? 0,
+      })),
+      activeWorkspaceId,
+    };
   } catch {
     return null;
   }

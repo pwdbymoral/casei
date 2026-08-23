@@ -88,7 +88,12 @@ export function configureIdentityRoutes(
   });
 
   router.delete("/workspaces/:workspaceId/members/:userId", async (context) => {
-    await service.removeMember(scopeOf(context), context.req.param("userId"));
+    const result = await service.removeMember(
+      scopeOf(context),
+      context.req.param("userId"),
+      requireIfMatch(context),
+    );
+    setVersionHeaders(context, result.version);
     return context.body(null, 204);
   });
 
@@ -112,19 +117,32 @@ export function configureIdentityRoutes(
     const userId =
       typeof body === "object" && body !== null && "userId" in body ? String(body.userId) : "";
     if (!userId) throw notFoundError();
-    await service.transferOwnership(scopeOf(context), userId);
+    const result = await service.transferOwnership(
+      scopeOf(context),
+      userId,
+      requireIfMatch(context),
+    );
+    setVersionHeaders(context, result.version);
     return context.body(null, 204);
   });
 
   router.post("/workspaces/:workspaceId/deactivation", async (context) => {
     const actor = actorOf(context);
     const workspaceId = context.req.param("workspaceId");
+    const expectedVersion = requireIfMatch(context);
     const input = await parseJsonBody(context, deactivateWorkspaceSchema);
     const scope = await service.resolveScope(actor, workspaceId, context.get("correlationId"));
     const result = scope
-      ? await service.deactivateWorkspace(scope, input)
-      : await service.retryDeactivation(actor, workspaceId, input, context.get("correlationId"));
-    return context.json(result);
+      ? await service.deactivateWorkspace(scope, input, expectedVersion)
+      : await service.retryDeactivation(
+          actor,
+          workspaceId,
+          input,
+          context.get("correlationId"),
+          expectedVersion,
+        );
+    setVersionHeaders(context, result.version);
+    return context.json({ recoveryUntil: result.recoveryUntil });
   });
 
   // Recovery is intentionally not behind operational membership middleware:

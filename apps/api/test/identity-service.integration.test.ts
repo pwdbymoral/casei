@@ -22,6 +22,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
     const ownerId = `auth005-owner-${suffix}`;
     const memberId = `auth005-member-${suffix}`;
     const revokedId = `auth005-revoked-${suffix}`;
+    const onboardingId = `auth005-onboarding-${suffix}`;
 
     try {
       await ensureApplicationRole(adminPool);
@@ -46,14 +47,17 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       );
       await pool.query(
         `INSERT INTO "user" (id, name, email, email_verified) VALUES
-          ($1, 'Owner', $4, true), ($2, 'Membro', $5, true), ($3, 'Revogado', $6, true)`,
+          ($1, 'Owner', $5, true), ($2, 'Membro', $6, true), ($3, 'Revogado', $7, true),
+          ($4, 'Onboarding', $8, true)`,
         [
           ownerId,
           memberId,
           revokedId,
+          onboardingId,
           `${ownerId}@example.test`,
           `${memberId}@example.test`,
           `${revokedId}@example.test`,
+          `${onboardingId}@example.test`,
         ],
       );
       await pool.query(
@@ -72,10 +76,70 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       expect(scope?.role).toBe("owner");
       if (!scope) throw new Error("owner scope was not resolved");
 
-      const first = await service.deactivateWorkspace(scope, {
-        workspaceName: "Casa lifecycle",
-        reason: "teste de ciclo de vida",
+      const invitation = await service.createInvitation(
+        scope,
+        { email: `invite-${suffix}@example.test`, role: "viewer" },
+        "auth005-invite-key",
+      );
+      expect(invitation.invitation.inviteUrl).toContain("/invite/");
+      const outbox = await pool.query<{ payload: unknown }>(
+        `SELECT payload FROM outbox_event WHERE event_type = 'workspace.invitation_created' AND workspace_id = $1`,
+        [workspaceId],
+      );
+      expect(outbox.rows).toHaveLength(1);
+      expect(outbox.rows[0]?.payload).toEqual({
+        invitationId: invitation.invitation.id,
+        email: `invite-${suffix}@example.test`,
+        role: "viewer",
       });
+      expect(JSON.stringify(outbox.rows[0]?.payload)).not.toContain(
+        invitation.invitation.inviteUrl,
+      );
+
+      const onboardingResults = await Promise.all([
+        service.createOnboarding(
+          { userId: onboardingId, email: `${onboardingId}@example.test` },
+          {
+            displayName: "Onboarding 1",
+            workspaceName: "Casa concorrente 1",
+            currency: "BRL",
+            timeZone: "America/Fortaleza",
+            initialBalanceMinor: "0",
+            includeInitialBalance: false,
+          },
+          "auth005-onboarding-key-a",
+          "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        ),
+        service.createOnboarding(
+          { userId: onboardingId, email: `${onboardingId}@example.test` },
+          {
+            displayName: "Onboarding 2",
+            workspaceName: "Casa concorrente 2",
+            currency: "BRL",
+            timeZone: "America/Fortaleza",
+            initialBalanceMinor: "0",
+            includeInitialBalance: false,
+          },
+          "auth005-onboarding-key-b",
+          "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+        ),
+      ]);
+      expect(onboardingResults[0]?.workspace.id).toBe(onboardingResults[1]?.workspace.id);
+      await expect(
+        pool.query(
+          `SELECT count(*)::int AS count FROM membership WHERE user_id = $1 AND role = 'owner'`,
+          [onboardingId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+
+      const first = await service.deactivateWorkspace(
+        scope,
+        {
+          workspaceName: "Casa lifecycle",
+          reason: "teste de ciclo de vida",
+        },
+        0,
+      );
       expect(first.recoveryUntil).toBe("2030-01-31T00:00:00.000Z");
       await expect(
         service.retryDeactivation(
@@ -86,6 +150,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
             reason: "retry após perda de resposta",
           },
           "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          first.version,
         ),
       ).resolves.toEqual(first);
 
@@ -98,6 +163,15 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         { user_id: ownerId, status: "recovery_only" },
         { user_id: revokedId, status: "revoked" },
       ]);
+      await expect(service.getSession(owner)).resolves.toMatchObject({
+        workspaces: [
+          expect.objectContaining({
+            id: workspaceId,
+            status: "deletion_pending",
+            role: "owner",
+          }),
+        ],
+      });
       await expect(
         pool.query<{ actor_id: string | null; required_capability: string; state: string }>(
           `SELECT actor_id, required_capability, state FROM job WHERE job_type = 'workspace.purge' AND workspace_id = $1`,
@@ -125,10 +199,14 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       );
       expect(scopeAfterCancel?.role).toBe("owner");
       if (!scopeAfterCancel) throw new Error("owner scope was not restored");
-      await service.deactivateWorkspace(scopeAfterCancel, {
-        workspaceName: "Casa lifecycle",
-        reason: "teste do cutoff",
-      });
+      await service.deactivateWorkspace(
+        scopeAfterCancel,
+        {
+          workspaceName: "Casa lifecycle",
+          reason: "teste do cutoff",
+        },
+        2,
+      );
       clock.now = new Date("2030-01-30T23:59:59.999Z");
       await expect(service.getRecovery(owner, workspaceId)).resolves.toMatchObject({
         status: "active",

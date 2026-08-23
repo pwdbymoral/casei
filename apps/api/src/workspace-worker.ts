@@ -44,11 +44,10 @@ async function main(): Promise<void> {
       return 0;
     });
   await runBatch();
-  const timer = setInterval(
+  setInterval(
     () => void runBatch(),
     Number.isFinite(pollMilliseconds) && pollMilliseconds > 0 ? pollMilliseconds : 5000,
   );
-  timer.unref();
 }
 
 if (process.argv[1] && /workspace-worker\.(?:ts|js)$/.test(process.argv[1])) void main();

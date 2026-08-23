@@ -18,6 +18,8 @@ const session: WorkspaceSession = {
       role: "owner",
       locale: "pt-BR",
       timeZone: "America/Fortaleza",
+      status: "active",
+      version: 0,
     },
   ],
   activeWorkspaceId: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201",
@@ -143,6 +145,23 @@ describe("workspace shell boundary", () => {
         method: "DELETE",
         headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
       }),
+    );
+  });
+
+  it("sends the member and workspace versions on destructive management actions", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await authenticatedWorkspaceManagementAdapter.removeMember("workspace-1", "user-1", 3);
+    await authenticatedWorkspaceManagementAdapter.transferOwnership("workspace-1", "user-1", 7);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("/members/user-1"),
+      expect.objectContaining({ headers: expect.objectContaining({ "If-Match": '"v3"' }) }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("/ownership/transfer"),
+      expect.objectContaining({ headers: expect.objectContaining({ "If-Match": '"v7"' }) }),
     );
   });
 });

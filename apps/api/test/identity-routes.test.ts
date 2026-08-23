@@ -143,13 +143,38 @@ describe("AUTH-002..005 HTTP boundary", () => {
     expect(revoked.status).toBe(204);
   });
 
+  it("requires If-Match before removing, transferring, or deactivating a workspace", async () => {
+    const app = createAppWithRole("owner");
+    const headers = { "content-type": "application/json" };
+    await expect(
+      app.request(`http://localhost/v1/workspaces/${workspaceId}/members/user-member`, {
+        method: "DELETE",
+        headers,
+      }),
+    ).resolves.toHaveProperty("status", 428);
+    await expect(
+      app.request(`http://localhost/v1/workspaces/${workspaceId}/ownership/transfer`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ userId: "user-member" }),
+      }),
+    ).resolves.toHaveProperty("status", 428);
+    await expect(
+      app.request(`http://localhost/v1/workspaces/${workspaceId}/deactivation`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ workspaceName: "Casa", reason: "teste" }),
+      }),
+    ).resolves.toHaveProperty("status", 428);
+  });
+
   it("retries deactivation through recovery entitlement without an active scope", async () => {
     const app = createAppWithRole("owner", false);
     const response = await app.request(
       `http://localhost/v1/workspaces/${workspaceId}/deactivation`,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "If-Match": '"v1"' },
         body: JSON.stringify({ workspaceName: "Casa", reason: "retry" }),
       },
     );
@@ -203,7 +228,7 @@ function createAppWithRole(role: "owner" | "member" | "viewer", scopeAvailable =
       throw new IdentityVersionConflictError(2);
     },
     revokeInvitation: async () => ({ replayed: false }),
-    retryDeactivation: async () => ({ recoveryUntil: "2030-01-31T00:00:00.000Z" }),
+    retryDeactivation: async () => ({ recoveryUntil: "2030-01-31T00:00:00.000Z", version: 1 }),
   };
   return createApp(undefined, {
     identity: {

@@ -31,6 +31,7 @@ export const workspaceSummarySchema = z.object({
   locale: z.literal("pt-BR"),
   timeZone: z.string().min(1).max(64),
   status: z.enum(["active", "deletion_pending", "deactivated"]).default("active"),
+  version: z.number().int().nonnegative().default(0),
 });
 export type WorkspaceSummaryContract = z.infer<typeof workspaceSummarySchema>;
 

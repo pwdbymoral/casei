@@ -9,6 +9,17 @@ function apiOrigin(): string {
   return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
 }
 
+const onboardingKeyStorage = "casei:onboarding-idempotency:v1";
+
+function onboardingIdempotencyKey(): string {
+  if (typeof window === "undefined") return `onboarding-${crypto.randomUUID()}`;
+  const existing = window.localStorage.getItem(onboardingKeyStorage);
+  if (existing) return existing;
+  const key = `onboarding-${crypto.randomUUID()}`;
+  window.localStorage.setItem(onboardingKeyStorage, key);
+  return key;
+}
+
 export default function OnboardingPage() {
   const router = useRouter();
   return (
@@ -24,7 +35,7 @@ export default function OnboardingPage() {
             credentials: "include",
             headers: {
               "Content-Type": "application/json",
-              "Idempotency-Key": `onboarding-${crypto.randomUUID()}`,
+              "Idempotency-Key": onboardingIdempotencyKey(),
             },
             body: JSON.stringify(draft),
           });
@@ -37,6 +48,7 @@ export default function OnboardingPage() {
             } | null;
             throw new Error(body?.error?.message ?? "Não foi possível criar o espaço.");
           }
+          window.localStorage.removeItem(onboardingKeyStorage);
           router.replace("/app");
         }}
       />

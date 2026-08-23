@@ -4,6 +4,10 @@ DROP TRIGGER IF EXISTS "workspace_tombstone_rehydration_guard" ON "workspace";
 DROP FUNCTION IF EXISTS "app"."prevent_workspace_tombstone_rehydration"();
 DROP POLICY IF EXISTS "workspace_deletion_recovery_scope" ON "workspace_deletion_recovery";
 DROP POLICY IF EXISTS "workspace_invitation_scope" ON "workspace_invitation";
+DROP POLICY IF EXISTS "job_scope" ON "job";
+CREATE POLICY "job_scope" ON "job"
+  USING (workspace_id = "app"."current_workspace_id"())
+  WITH CHECK (workspace_id = "app"."current_workspace_id"());
 DROP POLICY IF EXISTS "workspace_scope" ON "workspace";
 CREATE POLICY "workspace_scope" ON "workspace"
   USING (id = "app"."current_workspace_id"())
