@@ -85,6 +85,17 @@ export interface StatementView {
   version: number;
 }
 
+export interface StatementItemView {
+  id: string;
+  transactionId: string;
+  statementId: string;
+  type: "purchase" | "payment";
+  state: "planned" | "partially_settled" | "posted" | "canceled";
+  description: string;
+  occurredOn: string;
+  amount: { currency: string; minor: string };
+}
+
 interface TransactionRow {
   id: string;
   workspace_id: string;
@@ -225,6 +236,45 @@ export class FinanceService {
     });
   }
 
+  async listStatementItems(scope: FinanceScope, statementId: string): Promise<StatementItemView[]> {
+    return this.withScopedClient(scope, async (client) => {
+      const statement = await client.query<{ id: string }>(
+        `SELECT id FROM credit_statement WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, statementId],
+      );
+      if (!statement.rows[0]) throw new FinanceNotFoundError();
+      const result = await client.query<{
+        id: string;
+        statement_id: string;
+        state: StatementItemView["state"];
+        description: string;
+        occurred_on: string;
+        amount_minor: string | bigint;
+        currency_code: string;
+        payment_id: string | null;
+      }>(
+        `SELECT t.id, t.statement_id, t.state, t.description, t.occurred_on,
+                t.amount_minor, t.currency_code, p.id AS payment_id
+           FROM finance_transaction t
+           LEFT JOIN card_payment p
+             ON p.workspace_id = t.workspace_id AND p.transaction_id = t.id
+          WHERE t.workspace_id = $1 AND t.statement_id = $2
+          ORDER BY t.occurred_on ASC, t.created_at ASC, t.id ASC`,
+        [scope.workspaceId, statementId],
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        transactionId: row.id,
+        statementId: row.statement_id,
+        type: row.payment_id ? "payment" : "purchase",
+        state: row.state,
+        description: row.description,
+        occurredOn: row.occurred_on,
+        amount: { currency: row.currency_code, minor: row.amount_minor.toString() },
+      }));
+    });
+  }
+
   async closeStatement(
     scope: FinanceScope,
     statementId: string,
@@ -265,6 +315,54 @@ export class FinanceService {
           );
           const value = updated.rows[0];
           if (!value) throw new VersionConflictError();
+          await this.recordStatementAudit(client, scope, statementId, "statement.closed");
+          return { statusCode: 200, response: toStatementView(value) as unknown as JsonValue };
+        },
+      }),
+    );
+    return result.response as unknown as StatementView;
+  }
+
+  async reopenStatement(
+    scope: FinanceScope,
+    statementId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<StatementView> {
+    assertFinanceCapability(scope, "finance.write");
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/statements/${statementId}/reopen`,
+        key: idempotencyKey,
+        request: { statementId, expectedVersion, confirm: true },
+        execute: async () => {
+          const current = await client.query(
+            `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+               FROM credit_statement s
+               JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
+              WHERE s.workspace_id = $1 AND s.id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, statementId],
+          );
+          const row = current.rows[0] as Record<string, unknown> | undefined;
+          if (!row) throw new FinanceNotFoundError();
+          if (Number(row.version) !== expectedVersion) throw new VersionConflictError();
+          assertStatementCanReopen({
+            state: String(row.state),
+            paidMinor: BigInt(String(row.paid_minor)),
+          });
+          const updated = await client.query(
+            `UPDATE credit_statement
+                SET state = 'open', version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $3
+              RETURNING id, workspace_id, card_id, period_start, closing_on, due_on,
+                        state, total_minor, paid_minor, $4::varchar AS currency_code, version`,
+            [scope.workspaceId, statementId, expectedVersion, row.currency_code],
+          );
+          const value = updated.rows[0];
+          if (!value) throw new VersionConflictError();
+          await this.recordStatementAudit(client, scope, statementId, "statement.reopened");
           return { statusCode: 200, response: toStatementView(value) as unknown as JsonValue };
         },
       }),
@@ -1025,6 +1123,21 @@ export class FinanceService {
     return id;
   }
 
+  private async recordStatementAudit(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    statementId: string,
+    action: "statement.closed" | "statement.reopened",
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO audit_event
+         (category, action, actor_id, workspace_id, target_type, target_id,
+          origin, correlation_id, result)
+       VALUES ('finance', $1, $2, $3, 'credit_statement', $4, 'api', $5, 'success')`,
+      [action, scope.actorId, scope.workspaceId, statementId, scope.correlationId],
+    );
+  }
+
   private async workspaceCurrency(client: PgPoolClient, workspaceId: string): Promise<string> {
     const result = await client.query<{ currency_code: string }>(
       `SELECT currency_code FROM workspace_preference WHERE workspace_id = $1`,
@@ -1136,6 +1249,17 @@ export class FinanceConflictError extends Error {
 }
 export class VersionConflictError extends Error {
   readonly code = "version_conflict" as const;
+}
+
+export function assertStatementCanReopen(input: { state: string; paidMinor: bigint }): void {
+  if (input.paidMinor > 0n) {
+    throw new FinanceConflictError(
+      "Faturas com pagamentos não podem ser reabertas; cancele os pagamentos primeiro.",
+    );
+  }
+  if (input.state !== "closed") {
+    throw new FinanceConflictError("Somente uma fatura fechada pode ser reaberta.");
+  }
 }
 
 async function setFinanceScope(client: PgPoolClient, scope: FinanceScope, applicationRole: string) {

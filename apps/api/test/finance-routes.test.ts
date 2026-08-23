@@ -9,6 +9,7 @@ const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
 const cardId = "0190f3c8-2a10-7abc-8def-1234567890ad";
 const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
+const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
 
 describe("finance HTTP composition", () => {
   it("mounts the scoped transaction command below /v1", async () => {
@@ -185,5 +186,88 @@ describe("finance HTTP composition", () => {
     expect(closed.status).toBe(200);
     expect(closed.headers.get("etag")).toBe('"v1"');
     await expect(closed.json()).resolves.toMatchObject({ id: statementId, state: "closed" });
+  });
+
+  it("explains statement composition and reopens a closed statement explicitly", async () => {
+    const fakeService = {
+      listStatementItems: async () => [
+        {
+          id: statementItemId,
+          transactionId,
+          statementId,
+          type: "purchase",
+          state: "posted",
+          description: "Mercado",
+          occurredOn: "2026-08-23",
+          amount: { currency: "BRL", minor: "2500" },
+        },
+      ],
+      reopenStatement: async () => ({
+        id: statementId,
+        workspaceId,
+        cardId,
+        periodStart: "2026-08-11",
+        closingOn: "2026-09-10",
+        dueOn: "2026-09-17",
+        state: "open",
+        total: { currency: "BRL", minor: "2500" },
+        paid: { currency: "BRL", minor: "0" },
+        openAmount: { currency: "BRL", minor: "2500" },
+        version: 2,
+      }),
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const items = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/items`,
+    );
+    expect(items.status).toBe(200);
+    await expect(items.json()).resolves.toEqual({
+      items: [expect.objectContaining({ transactionId, type: "purchase" })],
+      page: { nextCursor: null, hasMore: false },
+    });
+
+    const rejected = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/reopen`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "statement-reopen-route-001",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: false }),
+      },
+    );
+    expect(rejected.status).toBe(422);
+
+    const reopened = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/reopen`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "statement-reopen-route-002",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+    expect(reopened.status).toBe(200);
+    expect(reopened.headers.get("etag")).toBe('"v2"');
+    await expect(reopened.json()).resolves.toMatchObject({ id: statementId, state: "open" });
   });
 });

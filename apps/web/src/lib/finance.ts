@@ -45,6 +45,17 @@ export type Statement = {
   version: number;
 };
 
+export type StatementItem = {
+  id: string;
+  transactionId: string;
+  statementId: string;
+  type: "purchase" | "payment";
+  state: Transaction["state"];
+  description: string;
+  occurredOn: string;
+  amount: Money;
+};
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -82,7 +93,9 @@ export type FinanceAdapter = {
     },
   ): Promise<CreditCard>;
   listStatements(workspaceId: string, cardId?: string): Promise<Statement[]>;
+  listStatementItems(workspaceId: string, statementId: string): Promise<StatementItem[]>;
   closeStatement(workspaceId: string, statement: Statement): Promise<Statement>;
+  reopenStatement(workspaceId: string, statement: Statement): Promise<Statement>;
   payStatement(
     workspaceId: string,
     statement: Statement,
@@ -181,8 +194,19 @@ export function createHttpFinanceAdapter(
       list<Statement>(
         `/workspaces/${workspaceId}/statements${cardId ? `?cardId=${encodeURIComponent(cardId)}` : ""}`,
       ),
+    listStatementItems: (workspaceId, statementId) =>
+      list<StatementItem>(`/workspaces/${workspaceId}/statements/${statementId}/items`),
     closeStatement: (workspaceId, statement) =>
       call<Statement>(`/workspaces/${workspaceId}/statements/${statement.id}/close`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${statement.version}"`,
+        },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    reopenStatement: (workspaceId, statement) =>
+      call<Statement>(`/workspaces/${workspaceId}/statements/${statement.id}/reopen`, {
         method: "POST",
         headers: {
           "Idempotency-Key": idempotencyKey(),
@@ -315,8 +339,33 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     },
     listStatements: async (_workspaceId, cardId) =>
       statements.filter((statement) => !cardId || statement.cardId === cardId),
+    listStatementItems: async (_workspaceId, statementId) =>
+      transactions
+        .filter((transaction) => transaction.statementId === statementId)
+        .map((transaction) => ({
+          id: transaction.id,
+          transactionId: transaction.id,
+          statementId,
+          type: transaction.kind === "transfer" ? ("payment" as const) : ("purchase" as const),
+          state: transaction.state,
+          description: transaction.description,
+          occurredOn: transaction.occurredOn,
+          amount: transaction.amount,
+        })),
     closeStatement: async (_workspaceId, statement) => {
       const value = { ...statement, state: "closed" as const, version: statement.version + 1 };
+      const index = statements.findIndex(({ id }) => id === statement.id);
+      if (index >= 0) statements[index] = value;
+      return value;
+    },
+    reopenStatement: async (_workspaceId, statement) => {
+      if (statement.state !== "closed" || BigInt(statement.paid.minor) > BigInt(0)) {
+        throw new FinanceAdapterError(
+          "Apenas faturas fechadas e sem pagamentos podem ser reabertas.",
+          409,
+        );
+      }
+      const value = { ...statement, state: "open" as const, version: statement.version + 1 };
       const index = statements.findIndex(({ id }) => id === statement.id);
       if (index >= 0) statements[index] = value;
       return value;

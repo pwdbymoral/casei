@@ -52,4 +52,46 @@ describe("finance adapter", () => {
     const after = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
     expect(after).toHaveLength(before.length + 1);
   });
+
+  it("uses version preconditions for explicit statement reopening", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+      expect(JSON.parse(String(init?.body))).toEqual({ confirm: true });
+      return new Response(
+        JSON.stringify({
+          id: "019b5d9e-3c12-7a11-8d47-7b5b5dd7a211",
+          workspaceId: "workspace",
+          cardId: "card",
+          periodStart: "2026-08-11",
+          closingOn: "2026-09-10",
+          dueOn: "2026-09-17",
+          state: "open",
+          total: { currency: "BRL", minor: "2500" },
+          paid: { currency: "BRL", minor: "0" },
+          openAmount: { currency: "BRL", minor: "2500" },
+          version: 4,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    await adapter.reopenStatement("workspace", {
+      id: "019b5d9e-3c12-7a11-8d47-7b5b5dd7a211",
+      workspaceId: "workspace",
+      cardId: "card",
+      periodStart: "2026-08-11",
+      closingOn: "2026-09-10",
+      dueOn: "2026-09-17",
+      state: "closed",
+      total: { currency: "BRL", minor: "2500" },
+      paid: { currency: "BRL", minor: "0" },
+      openAmount: { currency: "BRL", minor: "2500" },
+      version: 3,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      "/v1/workspaces/workspace/statements/019b5d9e-3c12-7a11-8d47-7b5b5dd7a211/reopen",
+      expect.any(Object),
+    );
+  });
 });

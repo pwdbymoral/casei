@@ -14,6 +14,7 @@
 - [x] Correções de invariantes: reversão atualiza fatura aberta atomicamente, faturas fechadas/pagas não mudam silenciosamente, recorrência variável não liquida sem confirmação, pagamentos cancelados são rejeitados e eventos/lançamentos publicados permanecem append-only.
 - [x] Rotas `/v1/workspaces/:workspaceId/{transactions,categories,cards,recurrences,installments}` e pagamento de fatura, aguardando composição com o middleware de sessão/membership.
 - [x] Testes de domínio/contrato e integração PostgreSQL cobrindo soma zero, parcelas, meses curtos, datas civis, role real e imutabilidade de eventos publicados.
+- [x] Incremento de fatura: composição ordenada de compras e pagamentos, reabertura explícita somente para fatura fechada sem pagamentos, concorrência otimista e confirmação acessível na interface.
 
 ## Limitações rastreáveis
 
@@ -21,7 +22,7 @@ Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara 
 
 - `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública, busca/cursor completo, defaults de categorias e UI de captura/linha do tempo.
 - `PLAN`: liquidação parcial, janela móvel materializada por job, pausa/retomada e comandos de edição por escopo; a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
-- `CARD`: listagem/detalhe de faturas, fechamento/reabertura, movimentação entre faturas abertas, estorno/tarifas e crédito excedente com reconciliação visual.
+- `CARD`: movimentação entre faturas abertas, ajuste pós-fechamento, estorno/tarifas e crédito excedente ainda permanecem; listagem, fechamento, composição e reabertura sem pagamentos já possuem API e interface.
 - `GOAL/INSIGHT`: persistência de metas/reservas, projeção/read models e UI ficam em fatias próprias; as funções puras de contribuição/valor seguro não persistem dados.
 - UI e composição em `createApp` devem ser feitas depois que AUTH-004 fornecer o resolver de scope; esta PR não altera auth nem shell.
 

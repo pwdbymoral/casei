@@ -8,6 +8,7 @@ import {
   domainIdSchema,
   paginationQuerySchema,
   payStatementSchema,
+  reopenStatementSchema,
   statementListQuerySchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
@@ -75,6 +76,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   router.get("/workspaces/:workspaceId/statements", async (context) => {
     const query = parseQuery(context, statementListQuerySchema);
     const items = await service.listStatements(scopeOf(context), query.cardId, query.limit);
+    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+  });
+
+  router.get("/workspaces/:workspaceId/statements/:statementId/items", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const items = await service.listStatementItems(scopeOf(context), statementId);
     return context.json({ items, page: { nextCursor: null, hasMore: false } });
   });
 
@@ -173,6 +180,20 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     const expectedVersion = requireIfMatch(context);
     await parseJsonBody(context, closeStatementSchema);
     const statement = await service.closeStatement(
+      scopeOf(context),
+      statementId,
+      requiredIdempotencyKey(context),
+      expectedVersion,
+    );
+    setVersionHeaders(context, statement.version);
+    return context.json(statement);
+  });
+
+  router.post("/workspaces/:workspaceId/statements/:statementId/reopen", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const expectedVersion = requireIfMatch(context);
+    await parseJsonBody(context, reopenStatementSchema);
+    const statement = await service.reopenStatement(
       scopeOf(context),
       statementId,
       requiredIdempotencyKey(context),
