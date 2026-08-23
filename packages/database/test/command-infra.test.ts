@@ -224,7 +224,8 @@ if (!adminUrl) {
           authorizeCapability: ({ role }) => role === "owner",
         },
       );
-      const retryNow = new Date();
+      // Use a small future tolerance because the fixture's `now()` is evaluated by PostgreSQL.
+      const retryNow = new Date(Date.now() + 60_000);
       assert.equal((await failingWorker.runOnce(workspaceId, retryNow)).state, "failed");
       const failed = await pool.query<{ state: string; attempts: number; last_error: string }>(
         `SELECT state, attempts, last_error FROM "job" WHERE job_type = 'failure.job'`,
