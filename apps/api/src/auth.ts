@@ -1,17 +1,15 @@
+import { createHash } from "node:crypto";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { createDatabase } from "@casei/database";
 import type { BetterAuthOptions } from "better-auth";
 import { betterAuth } from "better-auth/minimal";
-
 import {
   type AuthEmailIntentStore,
   type AuthEmailKind,
   type AuthEmailMessage,
-  CaptureTransactionalEmailPort,
   DrizzleAuthEmailIntentStore,
-  dispatchQueuedAuthEmail,
   MemoryAuthEmailIntentStore,
-  NodemailerTransactionalEmailPort,
+  queueAuthEmail,
   smtpConfigFromEnvironment,
   type TransactionalEmailPort,
 } from "./auth-email.js";
@@ -85,7 +83,9 @@ export async function validateAuthCallbackRequest(
     return null;
   }
   const callback = body.callbackURL ?? body.redirectTo;
-  if (typeof callback !== "string" || callback.startsWith("/")) return null;
+  const isRelativeCallback =
+    typeof callback === "string" && callback.startsWith("/") && !callback.startsWith("//");
+  if (typeof callback !== "string" || isRelativeCallback) return null;
   if (!isAllowedAuthOrigin(callback, origins)) {
     return Response.json(
       { message: "Invalid callbackURL", code: "INVALID_CALLBACK_URL" },
@@ -107,7 +107,8 @@ function assertCallbackUrlAllowlist(url: string, origins: string[]): string | nu
   const outer = new URL(url);
   if (!origins.includes(outer.origin)) throw new Error("Auth callback URL is not allowlisted");
   const callbackURL = nestedCallbackUrl(url);
-  if (callbackURL && !isAllowedAuthOrigin(callbackURL, origins)) {
+  const isRelativeCallback = callbackURL?.startsWith("/") && !callbackURL.startsWith("//");
+  if (callbackURL && !isRelativeCallback && !isAllowedAuthOrigin(callbackURL, origins)) {
     throw new Error("Auth callback URL is not allowlisted");
   }
   return callbackURL;
@@ -135,7 +136,7 @@ function makeAuthMessage(
     callbackUrl,
     correlationId: authCorrelationId(request),
     expiresAt,
-    sourceId: `${kind}:${data.token}`,
+    sourceId: createHash("sha256").update(`${kind}\0${data.token}`).digest("hex"),
   };
 }
 
@@ -163,11 +164,9 @@ export function createAuth(options: AuthOptions = {}) {
           applicationDatabase as NonNullable<typeof applicationDatabase>,
           secret ?? "development-only-secret",
         ));
-  const emailPort =
-    options.emailPort ??
-    (isProduction
-      ? new NodemailerTransactionalEmailPort(smtpConfigFromEnvironment())
-      : new CaptureTransactionalEmailPort());
+  // The API process only persists intents. The worker constructs the actual
+  // transport; production still validates its SMTP configuration at startup.
+  if (isProduction) smtpConfigFromEnvironment();
 
   const queueEmail = async (
     kind: AuthEmailKind,
@@ -176,7 +175,7 @@ export function createAuth(options: AuthOptions = {}) {
     expiresIn: number,
   ) => {
     const message = makeAuthMessage(kind, data, request, origins, expiresIn);
-    await dispatchQueuedAuthEmail(emailStore, emailPort, message);
+    await queueAuthEmail(emailStore, message);
   };
 
   return betterAuth({
@@ -192,6 +191,7 @@ export function createAuth(options: AuthOptions = {}) {
         await queueEmail("password_reset", data, request, 60 * 60);
       },
       resetPasswordTokenExpiresIn: 60 * 60,
+      revokeSessionsOnPasswordReset: true,
     },
     emailVerification: {
       sendOnSignUp: true,

@@ -68,7 +68,10 @@ Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de prod
 
 Os testes de AUTH-001 executam o handler Better Auth 1.6.22 contra o adapter de memória e um
 `CaptureTransactionalEmailPort`; nenhum teste abre conexão SMTP. A integração cobre cadastro,
-verificação, login, logout, recuperação, revogação/listagem de sessões, callback externo,
-rate limit e reprocessamento idempotente da outbox. Em produção, `SMTP_HOST`, `SMTP_FROM` e
-`BETTER_AUTH_SECRET` são obrigatórios; o adapter Nodemailer usa TLS por padrão e falha no
+verificação (inclusive callback relativo padrão), login, logout, recuperação, revogação/listagem
+de sessões, callback externo, rate limit, hash de token, falha/recovery e reprocessamento
+idempotente da outbox. A API apenas grava a intent/outbox; `pnpm --filter @casei/api worker` é o
+processo separado que faz claim com lease, entrega e retry dos e-mails persistidos. Em produção,
+`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_SECURE=true` e
+`BETTER_AUTH_SECRET` são obrigatórios; o adapter Nodemailer exige TLS autenticado e falha no
 startup com diagnóstico sanitizado quando a configuração está incompleta.
