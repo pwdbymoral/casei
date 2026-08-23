@@ -44,7 +44,7 @@ if (!adminUrl) {
         await adminPool.query(`ALTER TABLE "${ownedTable}" OWNER TO "${ownershipRole}"`);
         await assert.rejects(
           ensureApplicationRole(adminPool, ownershipRole),
-          new RegExp(`${ownershipRole} must not own public table ${ownedTable}`),
+          new RegExp(`${ownershipRole} must not own table public\\.${ownedTable}`),
         );
       } finally {
         await adminPool.query(`DROP TABLE IF EXISTS "${ownedTable}"`);

@@ -30,18 +30,20 @@ export async function ensureApplicationRole(pool: Pool, roleName = defaultApplic
     throw new Error(`${roleName} must remain a non-superuser role without BYPASSRLS`);
   }
 
-  const ownership = await pool.query<{ relname: string }>(
-    `SELECT c.relname
+  const ownership = await pool.query<{ schema: string; relname: string }>(
+    `SELECT n.nspname AS schema, c.relname
      FROM pg_class AS c
      JOIN pg_roles AS r ON r.oid = c.relowner
      JOIN pg_namespace AS n ON n.oid = c.relnamespace
      WHERE r.rolname = $1
-       AND n.nspname = 'public'
+       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
        AND c.relkind IN ('r', 'p')
      LIMIT 1`,
     [roleName],
   );
   if (ownership.rows[0]) {
-    throw new Error(`${roleName} must not own public table ${ownership.rows[0].relname}`);
+    throw new Error(
+      `${roleName} must not own table ${ownership.rows[0].schema}.${ownership.rows[0].relname}`,
+    );
   }
 }
