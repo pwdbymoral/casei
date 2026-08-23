@@ -92,9 +92,7 @@ if (!adminUrl) {
             session_user: string;
             current_user: string;
             current_role: string;
-          }>(
-            `SELECT session_user, current_user, current_role`,
-          );
+          }>(`SELECT session_user, current_user, current_role`);
           return result.rows[0];
         },
       );
