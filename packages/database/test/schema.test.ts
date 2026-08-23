@@ -62,26 +62,33 @@ if (!adminUrl) {
       const appClient = await pool.connect();
       try {
         await appClient.query("SET ROLE casei_app");
-        await appClient.query(`SELECT set_config('app.workspace_id', $1, true)`, [
-          firstWorkspaceId,
-        ]);
-        const visible = await appClient.query<{ id: string }>(
-          `SELECT id FROM "workspace" ORDER BY id`,
-        );
-        assert.deepEqual(
-          visible.rows.map((row) => row.id),
-          [firstWorkspaceId],
-        );
+        await appClient.query("BEGIN");
+        try {
+          await appClient.query(`SELECT set_config('app.workspace_id', $1, true)`, [
+            firstWorkspaceId,
+          ]);
+          const visible = await appClient.query<{ id: string }>(
+            `SELECT id FROM "workspace" ORDER BY id`,
+          );
+          assert.deepEqual(
+            visible.rows.map((row) => row.id),
+            [firstWorkspaceId],
+          );
 
-        await assert.rejects(
-          appClient.query(
-            `INSERT INTO "membership" (workspace_id, user_id, role)
-             VALUES ($1, $2, 'viewer')`,
-            [secondWorkspaceId, secondUser],
-          ),
-        );
-
-        await appClient.query(`SELECT set_config('app.workspace_id', '', true)`);
+          await appClient.query("SAVEPOINT cross_workspace_attempt");
+          await assert.rejects(
+            appClient.query(
+              `INSERT INTO "membership" (workspace_id, user_id, role)
+               VALUES ($1, $2, 'viewer')`,
+              [secondWorkspaceId, secondUser],
+            ),
+          );
+          await appClient.query("ROLLBACK TO SAVEPOINT cross_workspace_attempt");
+          await appClient.query("COMMIT");
+        } catch (error) {
+          await appClient.query("ROLLBACK");
+          throw error;
+        }
         const failClosed = await appClient.query(`SELECT id FROM "workspace"`);
         assert.equal(failClosed.rowCount, 0);
       } finally {
