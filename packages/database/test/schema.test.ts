@@ -128,7 +128,11 @@ if (!adminUrl) {
         const failClosed = await appClient.query(`SELECT id FROM "workspace"`);
         assert.equal(failClosed.rowCount, 0);
       } finally {
-        appClient.release();
+        try {
+          await appClient.query("RESET ROLE");
+        } finally {
+          appClient.release();
+        }
       }
 
       const rls = await pool.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
