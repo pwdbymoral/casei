@@ -35,7 +35,16 @@ Papéis do MVP:
 - Convite possui e-mail, papel, emissor, espaço e expiração; aceitar com outro e-mail é bloqueado.
 - Reenvio invalida token anterior; aceite e revogação são idempotentes.
 - Remover membro revoga acesso imediatamente e preserva autoria histórica pelo identificador e nome no momento do evento.
+- Toda mutação doméstica e toda remoção/downgrade de membership bloqueiam a mesma linha de membership na transação; se a revogação vencer a disputa, a mutação não produz efeito.
+- Jobs diferidos carregam ator, espaço e capacidade exigida e revalidam os três antes de cada lote/transição; revogação interrompe o job sem aplicar novos lotes.
 - Troca de espaço ativo não mistura cache, URL, sugestões recentes ou dados entre espaços.
+
+### Desativação e exclusão do espaço
+
+- Somente o owner pode iniciar a desativação, com autenticação recente, confirmação explícita do nome do espaço e motivo auditado.
+- A operação é idempotente: bloqueia novas mutações, revoga sessões/memberships domésticas, cancela ou interrompe jobs pendentes e preserva a trilha append-only durante a retenção definida pela política de privacidade.
+- O estado `deletion_pending`/`deactivated` é visível ao owner; recuperação só é possível durante a janela de retenção aprovada. A purga física posterior é job administrativo separado, com retry idempotente, auditoria e evidência de backup/restore.
+- Histórico, autoria, exports e arquivos seguem a mesma decisão de retenção; não há exclusão física parcial nem acesso de membro após a confirmação.
 
 ## Perfil e preferências
 
@@ -85,7 +94,9 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - [ ] Cadastro, verificação, login, recuperação, logout e revogação de sessões funcionam sem enumeração de conta.
 - [ ] Onboarding cria exatamente um espaço e membership owner sob retry.
 - [ ] Matriz de papéis é aplicada no servidor e refletida na interface, com testes cruzados entre espaços.
+- [ ] Revogação/downgrade concorrente com mutação e com lote de job é serializada e o perdedor não altera dados.
 - [ ] Convite expirado, revogado, reenviado e aceito concorrentemente permanece consistente.
 - [ ] Owner transfere propriedade antes de sair; último owner/admin não pode ser removido.
+- [ ] Owner desativa/exclui o espaço com confirmação, idempotência, bloqueio de novas mutações, tratamento de jobs e retenção/purga auditáveis.
 - [ ] Console administrativo elimina operações rotineiras via terminal e não expõe conteúdo do espaço.
 - [ ] Suspensão, revogação, promoção e jobs administrativos exigem motivo, proteção reforçada e auditoria.

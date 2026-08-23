@@ -40,27 +40,28 @@ Cada item abaixo é uma unidade de PR por padrão. Um agente deve:
 
 - [x] **MVP-000 Aprovar produto:** revisar e confirmar as oito [decisões de produto](../../specs/mvp-casei.md#decisões-de-produto-aprovadas), terminologia, escopo e non-goals.
 - [x] **MVP-001 Resolver drift documental:** marcar specs como vigentes, encerrar questões substituídas na spec de fundação e atualizar README/mapa de documentação.
-- [x] **MVP-002 ADR ledger:** aprovar dupla entrada, reconhecimento, reversão e projeções; incluir exemplos canônicos e invariantes SQL.
-- [x] **MVP-003 ADR operação:** decidir e-mail, objeto temporário, executor de jobs e RLS/defesa em profundidade com versões e documentação oficial.
+- [x] **MVP-002 ADR ledger:** aprovar dupla entrada, reconhecimento, reversão e projeções; incluir exemplos canônicos e invariantes SQL com FK composta de moeda, checks e constraint trigger `DEFERRABLE INITIALLY DEFERRED` de soma zero.
+- [x] **MVP-003 ADR operação:** decidir e-mail (`better-auth@1.6.16`, `nodemailer@9.0.5`), objeto temporário, executor de jobs e RLS/defesa em profundidade com versões, revalidação de jobs/downloads e documentação oficial.
 - [x] **MVP-004 Mapa de jornadas:** produzir [wireflows de baixa fidelidade](../../ux/wireflows-mvp.md) para onboarding, captura rápida, fatura, import, lista de compras e admin; revisar por tarefa, não por estética.
 - [x] **MVP-005 Contratos transversais:** aprovar [IDs, Money, datas civis, erro HTTP, paginação, idempotência, optimistic concurrency e eventos de auditoria](../../architecture/contratos-transversais-mvp.md).
 
 **Saída do gate:** nenhum requisito material aberto; ADRs aprovadas; contratos e wireflows definidos; tarefas seguintes podem ser atribuídas sem decisão de produto local.
 
-Gate concluído documentalmente em 2026-08-23. Os contratos serão materializados e testados em PLAT-001–005; ainda não há evidência de runtime nesta etapa exclusivamente documental.
+Gate concluído documentalmente em 2026-08-23, com as decisões de concorrência, revogação, outbox e invariantes SQL explicitadas nesta revisão. Os contratos serão materializados e testados em PLAT-001–004; ainda não há evidência de runtime nesta etapa exclusivamente documental.
 
 ## Marco 1 — plataforma segura e espaço compartilhado
 
 Executar schema/base antes das fatias paralelas.
 
-- [ ] **PLAT-001 Schema base:** users/auth tables conforme Better Auth, workspaces, memberships, preferences, audit, idempotency, outbox/jobs e constraints de escopo. Testar migração up/down em banco descartável.
+- [ ] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.16`, workspaces, memberships, preferences, audit, idempotency, outbox/jobs e constraints de escopo. Criar o adapter decorator transacional de `auth_email_outbox`, testar migration up/down em banco descartável e verificar versões pinadas.
 - [ ] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade.
 - [ ] **PLAT-003 Boundary HTTP:** `/v1`, parsing Zod, envelope de erro, correlation ID, auth actor, workspace scope, cursor e versionamento.
-- [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter.
+- [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter; persistir ator/capacidade de jobs e revalidar membership antes de cada lote/transição.
 - [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit.
 - [ ] **AUTH-002 Onboarding:** criação idempotente de espaço/owner, moeda/fuso/saldo inicial opcional e retomada após falha.
 - [ ] **AUTH-003 Memberships:** convite, reenvio, expiração, aceite, remoção e transferência de propriedade.
-- [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped e suíte negativa entre dois espaços.
+- [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped, lock de membership e suíte negativa/concorrente entre dois espaços.
+- [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`/`deactivated`, revogação, cancelamento de jobs, retenção/purga idempotente, auditoria e recuperação dentro da janela aprovada.
 - [ ] **WEB-001 App shell:** layouts autenticado/admin, troca de espaço, navegação responsiva, loading/error/offline/permission states.
 - [ ] **WEB-002 Design primitives:** instalar via shadcn somente os primitives aprovados; criar MoneyInput/StatusBadge/AsyncState com testes acessíveis.
 - [ ] **WEB-003 Onboarding UI:** fluxo responsivo, recuperação de rascunho, erros e validação Playwright.
@@ -130,8 +131,8 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 - [ ] **DATA-001 ADR e adapters de arquivo:** storage S3-compatible, expiração, streaming seguro e varredura/validação de formato.
 - [ ] **DATA-002 Parser/mapeamento:** CSV/XLSX, encoding/locale, sugestão editável e perfis salvos.
 - [ ] **DATA-003 Validação/preflight:** resultado por linha, fingerprints, política de duplicata e conflito de versão.
-- [ ] **DATA-004 Aplicação:** jobs em lotes chamando casos de uso, atomicidade por linha, cancelamento/retry/reversão.
-- [ ] **DATA-005 Export:** CSVs versionados, ZIP/manifesto/checksum, formula injection e autorização no download.
+- [ ] **DATA-004 Aplicação:** jobs em lotes chamando casos de uso, revalidação de ator/capacidade antes de cada lote, atomicidade por linha, cancelamento/retry/reversão.
+- [ ] **DATA-005 Export:** CSVs versionados, ZIP/manifesto/checksum, formula injection e streaming/proxy autorizado no download, sem URL presignada para export sensível.
 - [ ] **DATA-006 UI import/export:** upload, mapping, preview, progresso, resultado, retry e relatório acessível.
 
 **Gate 7:** arquivos maliciosos/maiores são rejeitados; reimport não duplica; export reimporta; acesso expirado ou de outro espaço falha sem vazamento.

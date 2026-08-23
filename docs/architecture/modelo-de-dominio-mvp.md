@@ -119,6 +119,7 @@ Juros e tarifas usam despesa separada. Estorno e cancelamento após lançamento 
 - Upload, análise, decisão e aplicação têm estados separados.
 - Linha validada vira comando do contexto-alvo; importador não escreve diretamente em ledger, estoque ou cartão.
 - Job possui chave idempotente, hash do arquivo, versão do mapeamento, contagens e cursor de lote.
+- Job também persiste `actorId`, `workspaceId` e `requiredCapability`; cada lote/transição revalida essa autorização com lock da membership antes de chamar o caso de uso.
 - Arquivo temporário reside em armazenamento de objetos compatível com S3 via adapter aprovado e expira, conforme [ADR de objetos](decisions/0007-armazenamento-temporario-de-objetos.md).
 
 ## Contratos de aplicação e API

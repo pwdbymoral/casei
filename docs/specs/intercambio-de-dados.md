@@ -40,7 +40,7 @@ O usuário pode salvar um perfil de mapeamento nomeado, sem armazenar o arquivo 
 - Linhas independentes válidas podem ser importadas mesmo com erros, mas o usuário escolhe entre `Somente válidas` e `Tudo ou nada`.
 - Operações compostas de uma linha, como parcelamento, são atômicas.
 - O resultado registra versão carregada; conflito com edição posterior não sobrescreve dado atual e volta para revisão.
-- Cancelar job impede novos lotes e mantém os já confirmados, mostrando exatamente o que foi aplicado. Reverter import cria compensações/cancelamentos auditáveis quando permitido.
+- Cancelar job impede novos lotes e mantém os já confirmados, mostrando exatamente o que foi aplicado. Revogação de membership produz o mesmo bloqueio antes do lote seguinte. Reverter import cria compensações/cancelamentos auditáveis quando permitido.
 
 ## Templates por domínio
 
@@ -53,8 +53,9 @@ Templates possuem linha de exemplo separada ou documentação adjacente; dados d
 ## Exportação
 
 - Usuário escolhe domínio, período, filtros e formato antes de gerar.
-- A exportação respeita o espaço e a permissão atual no instante da geração e do download.
-- Arquivos grandes são gerados em job com progresso e expiração; download usa URL curta assinada ou streaming autorizado.
+- A exportação respeita o espaço e a permissão atual no instante da geração e do download. A verificação do download ocorre no endpoint autorizado, não somente quando o job é criado.
+- No MVP, dados domésticos são baixados por streaming/proxy autorizado que revalida sessão, membership, capacidade e estado do job em cada requisição; URL presignada bearer não é usada para export sensível porque não é revogável durante seu TTL.
+- Arquivos grandes são gerados em job com progresso e expiração; o job persiste ator, espaço e capacidade e revalida esses dados antes de cada lote e transição.
 - Valores, datas, IDs, estado e vínculos necessários à reimportação são preservados; labels localizados podem coexistir com códigos canônicos.
 - CSV protege contra formula injection prefixando valores perigosos conforme política documentada, sem perder o valor lógico no manifesto.
 - Export completo inclui versão de schema, fuso, moeda, horário, filtros e checksums no manifesto.
@@ -72,4 +73,4 @@ Templates possuem linha de exemplo separada ou documentação adjacente; dados d
 - [ ] Retry e reimportação com IDs não duplicam registros.
 - [ ] Resultado parcial identifica cada linha aplicada, ignorada ou rejeitada.
 - [ ] Exportação filtrada e completa respeitam permissão e produzem arquivos reimportáveis.
-- [ ] Formula injection, macro, arquivo excessivo e acesso após expiração possuem testes de segurança.
+- [ ] Formula injection, macro, arquivo excessivo, revogação durante job/download e acesso após expiração possuem testes de segurança.

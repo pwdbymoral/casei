@@ -21,13 +21,13 @@ Usar um livro razão interno de dupla entrada como fonte canônica dos fatos fin
 
 Eventos publicados nunca são alterados ou removidos. Cancelamento cria reversão vinculada; edição de efeito financeiro cria reversão e evento substituto na mesma transação PostgreSQL. Eventos planejados ficam fora do ledger até serem realizados, mas alimentam read models de projeção.
 
-O banco deve impor, quando praticável, moeda única por evento, valor diferente de zero, balanceamento e unicidade de referências. O serviço de domínio também valida antes de persistir. Saldo e passivos são somas dos lançamentos; caches são reconstruíveis e não recebem escrita pública.
+O banco impõe moeda única por evento, valor diferente de zero, balanceamento e unicidade de referências. O cabeçalho do evento possui `currency_code` e uma chave única `(event_id, currency_code)`; cada lançamento referencia essa chave composta e, portanto, não pode introduzir outra moeda. `amount_minor <> 0` é `CHECK` no lançamento. Um constraint trigger PostgreSQL `DEFERRABLE INITIALLY DEFERRED`, disparado ao inserir/alterar lançamentos e ao publicar o evento, exige pelo menos dois lançamentos e soma zero antes do commit; evento que falha permanece fora de `published`. O serviço de domínio também valida antes de persistir, mas não substitui essas garantias. Saldo e passivos são somas dos lançamentos; caches são reconstruíveis e não recebem escrita pública.
 
 ## Consequências
 
 - Cartão, fatura, empréstimo e ajuste reconciliam por construção, sem regras duplicadas no cliente.
 - Auditoria e correção preservam história completa.
-- Implementação inicial é mais rigorosa que um CRUD de transações e exige exemplos, property tests e operações por comando.
+- Implementação inicial é mais rigorosa que um CRUD de transações e exige exemplos, property tests, operações por comando e testes de falha do constraint trigger/rollback.
 - Relatórios devem distinguir resultado econômico de fluxo de caixa.
 - Migrações futuras podem reconstruir projeções a partir do ledger, mas não podem reescrever eventos publicados sem procedimento formal.
 
@@ -39,4 +39,4 @@ O banco deve impor, quando praticável, moeda única por evento, valor diferente
 
 ## Compatibilidade e migração
 
-Ainda não há dados financeiros reais. A primeira migração cria o modelo definitivo e seeds técnicos por espaço. Alterações posteriores seguem expand/backfill/contract e validam reconciliação antes de remover qualquer estrutura anterior.
+Ainda não há dados financeiros reais. A primeira migração cria o modelo definitivo, a FK composta de moeda, os checks e o constraint trigger, além de seeds técnicos por espaço. A suíte de integração tenta publicar evento desequilibrado, de moeda divergente, com valor zero e com referência repetida; cada caso deve falhar sem linhas parcialmente publicadas. Alterações posteriores seguem expand/backfill/contract e validam reconciliação antes de remover qualquer estrutura anterior.
