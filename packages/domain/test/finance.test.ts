@@ -10,6 +10,7 @@ import {
   requiredGoalContribution,
 } from "../src/finance.js";
 import { Money } from "../src/money.js";
+import { parseLocalDate } from "../src/time.js";
 
 const brl = (minor: bigint) => Money.fromTrusted(minor, "BRL" as never);
 
@@ -113,6 +114,12 @@ describe("financial domain", () => {
       "2026-01-08",
       "2026-01-15",
     ]);
+  });
+
+  it("rejects impossible civil dates instead of relying on UTC rollover", () => {
+    expect(parseLocalDate("2026-02-29").ok).toBe(false);
+    expect(parseLocalDate("2028-02-29").ok).toBe(true);
+    expect(parseLocalDate("2026-04-31").ok).toBe(false);
   });
 
   it("calculates goal contribution and safe spending without negative output", () => {

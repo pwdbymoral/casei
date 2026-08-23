@@ -16,12 +16,20 @@ import {
   distributeInstallments,
   generateRecurrenceDates,
   Money,
+  parseLocalDate,
 } from "@casei/domain";
 
 export interface FinanceScope {
   workspaceId: string;
   actorId: string;
   correlationId: string;
+  /** Membership role resolved by the authenticated HTTP boundary. */
+  role: "owner" | "member" | "viewer";
+}
+
+export interface FinanceServiceOptions {
+  /** Non-login PostgreSQL role used for all request data operations. */
+  applicationRole?: string;
 }
 
 export interface TransactionView {
@@ -41,6 +49,28 @@ export interface TransactionView {
   version: number;
 }
 
+export interface CategoryView {
+  id: string;
+  workspaceId: string;
+  name: string;
+  kind: "income" | "expense" | "both";
+  archived: boolean;
+  version: number;
+}
+
+export interface CreditCardView {
+  id: string;
+  workspaceId: string;
+  name: string;
+  closingDay: number;
+  dueDay: number;
+  holder: string | null;
+  lastFour: string | null;
+  limit: { currency: string; minor: string } | null;
+  archived: boolean;
+  version: number;
+}
+
 interface TransactionRow {
   id: string;
   workspace_id: string;
@@ -56,21 +86,31 @@ interface TransactionRow {
   category_id: string | null;
   card_id: string | null;
   statement_id: string | null;
+  recurrence_id: string | null;
   version: number;
 }
 
 export class FinanceService {
-  constructor(private readonly pool: Pool) {}
+  private readonly applicationRole: string;
+
+  constructor(
+    private readonly pool: Pool,
+    options: FinanceServiceOptions = {},
+  ) {
+    this.applicationRole = options.applicationRole ?? "casei_app";
+  }
 
   async createTransaction(
     scope: FinanceScope,
     input: unknown,
     idempotencyKey: string,
+    command = "transactions",
   ): Promise<{ replayed: boolean; transaction: TransactionView }> {
+    assertFinanceCapability(scope, "finance.write");
     const parsed = createTransactionSchema.parse(input);
-    const result = await withUnitOfWork(this.pool, scope, async ({ client }) => {
+    const result = await this.withUnitOfWork(scope, async ({ client }) => {
       return executeIdempotent(client, {
-        scope: `${scope.actorId}:${scope.workspaceId}:POST:/transactions`,
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/${command}`,
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
@@ -86,34 +126,25 @@ export class FinanceService {
   }
 
   async listTransactions(scope: FinanceScope, limit = 50): Promise<TransactionView[]> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await setFinanceScope(client, scope);
+    return this.withScopedClient(scope, async (client) => {
       const result = await client.query<TransactionRow>(
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
-                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version
+                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version
            FROM finance_transaction
           WHERE workspace_id = $1
           ORDER BY occurred_on DESC, id DESC
           LIMIT $2`,
         [scope.workspaceId, Math.min(Math.max(limit, 1), 100)],
       );
-      await client.query("COMMIT");
       return result.rows.map(toTransactionView);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async getTransaction(scope: FinanceScope, id: string): Promise<TransactionView | null> {
     return this.withScopedClient(scope, async (client) => {
       const result = await client.query<TransactionRow>(
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
-                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version
+                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version
            FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, id],
       );
@@ -127,14 +158,31 @@ export class FinanceService {
     idempotencyKey: string,
     expectedVersion?: number,
   ): Promise<TransactionView> {
+    assertFinanceCapability(scope, "finance.write");
     return this.mutateTransaction(
       scope,
       id,
       idempotencyKey,
       expectedVersion,
+      "transactions/:id/post",
       async (client, row) => {
         if (row.state !== "planned" && row.state !== "partially_settled") {
           throw new FinanceConflictError("Somente uma transação planejada pode ser realizada.");
+        }
+        if (row.recurrence_id) {
+          const recurrence = await client.query<{ variable: boolean }>(
+            `SELECT r.variable
+               FROM recurrence_occurrence o
+               JOIN recurrence_rule r ON r.id = o.recurrence_id
+              WHERE o.workspace_id = $1 AND o.transaction_id = $2
+              FOR SHARE`,
+            [scope.workspaceId, id],
+          );
+          if (recurrence.rows[0]?.variable) {
+            throw new FinanceConflictError(
+              "Uma ocorrência variável exige confirmar o valor efetivo antes da liquidação.",
+            );
+          }
         }
         await this.publishTransaction(
           client,
@@ -146,7 +194,7 @@ export class FinanceService {
           `UPDATE finance_transaction
             SET state = 'posted', settled_minor = amount_minor, posted_on = coalesce(posted_on, now()), cash_settled_on = CASE WHEN instrument = 'wallet' THEN now() ELSE cash_settled_on END, version = version + 1, updated_at = now()
           WHERE workspace_id = $1 AND id = $2 AND version = $3
-          RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version`,
+          RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
@@ -161,21 +209,93 @@ export class FinanceService {
     idempotencyKey: string,
     expectedVersion: number,
   ): Promise<TransactionView> {
+    assertFinanceCapability(scope, "finance.write");
     return this.mutateTransaction(
       scope,
       id,
       idempotencyKey,
       expectedVersion,
+      "transactions/:id/reverse",
       async (client, row) => {
         if (row.state !== "posted" && row.state !== "partially_settled") {
           throw new FinanceConflictError("A transação não está realizada.");
         }
         const original = await client.query<{ id: string }>(
-          `SELECT id FROM ledger_event WHERE workspace_id = $1 AND transaction_id = $2 AND status = 'published' LIMIT 1`,
+          `SELECT id FROM ledger_event WHERE workspace_id = $1 AND transaction_id = $2 AND event_type IN ('transaction.posted.v1', 'statement.payment.v1') ORDER BY created_at ASC LIMIT 1`,
           [scope.workspaceId, id],
         );
         const eventId = original.rows[0]?.id;
         if (!eventId) throw new FinanceConflictError("O lançamento original não foi encontrado.");
+        const cardPayment = row.statement_id
+          ? await client.query<{ amount_minor: string }>(
+              `SELECT amount_minor
+                 FROM card_payment
+                WHERE workspace_id = $1 AND statement_id = $2 AND transaction_id = $3`,
+              [scope.workspaceId, row.statement_id, id],
+            )
+          : { rows: [] as { amount_minor: string }[] };
+        if (row.statement_id && cardPayment.rows[0]) {
+          const paymentAmount = BigInt(cardPayment.rows[0].amount_minor);
+          const statement = await client.query<{
+            state: string;
+            total_minor: string;
+            paid_minor: string;
+          }>(
+            `SELECT state, total_minor, paid_minor
+               FROM credit_statement
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, row.statement_id],
+          );
+          const statementRow = statement.rows[0];
+          if (!statementRow) throw new FinanceNotFoundError();
+          if (statementRow.state === "canceled") {
+            throw new FinanceConflictError(
+              "A fatura cancelada não aceita cancelamento de pagamento.",
+            );
+          }
+          const paid = BigInt(statementRow.paid_minor) - paymentAmount;
+          if (paid < 0n)
+            throw new FinanceConflictError("O pagamento já não está refletido na fatura.");
+          await client.query(
+            `UPDATE credit_statement
+                SET paid_minor = $1,
+                    state = CASE WHEN $1 = 0 THEN 'closed' ELSE 'partially_paid' END,
+                    version = version + 1,
+                    updated_at = now()
+              WHERE workspace_id = $2 AND id = $3`,
+            [paid, scope.workspaceId, row.statement_id],
+          );
+        } else if (row.statement_id) {
+          const statement = await client.query<{
+            state: string;
+            total_minor: string;
+            paid_minor: string;
+          }>(
+            `SELECT state, total_minor, paid_minor
+               FROM credit_statement
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, row.statement_id],
+          );
+          const statementRow = statement.rows[0];
+          if (!statementRow) throw new FinanceNotFoundError();
+          if (statementRow.state !== "open") {
+            throw new FinanceConflictError(
+              "A fatura já foi fechada ou paga; faça um ajuste explícito para estornar esta compra.",
+            );
+          }
+          const nextTotal = BigInt(statementRow.total_minor) - BigInt(row.amount_minor);
+          if (nextTotal < BigInt(statementRow.paid_minor)) {
+            throw new FinanceConflictError("O estorno excede o saldo aberto da fatura.");
+          }
+          await client.query(
+            `UPDATE credit_statement
+                SET total_minor = $1, version = version + 1, updated_at = now()
+              WHERE workspace_id = $2 AND id = $3`,
+            [nextTotal, scope.workspaceId, row.statement_id],
+          );
+        }
         const entries = await client.query<{
           account_id: string;
           currency_code: string;
@@ -202,7 +322,7 @@ export class FinanceService {
           );
         }
         const result = await client.query<TransactionRow>(
-          `UPDATE finance_transaction SET state = 'canceled', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version`,
+          `UPDATE finance_transaction SET state = 'canceled', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
@@ -212,8 +332,9 @@ export class FinanceService {
   }
 
   async createCategory(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+    assertFinanceCapability(scope, "finance.write");
     const parsed = createCategorySchema.parse(input);
-    return withUnitOfWork(this.pool, scope, async ({ client }) =>
+    return this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/categories`,
         key: idempotencyKey,
@@ -223,22 +344,27 @@ export class FinanceService {
             `INSERT INTO finance_category (workspace_id, name, kind) VALUES ($1, $2, $3) RETURNING id, workspace_id, name, kind, archived, version`,
             [scope.workspaceId, parsed.name, parsed.kind],
           );
-          return { statusCode: 201, response: result.rows[0] as JsonValue };
+          const row = result.rows[0];
+          if (!row) throw new Error("category insert failed");
+          return { statusCode: 201, response: toCategoryView(row) as unknown as JsonValue };
         },
       }),
     );
   }
 
   async createCard(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+    assertFinanceCapability(scope, "finance.write");
     const parsed = createCreditCardSchema.parse(input);
-    return withUnitOfWork(this.pool, scope, async ({ client }) =>
+    return this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/cards`,
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
-          const currency =
-            parsed.limit?.currency ?? (await this.workspaceCurrency(client, scope.workspaceId));
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (parsed.limit && parsed.limit.currency !== currency) {
+            throw new FinanceConflictError("O limite do cartão deve usar a moeda do espaço.");
+          }
           const result = await client.query(
             `INSERT INTO credit_card (workspace_id, name, closing_day, due_day, holder, last_four, limit_minor, currency_code) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, workspace_id, name, closing_day, due_day, holder, last_four, limit_minor, currency_code, archived, version`,
             [
@@ -252,7 +378,9 @@ export class FinanceService {
               currency,
             ],
           );
-          return { statusCode: 201, response: serializeRow(result.rows[0]) };
+          const row = result.rows[0];
+          if (!row) throw new Error("card insert failed");
+          return { statusCode: 201, response: toCreditCardView(row) as unknown as JsonValue };
         },
       }),
     );
@@ -265,7 +393,7 @@ export class FinanceService {
       state: "posted",
     });
     if (!parsed.cardId) throw new FinanceConflictError("Compra no cartão exige cartão.");
-    return this.createTransaction(scope, parsed, idempotencyKey);
+    return this.createTransaction(scope, parsed, idempotencyKey, "cards/:cardId/purchases");
   }
 
   async payStatement(
@@ -274,11 +402,13 @@ export class FinanceService {
     input: unknown,
     idempotencyKey: string,
   ) {
+    assertFinanceCapability(scope, "finance.write");
     const amountInput = input as {
       amount?: { currency: string; minor: string };
       allowCredit?: boolean;
+      occurredOn?: string;
     };
-    return withUnitOfWork(this.pool, scope, async ({ client }) =>
+    return this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/statements/${statementId}/payments`,
         key: idempotencyKey,
@@ -297,6 +427,9 @@ export class FinanceService {
           );
           const row = statement.rows[0];
           if (!row) throw new FinanceNotFoundError();
+          if (row.state === "canceled") {
+            throw new FinanceConflictError("Não é possível pagar uma fatura cancelada.");
+          }
           if (amountInput.amount && amountInput.amount.currency !== row.currency_code)
             throw new FinanceConflictError("A moeda do pagamento difere da fatura.");
           const open = BigInt(row.total_minor) - BigInt(row.paid_minor);
@@ -318,8 +451,14 @@ export class FinanceService {
             row.currency_code,
           );
           const tx = await client.query<{ id: string }>(
-            `INSERT INTO finance_transaction (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, posted_on, cash_settled_on, description, statement_id) VALUES ($1, 'transfer', 'posted', 'wallet', $2, $2, $3, current_date, now(), now(), 'Pagamento de fatura', $4) RETURNING id`,
-            [scope.workspaceId, amount, row.currency_code, statementId],
+            `INSERT INTO finance_transaction (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, posted_on, cash_settled_on, description, statement_id) VALUES ($1, 'transfer', 'posted', 'wallet', $2, $2, $3, $4, now(), now(), 'Pagamento de fatura', $5) RETURNING id`,
+            [
+              scope.workspaceId,
+              amount,
+              row.currency_code,
+              amountInput.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId)),
+              statementId,
+            ],
           );
           const txId = tx.rows[0]?.id;
           if (!txId) throw new Error("transaction insert failed");
@@ -334,7 +473,7 @@ export class FinanceService {
               wallet,
               cardLiability: liability,
             }).map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
-            new Date().toISOString().slice(0, 10),
+            amountInput.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId)),
           );
           await client.query(
             `INSERT INTO card_payment (workspace_id, statement_id, transaction_id, amount_minor) VALUES ($1, $2, $3, $4)`,
@@ -359,13 +498,18 @@ export class FinanceService {
   }
 
   async createInstallmentPlan(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+    assertFinanceCapability(scope, "finance.write");
     const parsed = createInstallmentPlanSchema.parse(input);
-    return withUnitOfWork(this.pool, scope, async ({ client }) =>
+    return this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/installments`,
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (parsed.total.currency !== currency) {
+            throw new FinanceConflictError("O parcelamento deve usar a moeda do espaço.");
+          }
           const parts = distributeInstallments(
             Money.fromTrusted(BigInt(parsed.total.minor), parsed.total.currency as never),
             parsed.count,
@@ -426,13 +570,21 @@ export class FinanceService {
   }
 
   async createRecurrence(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+    assertFinanceCapability(scope, "finance.write");
     const parsed = createRecurrenceSchema.parse(input);
-    return withUnitOfWork(this.pool, scope, async ({ client }) =>
+    return this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/recurrences`,
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (
+            parsed.amount.currency !== currency ||
+            (parsed.estimatedAmount && parsed.estimatedAmount.currency !== currency)
+          ) {
+            throw new FinanceConflictError("A recorrência deve usar a moeda do espaço.");
+          }
           const count = parsed.maxOccurrences ?? 12;
           const dates = generateRecurrenceDates(
             parsed.frequency,
@@ -493,12 +645,42 @@ export class FinanceService {
     scope: FinanceScope,
     input: CreateTransactionInput,
   ): Promise<TransactionView> {
-    const occurredOn = input.occurredOn ?? new Date().toISOString().slice(0, 10);
+    const occurredOn = input.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
     const currency = input.amount.currency;
+    const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
+    if (currency !== workspaceCurrency) {
+      throw new FinanceConflictError("A moeda da transação difere da moeda do espaço.");
+    }
+    if (!parseLocalDate(occurredOn).ok || (input.dueOn && !parseLocalDate(input.dueOn).ok)) {
+      throw new FinanceConflictError("A data civil informada não existe.");
+    }
     if (input.kind === "transfer")
       throw new FinanceConflictError("Uma transferência exige uma operação de origem e destino.");
     if (input.cardId && input.kind !== "expense")
       throw new FinanceConflictError("Somente despesas podem usar cartão.");
+    if (input.categoryId) {
+      const category = await client.query<{
+        kind: "income" | "expense" | "both";
+        archived: boolean;
+      }>(
+        `SELECT kind, archived
+           FROM finance_category
+          WHERE workspace_id = $1 AND id = $2
+          FOR SHARE`,
+        [scope.workspaceId, input.categoryId],
+      );
+      const categoryRow = category.rows[0];
+      if (!categoryRow || categoryRow.archived) {
+        throw new FinanceConflictError("A categoria não está disponível para novos lançamentos.");
+      }
+      if (
+        (input.kind === "income" && !["income", "both"].includes(categoryRow.kind)) ||
+        (input.kind === "expense" && !["expense", "both"].includes(categoryRow.kind)) ||
+        input.kind === "adjustment"
+      ) {
+        throw new FinanceConflictError("A categoria não é compatível com o tipo da transação.");
+      }
+    }
     if (input.cardId) {
       const card = await client.query<{ id: string; currency_code: string; archived: boolean }>(
         `SELECT id, currency_code, archived FROM credit_card WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
@@ -512,7 +694,7 @@ export class FinanceService {
     const result = await client.query<TransactionRow>(
       `INSERT INTO finance_transaction (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, cash_settled_on, description, category_id, card_id)
        VALUES ($1, $2, $3, $4, $5, CASE WHEN $3 = 'posted' THEN $5 ELSE 0 END, $6, $7, $8, CASE WHEN $3 = 'posted' THEN now() ELSE null END, CASE WHEN $3 = 'posted' AND $4 = 'wallet' THEN now() ELSE null END, $9, $10, $11)
-       RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version`,
+       RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
       [
         scope.workspaceId,
         input.kind,
@@ -532,7 +714,7 @@ export class FinanceService {
     if (input.state === "posted") {
       await this.publishTransaction(client, scope, row, BigInt(input.amount.minor));
       const refreshed = await client.query<TransactionRow>(
-        `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
+        `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, row.id],
       );
       return refreshed.rows[0] ? toTransactionView(refreshed.rows[0]) : toTransactionView(row);
@@ -676,16 +858,32 @@ export class FinanceService {
       cardRow.due_day,
       "purchase",
     );
-    const statement = await client.query<{ id: string }>(
-      `INSERT INTO credit_statement (workspace_id, card_id, period_start, closing_on, due_on, state, total_minor) VALUES ($1, $2, $3, $4, $5, 'open', $6) ON CONFLICT (card_id, closing_on) DO UPDATE SET total_minor = credit_statement.total_minor + EXCLUDED.total_minor, updated_at = now() RETURNING id`,
+    await client.query(
+      `INSERT INTO credit_statement (workspace_id, card_id, period_start, closing_on, due_on, state, total_minor)
+       VALUES ($1, $2, $3, $4, $5, 'open', $6)
+       ON CONFLICT (card_id, closing_on) DO NOTHING`,
       [workspaceId, cardId, dates.periodStart, dates.closingOn, dates.dueOn, amount],
     );
-    const statementId = statement.rows[0]?.id;
-    if (statementId)
-      await client.query(
-        `UPDATE finance_transaction SET statement_id = $1 WHERE workspace_id = $2 AND id = $3`,
-        [statementId, workspaceId, transactionId],
+    const statement = await client.query<{ id: string; state: string }>(
+      `SELECT id, state FROM credit_statement WHERE workspace_id = $1 AND card_id = $2 AND closing_on = $3 FOR UPDATE`,
+      [workspaceId, cardId, dates.closingOn],
+    );
+    const statementRow = statement.rows[0];
+    if (!statementRow) throw new FinanceNotFoundError();
+    if (statementRow.state !== "open") {
+      throw new FinanceConflictError(
+        "A fatura fechada ou paga não aceita compras silenciosamente; use um ajuste explícito.",
       );
+    }
+    await client.query(
+      `UPDATE credit_statement SET total_minor = total_minor + $1, version = version + 1, updated_at = now()
+        WHERE workspace_id = $2 AND id = $3 AND state = 'open'`,
+      [amount, workspaceId, statementRow.id],
+    );
+    await client.query(
+      `UPDATE finance_transaction SET statement_id = $1 WHERE workspace_id = $2 AND id = $3`,
+      [statementRow.id, workspaceId, transactionId],
+    );
   }
 
   private async ensureAccount(
@@ -712,21 +910,44 @@ export class FinanceService {
     return result.rows[0]?.currency_code ?? "BRL";
   }
 
+  private async workspaceToday(client: PgPoolClient, workspaceId: string): Promise<string> {
+    const result = await client.query<{ timezone: string }>(
+      `SELECT timezone FROM workspace_preference WHERE workspace_id = $1`,
+      [workspaceId],
+    );
+    const timezone = result.rows[0]?.timezone ?? "UTC";
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(new Date());
+      const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+      const date = `${values.year}-${values.month}-${values.day}`;
+      if (!parseLocalDate(date).ok) throw new Error("invalid local date");
+      return date;
+    } catch {
+      throw new FinanceConflictError("O fuso horário do espaço é inválido.");
+    }
+  }
+
   private async mutateTransaction(
     scope: FinanceScope,
     id: string,
     key: string,
     expectedVersion: number | undefined,
+    command: string,
     callback: (client: PgPoolClient, row: TransactionRow) => Promise<TransactionView>,
   ): Promise<TransactionView> {
-    const result = await withUnitOfWork(this.pool, scope, async ({ client }) =>
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
-        scope: `${scope.actorId}:${scope.workspaceId}:POST:/transactions/${id}/command`,
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/${command}/${id}`,
         key,
         request: { id, expectedVersion },
         execute: async () => {
           const current = await client.query<TransactionRow>(
-            `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
             [scope.workspaceId, id],
           );
           const row = current.rows[0];
@@ -748,7 +969,7 @@ export class FinanceService {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await setFinanceScope(client, scope);
+      await setFinanceScope(client, scope, this.applicationRole);
       const value = await callback(client);
       await client.query("COMMIT");
       return value;
@@ -759,10 +980,33 @@ export class FinanceService {
       client.release();
     }
   }
+
+  private withUnitOfWork<T>(
+    scope: FinanceScope,
+    callback: (context: { client: PgPoolClient }) => Promise<T>,
+  ): Promise<T> {
+    return withUnitOfWork(this.pool, this.databaseScope(scope), callback);
+  }
+
+  private databaseScope(scope: FinanceScope) {
+    return { ...scope, applicationRole: this.applicationRole };
+  }
+}
+
+function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {
+  if (capability === "finance.write" && scope.role === "viewer") {
+    throw new FinancePermissionError();
+  }
 }
 
 export class FinanceNotFoundError extends Error {
   readonly code = "not_found" as const;
+}
+export class FinancePermissionError extends Error {
+  readonly code = "permission_denied" as const;
+  constructor() {
+    super("O papel atual não pode alterar dados financeiros.");
+  }
 }
 export class FinanceConflictError extends Error {
   readonly code = "conflict" as const;
@@ -771,7 +1015,13 @@ export class VersionConflictError extends Error {
   readonly code = "version_conflict" as const;
 }
 
-async function setFinanceScope(client: PgPoolClient, scope: FinanceScope) {
+async function setFinanceScope(client: PgPoolClient, scope: FinanceScope, applicationRole: string) {
+  // Read-only helpers do not use withUnitOfWork, so they must apply the same
+  // least-privilege role before setting the transaction-local RLS context.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(applicationRole)) {
+    throw new Error("Invalid PostgreSQL role identifier");
+  }
+  await client.query(`SET LOCAL ROLE "${applicationRole}"`);
   await client.query(
     `SELECT set_config('app.workspace_id', $1, true), set_config('app.actor_id', $2, true), set_config('app.correlation_id', $3, true)`,
     [scope.workspaceId, scope.actorId, scope.correlationId],
@@ -797,22 +1047,50 @@ function toTransactionView(row: TransactionRow): TransactionView {
   };
 }
 
-function serializeRow(value: unknown): JsonValue {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  )
-    return value;
-  if (typeof value === "bigint") return value.toString();
-  if (Array.isArray(value)) return value.map(serializeRow);
-  if (typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
-        key,
-        serializeRow(item),
-      ]),
-    );
-  return String(value);
+function toCategoryView(row: {
+  id: string;
+  workspace_id: string;
+  name: string;
+  kind: "income" | "expense" | "both";
+  archived: boolean;
+  version: number;
+}): CategoryView {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    kind: row.kind,
+    archived: row.archived,
+    version: row.version,
+  };
+}
+
+function toCreditCardView(row: {
+  id: string;
+  workspace_id: string;
+  name: string;
+  closing_day: number;
+  due_day: number;
+  holder: string | null;
+  last_four: string | null;
+  limit_minor: string | bigint | null;
+  currency_code: string;
+  archived: boolean;
+  version: number;
+}): CreditCardView {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    closingDay: row.closing_day,
+    dueDay: row.due_day,
+    holder: row.holder,
+    lastFour: row.last_four,
+    limit:
+      row.limit_minor === null
+        ? null
+        : { currency: row.currency_code, minor: row.limit_minor.toString() },
+    archived: row.archived,
+    version: row.version,
+  };
 }

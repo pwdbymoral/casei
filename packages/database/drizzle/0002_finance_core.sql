@@ -238,9 +238,10 @@ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION app.assert_published
 CREATE OR REPLACE FUNCTION app.guard_published_ledger_event()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF OLD.status = 'published' AND (TG_OP = 'DELETE' OR NEW.status <> 'reversed' OR NEW.workspace_id <> OLD.workspace_id OR NEW.transaction_id IS DISTINCT FROM OLD.transaction_id OR NEW.event_type <> OLD.event_type OR NEW.currency_code <> OLD.currency_code OR NEW.occurred_on <> OLD.occurred_on) THEN
+  IF OLD.status = 'published' THEN
     RAISE EXCEPTION 'published ledger event is immutable';
   END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
 END;
 $$;
