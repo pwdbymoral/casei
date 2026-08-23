@@ -43,7 +43,7 @@ Registrar os requisitos do produto, aprovar as decisões tecnológicas materiais
 ## Evidência de validação
 
 - Fora do sandbox restrito, `pnpm check` passou em 2026-08-23, cobrindo lint, typecheck, testes e build.
-- As Actions dos workflows de CI e CodeQL foram fixadas por SHA completo, mantendo o comentário da versão para o Dependabot atualizá-las; o workflow `Dependency review` bloqueia novas dependências com vulnerabilidades altas ou críticas.
+- As Actions dos workflows de CI e CodeQL foram fixadas por SHA completo, mantendo o comentário da versão para o Dependabot atualizá-las; o workflow `Dependency review` bloqueia novas dependências com vulnerabilidades altas ou críticas, e o ruleset `CodeQL merge protection` exige resultados CodeQL na `main`, bloqueando erros de code scanning e alertas de segurança `high` ou superiores sem bypass.
 - A `actions/dependency-review-action` usa a release `v5.0.0`, fixada por SHA completo, cujo runtime é Node 24 e cujo requisito mínimo de runner é `2.327.1`; o runner hospedado que validou a PR está na versão `2.336.0`.
 - O build do PWA passa no GitHub Actions com Node `24.19.0`, pnpm `11.3.0`, instalação limpa pelo lockfile e sem cache de build. No sandbox restrito, o `stdout` de processos-filho iniciados por Node é vazio mesmo com exit code zero; como o Next chama `tsc --showConfig` desse modo, ele falha ao interpretar a saída. A chamada direta ao TypeScript emite JSON válido. Fora do sandbox restrito, o mesmo `pnpm build` e o `pnpm check` passam; a divergência é uma limitação do ambiente de execução do agente, não do projeto, e nenhuma alteração na aplicação foi necessária.
 - O teste de autorização foi executado em Red por módulo ausente e passou em Green após a implementação.

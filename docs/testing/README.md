@@ -58,4 +58,6 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 
 No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a adição de dependências com vulnerabilidades conhecidas de severidade alta ou crítica. Ele exige que o recurso **Dependency graph** esteja habilitado nas configurações de segurança do repositório e é obrigatório para merge na `main`.
 
+O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`. Além desse gate de execução, o ruleset `CodeQL merge protection` exige resultados de code scanning para a `main` e bloqueia alertas de code scanning classificados como erro ou alertas de segurança `high` ou superiores. O ruleset não possui bypass configurado.
+
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
