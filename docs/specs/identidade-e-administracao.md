@@ -111,5 +111,6 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - [ ] Owner transfere propriedade antes de sair; último owner/admin não pode ser removido.
 - [ ] Owner desativa/exclui o espaço com confirmação, idempotência, bloqueio de novas mutações, sessão de outros espaços preservada, recuperação por entitlement até 30 dias e retenção/purga auditáveis.
 - [x] Relógio controlado comprova cutoff de 30 dias, purge retryable de objetos/exports no dia 30, expiração de backups no dia 35 e reaplicação de tombstone em restore; a integração também exerce o reaper de tombstones/auditoria no dia 365.
+- [ ] Perfil e preferências permitem editar nome/locale/ocultação de valores, iniciar reverificação de e-mail e senha e, para owner, editar nome/fuso/margem de segurança do espaço com prévia, `If-Match` e bloqueio de mudança de moeda após movimentos.
 - [ ] Console administrativo elimina operações rotineiras via terminal e não expõe conteúdo do espaço.
 - [ ] Suspensão, revogação, promoção e jobs administrativos exigem motivo, proteção reforçada e auditoria.
