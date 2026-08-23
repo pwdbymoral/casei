@@ -232,7 +232,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       const purged = await service.createPurgeWorker().runOnce(workspaceId, clock.now);
       expect(purged.state).toBe("succeeded");
       await expect(
-        pool.query(`SELECT workspace_id FROM workspace WHERE id = $1`, [workspaceId]),
+        pool.query(`SELECT id FROM workspace WHERE id = $1`, [workspaceId]),
       ).resolves.toMatchObject({ rows: [] });
       await expect(
         pool.query(`SELECT status FROM workspace_tombstone WHERE workspace_id = $1`, [workspaceId]),
