@@ -2,15 +2,14 @@ import type { Pool } from "@casei/database";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { configureFinanceRoutes } from "./finance-routes.js";
-import { FinanceService } from "./finance-service.js";
-
 import {
   auth,
   defaultAuthOrigins,
   isAllowedAuthOrigin,
   validateAuthCallbackRequest,
 } from "./auth.js";
+import { configureFinanceRoutes } from "./finance-routes.js";
+import { FinanceService } from "./finance-service.js";
 import { type ApiEnv, correlationMiddleware, errorResponse, notFoundError } from "./http/index.js";
 
 export type V1Configurator = (router: Hono<ApiEnv>) => void;
