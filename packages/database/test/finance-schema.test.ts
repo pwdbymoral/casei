@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -17,7 +18,7 @@ if (!adminUrl) {
 } else {
   test("executa ledger financeiro com casei_app e impede mutação de evento publicado", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
-    const databaseName = `casei_fin_${process.pid}_${Date.now()}`;
+    const databaseName = `casei_fin_${randomUUID().replaceAll("-", "")}`;
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;
     let pool: Pool | undefined;
