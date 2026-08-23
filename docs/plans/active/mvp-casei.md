@@ -77,6 +77,11 @@ Executar schema/base antes das fatias paralelas.
 - [ ] **FIN-005 Linha do tempo:** busca, período, filtros em URL, paginação, estados e detalhe auditável.
 - [ ] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia.
 
+O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
+auditável, categorias, idempotência, isolamento por papel e moeda, além dos contratos e guards
+necessários. Captura rápida UI, edição completa, ajustes com saldo observado e concorrência de
+produção continuam pendentes para o Gate 2.
+
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 
 ## Marco 3 — compromissos, recorrências e parcelas
@@ -97,6 +102,10 @@ Executar schema/base antes das fatias paralelas.
 - [ ] **CARD-004 Pagamento:** total, parcial, excedente/crédito e cancelamento como transferência ledger.
 - [ ] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
 - [ ] **CARD-006 UI cartões/fatura:** visão por ciclo, composição explicável, ações frequentes e correção de fatura.
+
+O mesmo PR entrega cadastro de cartão, compra, associação à fatura aberta, pagamento total/parcial,
+parcelamento exato e recorrência com bloqueio explícito de ocorrência variável não confirmada. Fechamento,
+reabertura, estorno em fatura fechada e as telas de cartão permanecem nas tarefas seguintes.
 
 **Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
 

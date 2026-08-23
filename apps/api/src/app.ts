@@ -1,18 +1,29 @@
+import type { Pool } from "@casei/database";
+import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-
 import {
   auth,
   defaultAuthOrigins,
   isAllowedAuthOrigin,
   validateAuthCallbackRequest,
 } from "./auth.js";
+import { configureFinanceRoutes } from "./finance-routes.js";
+import { FinanceService } from "./finance-service.js";
 import { type ApiEnv, correlationMiddleware, errorResponse, notFoundError } from "./http/index.js";
 
 export type V1Configurator = (router: Hono<ApiEnv>) => void;
 export interface AppOptions {
   authHandler?: (request: Request) => Response | Promise<Response>;
   authOrigins?: string[];
+  finance?: FinanceAppOptions;
+}
+
+export interface FinanceAppOptions {
+  pool: Pool;
+  scopeMiddleware: MiddlewareHandler<ApiEnv>;
+  /** PostgreSQL role used by every finance command and query. */
+  applicationRole?: string;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -49,6 +60,14 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
 
   app.get("/health", (context) => context.json({ service: "casei-api", status: "ok" }));
   configureV1?.(v1);
+  if (options.finance) {
+    configureFinanceRoutes(v1, {
+      service: new FinanceService(options.finance.pool, {
+        applicationRole: options.finance.applicationRole,
+      }),
+      scopeMiddleware: options.finance.scopeMiddleware,
+    });
+  }
   app.route("/v1", v1);
 
   return app;
