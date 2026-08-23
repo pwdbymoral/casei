@@ -468,7 +468,6 @@ export class PostgresJobWorker {
 
   private async claim(workspaceId: string, now: Date): Promise<JobRecord | null> {
     const leaseToken = randomUUID();
-    const leaseUntil = new Date(now.valueOf() + this.options.leaseMs);
     return withUnitOfWork(
       this.pool,
       { workspaceId, applicationRole: this.options.applicationRole },
@@ -480,7 +479,7 @@ export class PostgresJobWorker {
              WHERE workspace_id = $1
                AND (
                  (state IN ('pending', 'failed') AND available_at <= $2)
-                 OR (state = 'running' AND lease_until <= $2)
+                 OR (state = 'running' AND lease_until <= clock_timestamp())
                )
              ORDER BY priority DESC, available_at ASC, id ASC
              LIMIT 1
@@ -488,11 +487,12 @@ export class PostgresJobWorker {
            )
            UPDATE "job" AS j
            SET state = 'running', attempts = j.attempts + 1,
-               lease_until = $3, lease_token = $4, updated_at = $2
+               lease_until = clock_timestamp() + ($3 * interval '1 millisecond'),
+               lease_token = $4, updated_at = clock_timestamp()
            FROM candidate
            WHERE j.id = candidate.id
            RETURNING j.*`,
-          [workspaceId, now, leaseUntil, leaseToken],
+          [workspaceId, now, this.options.leaseMs, leaseToken],
         );
         const row = result.rows[0];
         return row ? mapJob(row) : null;
@@ -567,9 +567,9 @@ export class PostgresJobWorker {
       async ({ client }) => {
         const result = await client.query(
           `UPDATE "job"
-           SET lease_until = now() + ($4 * interval '1 millisecond'), updated_at = now()
+           SET lease_until = clock_timestamp() + ($4 * interval '1 millisecond'), updated_at = clock_timestamp()
            WHERE id = $1 AND state = 'running' AND lease_token = $2
-             AND workspace_id = $3 AND lease_until > now()`,
+             AND workspace_id = $3 AND lease_until > clock_timestamp()`,
           [job.id, job.leaseToken, job.workspaceId, this.options.leaseMs],
         );
         return result.rowCount === 1;
@@ -600,7 +600,7 @@ export class PostgresJobWorker {
               `UPDATE "job"
                SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
                    last_error = $3, updated_at = now()
-               WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
+               WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
               [job.id, job.leaseToken, "job_authorization_revoked"],
             );
             return false;
@@ -610,7 +610,7 @@ export class PostgresJobWorker {
         const result = await client.query(
           `UPDATE "job"
            SET state = 'succeeded', lease_until = NULL, lease_token = NULL, updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
+           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
           [job.id, job.leaseToken],
         );
         return result.rowCount === 1;
@@ -628,7 +628,7 @@ export class PostgresJobWorker {
           `UPDATE "job"
            SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
                last_error = $3, updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
+           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
           [job.id, job.leaseToken, "job_authorization_revoked"],
         );
       },
@@ -652,8 +652,8 @@ export class PostgresJobWorker {
         await client.query(
           `UPDATE "job"
            SET state = $3, available_at = $4, lease_until = NULL, lease_token = NULL,
-               last_error = $5, updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
+               last_error = $5, updated_at = clock_timestamp()
+           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
           [
             job.id,
             job.leaseToken,
@@ -722,7 +722,7 @@ async function assertLeaseFenced(client: PoolClient, job: JobRecord): Promise<vo
     lease_until: Date | null;
     lease_valid: boolean;
   }>(
-    `SELECT state, lease_token, lease_until, lease_until > now() AS lease_valid
+    `SELECT state, lease_token, lease_until, lease_until > clock_timestamp() AS lease_valid
      FROM "job"
      WHERE id = $1
      FOR UPDATE`,
