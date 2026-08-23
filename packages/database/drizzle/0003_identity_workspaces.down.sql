@@ -17,6 +17,7 @@ CREATE POLICY "workspace_preference_scope" ON "workspace_preference"
   USING (workspace_id = "app"."current_workspace_id"())
   WITH CHECK (workspace_id = "app"."current_workspace_id"());
 DROP FUNCTION IF EXISTS "app"."actor_has_workspace"(uuid);
+DROP FUNCTION IF EXISTS "app"."current_actor_email"();
 DROP POLICY IF EXISTS "membership_scope" ON "membership";
 CREATE POLICY "membership_scope" ON "membership"
   USING (workspace_id = "app"."current_workspace_id"())

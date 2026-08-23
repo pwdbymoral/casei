@@ -71,7 +71,10 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         email: `${ownerId}@example.test`,
         recentAuthentication: true,
       };
-      const service = new IdentityService(pool, { now: () => clock.now });
+      const service = new IdentityService(pool, {
+        now: () => clock.now,
+        authEmailSecret: "test-secret-that-is-longer-than-thirty-two-characters",
+      });
       const scope = await service.resolveScope(owner, workspaceId, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
       expect(scope?.role).toBe("owner");
       if (!scope) throw new Error("owner scope was not resolved");
@@ -82,19 +85,42 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         "auth005-invite-key",
       );
       expect(invitation.invitation.inviteUrl).toContain("/invite/");
-      const outbox = await pool.query<{ payload: unknown }>(
-        `SELECT payload FROM outbox_event WHERE event_type = 'workspace.invitation_created' AND workspace_id = $1`,
-        [workspaceId],
+      const outbox = await pool.query<{ encrypted_payload: string }>(
+        `SELECT encrypted_payload FROM auth_email_outbox WHERE message_kind = 'invitation' AND source_id = $1`,
+        [invitation.invitation.id],
       );
       expect(outbox.rows).toHaveLength(1);
-      expect(outbox.rows[0]?.payload).toEqual({
-        invitationId: invitation.invitation.id,
-        email: `invite-${suffix}@example.test`,
-        role: "viewer",
-      });
-      expect(JSON.stringify(outbox.rows[0]?.payload)).not.toContain(
-        invitation.invitation.inviteUrl,
+      expect(outbox.rows[0]?.encrypted_payload).not.toContain(invitation.invitation.inviteUrl);
+      expect(outbox.rows[0]?.encrypted_payload).not.toContain(invitation.invitation.email);
+      /* The payload is authenticated ciphertext; only the worker decrypts it. */
+      const outboxState = await pool.query<{ state: string }>(
+        `SELECT state FROM auth_email_outbox WHERE message_kind = 'invitation' AND source_id = $1`,
+        [invitation.invitation.id],
       );
+      expect(outboxState.rows).toEqual([{ state: "pending" }]);
+
+      const expiringInvitation = await service.createInvitation(
+        scope,
+        { email: `expired-${suffix}@example.test`, role: "viewer" },
+        "auth005-expiring-invite-key",
+      );
+      const expiringToken = decodeURIComponent(
+        expiringInvitation.invitation.inviteUrl?.split("/invite/")[1] ?? "",
+      );
+      clock.now = new Date("2030-01-09T00:00:00.000Z");
+      await expect(
+        service.acceptInvitation(
+          { userId: `expired-acceptor-${suffix}`, email: `expired-${suffix}@example.test` },
+          expiringToken,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+        ),
+      ).rejects.toThrow();
+      await expect(
+        pool.query<{ status: string }>(`SELECT status FROM workspace_invitation WHERE id = $1`, [
+          expiringInvitation.invitation.id,
+        ]),
+      ).resolves.toMatchObject({ rows: [{ status: "expired" }] });
+      clock.now = new Date("2030-01-01T00:00:00.000Z");
 
       const onboardingResults = await Promise.all([
         service.createOnboarding(

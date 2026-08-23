@@ -7,7 +7,6 @@ import {
   type WorkspaceRole,
 } from "@casei/contracts";
 import {
-  enqueueOutboxEvent,
   executeIdempotent,
   JobAuthorizationError,
   JobLeaseLostError,
@@ -17,6 +16,11 @@ import {
   PostgresJobWorker,
   withUnitOfWork,
 } from "@casei/database";
+import {
+  type AuthEmailMessage,
+  encryptAuthEmailPayload,
+  hashAuthEmailAddress,
+} from "./auth-email.js";
 
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const RECOVERY_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -39,6 +43,7 @@ export interface IdentityScope {
 export interface IdentityServiceOptions {
   applicationRole?: string;
   webOrigin?: string;
+  authEmailSecret?: string;
   now?: () => Date;
 }
 
@@ -121,6 +126,7 @@ type JsonObject = { [key: string]: JsonValue };
 export class IdentityService {
   private readonly applicationRole: string;
   private readonly webOrigin: string;
+  private readonly authEmailSecret: string;
   private readonly now: () => Date;
 
   constructor(
@@ -133,6 +139,7 @@ export class IdentityService {
       process.env.CASEI_WEB_ORIGIN ??
       "http://localhost:3000"
     ).replace(/\/$/, "");
+    this.authEmailSecret = options.authEmailSecret ?? process.env.BETTER_AUTH_SECRET ?? "";
     this.now = options.now ?? (() => new Date());
   }
 
@@ -494,7 +501,7 @@ export class IdentityService {
     if (!workspaceId || !invitationId || !actorEmail || !/^[0-9a-f-]{36}$/.test(workspaceId)) {
       throw new IdentityNotFoundError();
     }
-    return withUnitOfWork(
+    const accepted = await withUnitOfWork(
       this.pool,
       {
         workspaceId,
@@ -524,14 +531,16 @@ export class IdentityService {
         if (!invite) throw new IdentityNotFoundError();
         if (invite.status !== "pending") {
           if (invite.status === "accepted" && invite.accepted_by === actor.userId) {
-            return toWorkspaceSummary({
-              id: workspaceId,
-              name: invite.workspace_name,
-              status: invite.workspace_status,
-              role: invite.role,
-              timezone: invite.timezone,
-              version: invite.workspace_version,
-            });
+            return {
+              summary: toWorkspaceSummary({
+                id: workspaceId,
+                name: invite.workspace_name,
+                status: invite.workspace_status,
+                role: invite.role,
+                timezone: invite.timezone,
+                version: invite.workspace_version,
+              }),
+            };
           }
           throw new IdentityNotFoundError();
         }
@@ -540,7 +549,7 @@ export class IdentityService {
             `UPDATE workspace_invitation SET status = 'expired', updated_at = now() WHERE id = $1`,
             [invitationId],
           );
-          throw new IdentityNotFoundError();
+          return { expired: true as const };
         }
         const expectedHash = hashToken(token);
         if (invite.token_hash !== expectedHash || invite.email !== normalizeEmail(actorEmail)) {
@@ -581,16 +590,20 @@ export class IdentityService {
           action: "workspace.invitation_accepted",
           targetId: invitationId,
         });
-        return toWorkspaceSummary({
-          id: workspaceId,
-          name: invite.workspace_name,
-          status: invite.workspace_status,
-          role: invite.role,
-          timezone: invite.timezone,
-          version: invite.workspace_version,
-        });
+        return {
+          summary: toWorkspaceSummary({
+            id: workspaceId,
+            name: invite.workspace_name,
+            status: invite.workspace_status,
+            role: invite.role,
+            timezone: invite.timezone,
+            version: invite.workspace_version,
+          }),
+        };
       },
     );
+    if ("expired" in accepted) throw new IdentityNotFoundError();
+    return accepted.summary;
   }
 
   async removeMember(
@@ -741,6 +754,24 @@ export class IdentityService {
       );
       await client.query(
         `UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1 AND status = 'pending'`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `UPDATE auth_email_outbox o
+            SET state = 'failed', available_at = '9999-12-31T00:00:00.000Z',
+                last_error = 'workspace_deletion_pending'
+          FROM workspace_invitation i
+         WHERE o.source_id = i.id AND i.workspace_id = $1 AND o.state = 'pending'`,
+        [scope.workspaceId],
+      );
+      await client.query(
+        `UPDATE auth_email_intent e
+            SET state = 'expired', updated_at = now()
+          WHERE e.id IN (
+            SELECT o.intent_id FROM auth_email_outbox o
+            JOIN workspace_invitation i ON i.id = o.source_id
+            WHERE i.workspace_id = $1
+          ) AND e.state = 'queued'`,
         [scope.workspaceId],
       );
       await client.query(
@@ -937,6 +968,24 @@ export class IdentityService {
         await client.query(`UPDATE outbox_event SET status = 'dead' WHERE workspace_id = $1`, [
           workspaceId,
         ]);
+        await client.query(
+          `UPDATE auth_email_outbox o
+              SET state = 'failed', available_at = '9999-12-31T00:00:00.000Z',
+                  last_error = 'workspace_purged'
+            FROM workspace_invitation i
+           WHERE o.source_id = i.id AND i.workspace_id = $1`,
+          [workspaceId],
+        );
+        await client.query(
+          `UPDATE auth_email_intent e
+              SET state = 'expired', updated_at = now()
+            WHERE e.id IN (
+              SELECT o.intent_id FROM auth_email_outbox o
+              JOIN workspace_invitation i ON i.id = o.source_id
+              WHERE i.workspace_id = $1
+            )`,
+          [workspaceId],
+        );
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
       },
@@ -998,18 +1047,7 @@ export class IdentityService {
       `INSERT INTO workspace_invitation (id, workspace_id, email, token_hash, role, invited_by, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [id, scope.workspaceId, email, hashToken(token), role, scope.actor.userId, expiresAt],
     );
-    await enqueueOutboxEvent(client, {
-      eventType: "workspace.invitation_created",
-      eventVersion: 1,
-      workspaceId: scope.workspaceId,
-      actorId: scope.actor.userId,
-      requiredCapability: "membership.invite",
-      correlationId: scope.correlationId,
-      // This is a metadata-only notification intent. The bearer token remains
-      // in the command response for explicit owner copy/share and is never
-      // persisted in outbox payloads or operational logs.
-      payload: { invitationId: id, email, role },
-    });
+    await this.enqueueInvitationEmail(client, scope, id, email, token, expiresAt);
     await writeAudit(client, {
       actorId: scope.actor.userId,
       workspaceId: scope.workspaceId,
@@ -1029,6 +1067,49 @@ export class IdentityService {
         inviteUrl: `${this.webOrigin}/invite/${encodeURIComponent(token)}`,
       } satisfies JsonObject,
     };
+  }
+
+  private async enqueueInvitationEmail(
+    client: PoolClient,
+    scope: IdentityScope,
+    invitationId: string,
+    email: string,
+    token: string,
+    expiresAt: Date,
+  ): Promise<void> {
+    if (!this.authEmailSecret)
+      throw new Error("BETTER_AUTH_SECRET is required for invitation email");
+    const message: AuthEmailMessage = {
+      kind: "invitation",
+      userId: scope.actor.userId,
+      email,
+      url: `${this.webOrigin}/invite/${encodeURIComponent(token)}`,
+      token,
+      callbackUrl: null,
+      correlationId: scope.correlationId,
+      expiresAt,
+      sourceId: invitationId,
+    };
+    const intent = await client.query<{ id: string }>(
+      `INSERT INTO auth_email_intent
+        (kind, actor_id, email_hash, callback_url, correlation_id, state, expires_at)
+       VALUES ('invitation', $1, $2, '', $3, 'queued', $4)
+       RETURNING id`,
+      [
+        scope.actor.userId,
+        hashAuthEmailAddress(email, this.authEmailSecret),
+        scope.correlationId,
+        expiresAt,
+      ],
+    );
+    const intentId = intent.rows[0]?.id;
+    if (!intentId) throw new Error("Could not persist invitation email intent");
+    await client.query(
+      `INSERT INTO auth_email_outbox
+        (intent_id, message_kind, source_id, encrypted_payload)
+       VALUES ($1, 'invitation', $2, $3)`,
+      [intentId, invitationId, encryptAuthEmailPayload(message, this.authEmailSecret)],
+    );
   }
 
   private async withScoped<T>(

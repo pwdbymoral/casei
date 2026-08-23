@@ -60,9 +60,18 @@ export interface WorkspaceManagementAdapter {
   createInvitation(
     workspaceId: string,
     input: { email: string; role: "member" | "viewer" },
+    idempotencyKey?: string,
   ): Promise<WorkspaceInvitation>;
-  resendInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation>;
-  revokeInvitation(workspaceId: string, invitationId: string): Promise<void>;
+  resendInvitation(
+    workspaceId: string,
+    invitationId: string,
+    idempotencyKey?: string,
+  ): Promise<WorkspaceInvitation>;
+  revokeInvitation(
+    workspaceId: string,
+    invitationId: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   removeMember(workspaceId: string, userId: string, version: number): Promise<void>;
   changeMemberRole(
     workspaceId: string,
@@ -71,6 +80,11 @@ export interface WorkspaceManagementAdapter {
     version: number,
   ): Promise<void>;
   transferOwnership(workspaceId: string, userId: string, version: number): Promise<void>;
+  deactivateWorkspace(
+    workspaceId: string,
+    input: { workspaceName: string; reason: string },
+    version: number,
+  ): Promise<{ recoveryUntil: string }>;
 }
 
 export type WorkspaceSessionErrorCode = "unauthenticated" | "permission_denied" | "offline";
@@ -193,31 +207,37 @@ export const authenticatedWorkspaceManagementAdapter: WorkspaceManagementAdapter
     );
     return response.invitations;
   },
-  async createInvitation(workspaceId, input) {
+  async createInvitation(workspaceId, input, idempotencyKey) {
     return managementRequest<WorkspaceInvitation>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
       {
         method: "POST",
-        headers: { "Idempotency-Key": managementIdempotencyKey("invite") },
+        headers: {
+          "Idempotency-Key": idempotencyKey ?? managementIdempotencyKey("invite"),
+        },
         body: JSON.stringify(input),
       },
     );
   },
-  async resendInvitation(workspaceId, invitationId) {
+  async resendInvitation(workspaceId, invitationId, idempotencyKey) {
     return managementRequest<WorkspaceInvitation>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
       {
         method: "POST",
-        headers: { "Idempotency-Key": managementIdempotencyKey("resend-invite") },
+        headers: {
+          "Idempotency-Key": idempotencyKey ?? managementIdempotencyKey("resend-invite"),
+        },
       },
     );
   },
-  async revokeInvitation(workspaceId, invitationId) {
+  async revokeInvitation(workspaceId, invitationId, idempotencyKey) {
     await managementRequest<void>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`,
       {
         method: "DELETE",
-        headers: { "Idempotency-Key": managementIdempotencyKey("revoke-invite") },
+        headers: {
+          "Idempotency-Key": idempotencyKey ?? managementIdempotencyKey("revoke-invite"),
+        },
       },
     );
   },
@@ -240,6 +260,16 @@ export const authenticatedWorkspaceManagementAdapter: WorkspaceManagementAdapter
         method: "POST",
         headers: { "If-Match": `"v${version}"` },
         body: JSON.stringify({ userId }),
+      },
+    );
+  },
+  async deactivateWorkspace(workspaceId, input, version) {
+    return managementRequest<{ recoveryUntil: string }>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/deactivation`,
+      {
+        method: "POST",
+        headers: { "If-Match": `"v${version}"` },
+        body: JSON.stringify(input),
       },
     );
   },

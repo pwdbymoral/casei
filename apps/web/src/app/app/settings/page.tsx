@@ -7,8 +7,9 @@ import {
   UserMinusIcon,
   UserRoundCogIcon,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AsyncState } from "@/components/primitives";
 import { Badge } from "@/components/ui/badge";
@@ -27,15 +28,20 @@ const roleLabels = { owner: "proprietário", member: "membro", viewer: "leitor" 
 const management = authenticatedWorkspaceManagementAdapter;
 
 export default function SettingsPage() {
+  const router = useRouter();
   const [session, setSession] = useState<WorkspaceSession | null>(null);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"member" | "viewer">("member");
+  const [transferUserId, setTransferUserId] = useState("");
+  const [deactivationReason, setDeactivationReason] = useState("");
+  const [deactivationName, setDeactivationName] = useState("");
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const actionKeys = useRef(new Map<string, string>());
   const workspace = useMemo(
     () =>
       session?.workspaces.find(({ id }) => id === session.activeWorkspaceId) ??
@@ -43,6 +49,14 @@ export default function SettingsPage() {
     [session],
   );
   const isOwner = workspace?.role === "owner";
+
+  function actionIdempotencyKey(action: string): string {
+    const existing = actionKeys.current.get(action);
+    if (existing) return existing;
+    const key = `${action}-${crypto.randomUUID()}`;
+    actionKeys.current.set(action, key);
+    return key;
+  }
 
   const load = useCallback(async (workspaceId: string) => {
     setStatus("loading");
@@ -88,13 +102,18 @@ export default function SettingsPage() {
     setBusy("invite");
     setMessage(null);
     try {
-      const invitation = await management.createInvitation(workspace.id, {
-        email: email.trim(),
-        role,
-      });
+      const invitation = await management.createInvitation(
+        workspace.id,
+        {
+          email: email.trim(),
+          role,
+        },
+        actionIdempotencyKey("invite"),
+      );
       setEmail("");
       setInviteUrl(invitation.inviteUrl ?? null);
       setMessage("Convite criado. Copie o link e envie para a pessoa.");
+      actionKeys.current.delete("invite");
       await load(workspace.id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Não foi possível criar o convite.");
@@ -109,6 +128,7 @@ export default function SettingsPage() {
     setMessage(null);
     try {
       await callback();
+      actionKeys.current.delete(action);
       setMessage("Alteração salva.");
       if (workspace) await load(workspace.id);
     } catch (error) {
@@ -116,6 +136,34 @@ export default function SettingsPage() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function transferOwnership() {
+    if (!workspace || !transferUserId || busy) return;
+    const target = members.find((member) => member.userId === transferUserId);
+    if (target?.status !== "active" || target.role === "owner") return;
+    if (!window.confirm(`Transferir a propriedade para ${target.displayName}?`)) return;
+    await run("transfer-ownership", async () => {
+      await management.transferOwnership(workspace.id, target.userId, workspace.version);
+      window.location.assign("/app");
+    });
+  }
+
+  async function deactivateWorkspace() {
+    if (!workspace || busy || !deactivationName.trim() || !deactivationReason.trim()) return;
+    if (deactivationName.trim() !== workspace.name) {
+      setMessage("Digite o nome exato do espaço para confirmar a desativação.");
+      return;
+    }
+    if (!window.confirm("O espaço ficará bloqueado durante 30 dias. Continuar?")) return;
+    await run("deactivate-workspace", async () => {
+      await management.deactivateWorkspace(
+        workspace.id,
+        { workspaceName: deactivationName.trim(), reason: deactivationReason.trim() },
+        workspace.version,
+      );
+      router.replace("/app/recovery");
+    });
   }
 
   if (status === "loading" && !session) {
@@ -352,6 +400,7 @@ export default function SettingsPage() {
                           const next = await management.resendInvitation(
                             workspace.id,
                             invitation.id,
+                            actionIdempotencyKey(`resend-${invitation.id}`),
                           );
                           setInviteUrl(next.inviteUrl ?? null);
                         })
@@ -366,7 +415,11 @@ export default function SettingsPage() {
                       disabled={busy !== null}
                       onClick={() =>
                         void run(`revoke-${invitation.id}`, () =>
-                          management.revokeInvitation(workspace.id, invitation.id),
+                          management.revokeInvitation(
+                            workspace.id,
+                            invitation.id,
+                            actionIdempotencyKey(`revoke-${invitation.id}`),
+                          ),
                         )
                       }
                     >
@@ -376,6 +429,90 @@ export default function SettingsPage() {
                 ) : null}
               </div>
             ))}
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-2" aria-label="Ações críticas do espaço">
+        <Card>
+          <CardHeader>
+            <CardTitle>Transferir propriedade</CardTitle>
+            <CardDescription>
+              A outra pessoa se torna owner e você permanece como membro. A ação exige uma versão
+              atualizada do espaço.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <label className="grid gap-1.5 text-sm font-medium" htmlFor="transfer-member">
+              Novo proprietário
+              <select
+                id="transfer-member"
+                className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                value={transferUserId}
+                disabled={busy !== null}
+                onChange={(event) => setTransferUserId(event.target.value)}
+              >
+                <option value="">Selecione uma pessoa</option>
+                {members
+                  .filter((member) => member.status === "active" && member.role !== "owner")
+                  .map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {member.displayName} — {member.email}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              disabled={!transferUserId || busy !== null}
+              onClick={() => void transferOwnership()}
+            >
+              Transferir propriedade
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card className="border-destructive/30">
+          <CardHeader>
+            <CardTitle>Desativar espaço</CardTitle>
+            <CardDescription>
+              O acesso aos dados domésticos será bloqueado e você poderá cancelar a exclusão durante
+              30 dias.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <label className="grid gap-1.5 text-sm font-medium" htmlFor="deactivation-name">
+              Digite o nome do espaço
+              <Input
+                id="deactivation-name"
+                value={deactivationName}
+                disabled={busy !== null}
+                onChange={(event) => setDeactivationName(event.target.value)}
+                className="min-h-11"
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium" htmlFor="deactivation-reason">
+              Motivo
+              <Input
+                id="deactivation-reason"
+                value={deactivationReason}
+                disabled={busy !== null}
+                onChange={(event) => setDeactivationReason(event.target.value)}
+                placeholder="Por que você está desativando?"
+                className="min-h-11"
+              />
+            </label>
+            <Button
+              type="button"
+              variant="destructive"
+              className="min-h-11"
+              disabled={!deactivationName.trim() || !deactivationReason.trim() || busy !== null}
+              onClick={() => void deactivateWorkspace()}
+            >
+              Desativar e iniciar janela de recuperação
+            </Button>
           </CardContent>
         </Card>
       </section>
