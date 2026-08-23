@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type AdminShellProps = { children: ReactNode };
+type AdminShellProps = { children: ReactNode; displayName: string };
 
 const links = [
   { href: "/admin", label: "Visão geral" },
@@ -18,7 +18,7 @@ const links = [
   { href: "/admin/audit", label: "Auditoria" },
 ] as const;
 
-export function AdminShell({ children }: AdminShellProps) {
+export function AdminShell({ children, displayName }: AdminShellProps) {
   const pathname = usePathname();
   return (
     <div className="min-h-dvh bg-muted/30">
@@ -33,7 +33,10 @@ export function AdminShell({ children }: AdminShellProps) {
               <p className="text-xs text-muted-foreground">Console da plataforma</p>
             </div>
           </div>
-          <Badge variant="outline">Acesso reforçado</Badge>
+          <div className="flex items-center gap-3">
+            <span className="hidden text-sm text-muted-foreground sm:inline">{displayName}</span>
+            <Badge variant="outline">Acesso reforçado</Badge>
+          </div>
         </div>
       </header>
       <div className="border-b bg-background">

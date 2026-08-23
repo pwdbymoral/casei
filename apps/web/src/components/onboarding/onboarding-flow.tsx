@@ -72,6 +72,8 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const firstFieldRef = useRef<HTMLInputElement>(null);
+  const errorSummaryRef = useRef<HTMLDivElement>(null);
+  const currentError = Object.values(errors)[0];
 
   useEffect(() => {
     const saved = loadDraft();
@@ -85,6 +87,10 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   useEffect(() => {
     if (!done) firstFieldRef.current?.focus();
   }, [step, done]);
+
+  useEffect(() => {
+    if (currentError) errorSummaryRef.current?.focus();
+  }, [currentError]);
 
   function updateDraft(patch: Partial<OnboardingDraft>) {
     setDraft((current) => {
@@ -142,7 +148,6 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   }
 
   const stepTitles = ["Como chamar você", "Seu espaço", "Comece com contexto"];
-  const currentError = Object.values(errors)[0];
 
   return (
     <section className="mx-auto w-full max-w-xl" aria-labelledby="onboarding-title">
@@ -184,6 +189,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
 
         {currentError ? (
           <div
+            ref={errorSummaryRef}
             className="mt-5 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
             role="alert"
             tabIndex={-1}

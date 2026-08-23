@@ -2,8 +2,9 @@ import { ArrowRightIcon, ChartNoAxesCombinedIcon, HouseIcon, TargetIcon } from "
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 export default function Home() {
   return (
@@ -25,10 +26,10 @@ export default function Home() {
             Planeje finanças, acompanhe metas e cuide da casa com clareza — sozinho, a dois ou em
             grupo.
           </p>
-          <Button className="mt-8" render={<Link href="/onboarding" />}>
+          <Link href="/onboarding" className={cn(buttonVariants(), "mt-8")}>
             Começar agora
             <ArrowRightIcon data-icon="inline-end" />
-          </Button>
+          </Link>
         </div>
 
         <div className="mt-14 grid gap-4 md:grid-cols-3">

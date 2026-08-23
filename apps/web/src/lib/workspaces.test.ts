@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { getActiveWorkspace, type WorkspaceSession } from "./workspaces";
+import {
+  getActiveWorkspace,
+  unauthenticatedPlatformAdminSessionPort,
+  unauthenticatedWorkspaceAdapter,
+  type WorkspaceSession,
+} from "./workspaces";
 
 const session: WorkspaceSession = {
   user: { id: "user", displayName: "Ana", email: "ana@example.com" },
@@ -20,5 +25,12 @@ describe("workspace shell boundary", () => {
   it("resolves only the active workspace from the session", () => {
     expect(getActiveWorkspace(session)?.name).toBe("Casa");
     expect(getActiveWorkspace({ ...session, activeWorkspaceId: "unknown" })).toBeNull();
+  });
+
+  it("denies the production adapter instead of exposing fixture data", async () => {
+    await expect(unauthenticatedWorkspaceAdapter.getSession()).rejects.toMatchObject({
+      code: "unauthenticated",
+    });
+    await expect(unauthenticatedPlatformAdminSessionPort.getSession()).resolves.toBeNull();
   });
 });

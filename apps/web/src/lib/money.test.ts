@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatMoneyMinor, parseMoneyInput } from "./money";
+import { caretPositionAfterFormatting, formatMoneyMinor, parseMoneyInput } from "./money";
 
 describe("money UI boundary", () => {
   it("converts localized digits and paste into canonical minor units", () => {
@@ -15,5 +15,10 @@ describe("money UI boundary", () => {
 
   it("formats the canonical value for pt-BR without losing cents", () => {
     expect(formatMoneyMinor("123456")).toBe("R$ 1.234,56");
+  });
+
+  it("keeps the caret after the same digit when formatting changes", () => {
+    const formatted = formatMoneyMinor("123456");
+    expect(caretPositionAfterFormatting(formatted, 4)).toBe(formatted.indexOf("4") + 1);
   });
 });

@@ -22,19 +22,31 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react
 import { AsyncState, type AsyncStateStatus } from "@/components/primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
+  clearWorkspaceClientState,
   fixtureWorkspaceAdapter,
   getActiveWorkspace,
+  unauthenticatedWorkspaceAdapter,
   type WorkspaceAdapter,
   type WorkspaceSession,
+  WorkspaceSessionError,
 } from "@/lib/workspaces";
 
 type AppShellProps = {
   children: ReactNode;
-  adapter?: WorkspaceAdapter;
+  adapterMode?: "fixture" | "unauthenticated";
+  initialSession?: WorkspaceSession;
+  onLogout?: () => Promise<void>;
 };
 
 const primaryNav = [
@@ -148,7 +160,7 @@ function WorkspaceSelect({
   );
 }
 
-function ShellSkeleton() {
+export function ShellSkeleton() {
   return (
     <main className="min-h-dvh bg-muted/30" aria-busy="true" aria-label="Carregando seu espaço">
       <div className="mx-auto flex min-h-dvh max-w-7xl items-center justify-center p-6">
@@ -162,14 +174,25 @@ function ShellSkeleton() {
   );
 }
 
-export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShellProps) {
+export function AppShell({
+  children,
+  adapterMode = "unauthenticated",
+  initialSession,
+  onLogout,
+}: AppShellProps) {
+  const adapter: WorkspaceAdapter =
+    adapterMode === "fixture" ? fixtureWorkspaceAdapter : unauthenticatedWorkspaceAdapter;
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [session, setSession] = useState<WorkspaceSession | null>(null);
-  const [status, setStatus] = useState<AsyncStateStatus>("loading");
+  const [session, setSession] = useState<WorkspaceSession | null>(initialSession ?? null);
+  const [status, setStatus] = useState<AsyncStateStatus>(initialSession ? "success" : "loading");
   const [error, setError] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [scopeRevoked, setScopeRevoked] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const router = useRouter();
 
   const loadSession = useCallback(async () => {
     setStatus("loading");
@@ -179,14 +202,20 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
       setSession(loaded);
       setStatus(loaded.workspaces.length > 0 ? "success" : "empty");
     } catch (cause) {
+      if (cause instanceof WorkspaceSessionError && cause.code === "permission_denied") {
+        clearWorkspaceClientState();
+        setSession(null);
+        setScopeRevoked(true);
+        return;
+      }
       setStatus("error");
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar seu espaço.");
     }
   }, [adapter]);
 
   useEffect(() => {
-    void loadSession();
-  }, [loadSession]);
+    if (!initialSession) void loadSession();
+  }, [initialSession, loadSession]);
 
   useEffect(() => {
     const updateOnlineState = () => setIsOffline(!navigator.onLine);
@@ -200,6 +229,14 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
   }, []);
 
   const forcedStatus = searchParams.get("state") as AsyncStateStatus | null;
+
+  useEffect(() => {
+    if (forcedStatus !== "permission") return;
+    clearWorkspaceClientState();
+    setSession(null);
+    setScopeRevoked(true);
+  }, [forcedStatus]);
+
   const visibleStatus =
     forcedStatus && ["error", "permission", "offline"].includes(forcedStatus)
       ? forcedStatus
@@ -207,6 +244,41 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
         ? "offline"
         : status;
   const activeWorkspace = useMemo(() => (session ? getActiveWorkspace(session) : null), [session]);
+  const addEnabled =
+    !isOffline && visibleStatus !== "permission" && status === "success" && !loggingOut;
+
+  async function handleLogout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setLogoutError(null);
+    try {
+      await onLogout?.();
+      clearWorkspaceClientState();
+      setSession(null);
+      router.replace("/");
+    } catch (cause) {
+      setLogoutError(
+        cause instanceof Error ? cause.message : "Não foi possível sair. Tente novamente.",
+      );
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (scopeRevoked) {
+    return (
+      <main className="flex min-h-dvh items-center justify-center bg-muted/30 p-6">
+        <div className="w-full max-w-md">
+          <AsyncState
+            status="permission"
+            title="Espaço indisponível"
+            description="Seu acesso a este espaço mudou. O conteúdo local foi limpo; escolha outro espaço para continuar."
+            action={{ label: "Criar ou aceitar espaço", onClick: () => router.push("/onboarding") }}
+          />
+        </div>
+      </main>
+    );
+  }
 
   if (status === "loading" && !session) return <ShellSkeleton />;
 
@@ -219,6 +291,21 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
             title="Não foi possível abrir o Casei"
             description={error ?? "Tente novamente em alguns instantes."}
             action={{ label: "Tentar novamente", onClick: () => void loadSession() }}
+          />
+        </div>
+      </main>
+    );
+  }
+
+  if (session.workspaces.length === 0) {
+    return (
+      <main className="flex min-h-dvh items-center justify-center bg-muted/30 p-6">
+        <div className="w-full max-w-md">
+          <AsyncState
+            status="empty"
+            title="Crie seu primeiro espaço"
+            description="Um espaço guarda seus dados separados e pode ser compartilhado depois."
+            action={{ label: "Começar onboarding", onClick: () => router.push("/onboarding") }}
           />
         </div>
       </main>
@@ -269,19 +356,34 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
               <p className="truncate text-xs text-muted-foreground">{session.user.email}</p>
             </div>
           </div>
-          <Button variant="ghost" className="justify-start" type="button">
+          <Button
+            variant="ghost"
+            className="justify-start"
+            type="button"
+            onClick={() => void handleLogout()}
+            disabled={loggingOut}
+          >
             <LogOutIcon data-icon="inline-start" aria-hidden="true" />
-            Sair
+            {loggingOut ? "Saindo…" : "Sair"}
           </Button>
+          {logoutError ? (
+            <span className="sr-only" role="alert">
+              {logoutError}
+            </span>
+          ) : null}
         </div>
       </aside>
 
-      {mobileMenuOpen ? (
-        <div className="fixed inset-0 z-40 bg-foreground/20 lg:hidden" role="presentation">
-          <aside
-            className="flex h-full w-[min(86vw,22rem)] flex-col bg-background p-4 shadow-xl"
-            aria-label="Menu do espaço"
-          >
+      <Dialog open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+        <DialogContent
+          showCloseButton={false}
+          className="inset-y-0 left-0 top-0 h-dvh w-[min(86vw,22rem)] max-w-none translate-x-0 translate-y-0 rounded-none p-4 sm:max-w-none lg:hidden"
+        >
+          <DialogHeader>
+            <DialogTitle>Menu do espaço</DialogTitle>
+            <DialogDescription>Escolha uma área ou troque o espaço ativo.</DialogDescription>
+          </DialogHeader>
+          <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-3 px-2 py-2">
               <span className="text-lg font-semibold">Casei</span>
               <Button
@@ -309,14 +411,25 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
               ))}
             </nav>
             <div className="mt-auto border-t pt-4">
-              <Button variant="ghost" className="w-full justify-start" type="button">
+              <Button
+                variant="ghost"
+                className="w-full justify-start"
+                type="button"
+                onClick={() => void handleLogout()}
+                disabled={loggingOut}
+              >
                 <LogOutIcon data-icon="inline-start" aria-hidden="true" />
-                Sair
+                {loggingOut ? "Saindo…" : "Sair"}
               </Button>
+              {logoutError ? (
+                <span className="sr-only" role="alert">
+                  {logoutError}
+                </span>
+              ) : null}
             </div>
-          </aside>
-        </div>
-      ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <div className="lg:pl-72">
         <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
@@ -399,9 +512,15 @@ export function AppShell({ children, adapter = fixtureWorkspaceAdapter }: AppShe
 
       <Link
         href="/app/add"
+        aria-disabled={!addEnabled}
+        tabIndex={addEnabled ? undefined : -1}
+        onClick={(event) => {
+          if (!addEnabled) event.preventDefault();
+        }}
         className={cn(
           buttonVariants({ size: "lg" }),
           "fixed right-4 bottom-20 z-20 min-h-12 rounded-full px-5 shadow-lg sm:right-6 lg:right-10 lg:bottom-10",
+          !addEnabled && "pointer-events-none opacity-50",
         )}
       >
         <PlusIcon data-icon="inline-start" aria-hidden="true" />

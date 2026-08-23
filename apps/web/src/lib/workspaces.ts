@@ -32,6 +32,53 @@ export interface WorkspaceAdapter {
   switchWorkspace(workspaceId: string): Promise<WorkspaceSession>;
 }
 
+export type WorkspaceSessionErrorCode = "unauthenticated" | "permission_denied" | "offline";
+
+export class WorkspaceSessionError extends Error {
+  readonly code: WorkspaceSessionErrorCode;
+
+  constructor(code: WorkspaceSessionErrorCode, message = "Sua sessão não está disponível.") {
+    super(message);
+    this.name = "WorkspaceSessionError";
+    this.code = code;
+  }
+}
+
+/** Production-safe default until AUTH-002 provides the authenticated adapter. */
+export const unauthenticatedWorkspaceAdapter: WorkspaceAdapter = {
+  async getSession() {
+    throw new WorkspaceSessionError("unauthenticated");
+  },
+  async switchWorkspace() {
+    throw new WorkspaceSessionError("unauthenticated");
+  },
+};
+
+export interface PlatformAdminSession {
+  userId: string;
+  displayName: string;
+  role: "platform_admin" | "platform_support";
+}
+
+export interface PlatformAdminSessionPort {
+  getSession(): Promise<PlatformAdminSession | null>;
+}
+
+/** Never grants an administrative shell by default. Replace only at the auth boundary. */
+export const unauthenticatedPlatformAdminSessionPort: PlatformAdminSessionPort = {
+  async getSession() {
+    return null;
+  },
+};
+
+export function clearWorkspaceClientState(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(activeWorkspaceStorageKey);
+  for (const key of Object.keys(window.sessionStorage)) {
+    if (key.startsWith("casei:workspace:")) window.sessionStorage.removeItem(key);
+  }
+}
+
 const fixtureSession: WorkspaceSession = {
   user: {
     id: "user_fixture_marina",
@@ -82,7 +129,7 @@ function persistWorkspaceId(workspaceId: string): void {
 /** Temporary adapter used until the authenticated workspace endpoints land. */
 export const fixtureWorkspaceAdapter: WorkspaceAdapter = {
   async getSession() {
-    await new Promise((resolve) => window.setTimeout(resolve, 180));
+    await new Promise((resolve) => setTimeout(resolve, 180));
     return withStoredWorkspace(fixtureSession);
   },
   async switchWorkspace(workspaceId) {
