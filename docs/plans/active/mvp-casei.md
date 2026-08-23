@@ -53,15 +53,15 @@ Gate concluído documentalmente em 2026-08-23, com as decisões de concorrência
 
 Executar schema/base antes das fatias paralelas.
 
-- [ ] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.16`, workspaces, memberships, preferences, audit, idempotency, outbox/jobs e constraints de escopo. Criar o adapter decorator transacional de `auth_email_outbox`, testar migration up/down em banco descartável e verificar versões pinadas.
+- [ ] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.16`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Testar migration up/down em banco descartável e verificar versões pinadas.
 - [ ] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade.
 - [ ] **PLAT-003 Boundary HTTP:** `/v1`, parsing Zod, envelope de erro, correlation ID, auth actor, workspace scope, cursor e versionamento.
 - [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter; persistir ator/capacidade de jobs e revalidar membership antes de cada lote/transição.
-- [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit.
+- [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit; spike contra `better-auth@1.6.16` para `auth_email_intent`/outbox, callback pós-commit, recovery de token, reenvio, expiração, falha de persistência, idempotência e callback URL.
 - [ ] **AUTH-002 Onboarding:** criação idempotente de espaço/owner, moeda/fuso/saldo inicial opcional e retomada após falha.
 - [ ] **AUTH-003 Memberships:** convite, reenvio, expiração, aceite, remoção e transferência de propriedade.
 - [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped, lock de membership e suíte negativa/concorrente entre dois espaços.
-- [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`/`deactivated`, revogação, cancelamento de jobs, retenção/purga idempotente, auditoria e recuperação dentro da janela aprovada.
+- [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`, entitlement de recuperação por 30 dias sem revogar identidade/outros espaços, cancelamento de jobs, purge idempotente no dia 30, objetos/backups até 35 dias, auditoria por 365 dias e restore com tombstone.
 - [ ] **WEB-001 App shell:** layouts autenticado/admin, troca de espaço, navegação responsiva, loading/error/offline/permission states.
 - [ ] **WEB-002 Design primitives:** instalar via shadcn somente os primitives aprovados; criar MoneyInput/StatusBadge/AsyncState com testes acessíveis.
 - [ ] **WEB-003 Onboarding UI:** fluxo responsivo, recuperação de rascunho, erros e validação Playwright.
@@ -70,7 +70,7 @@ Executar schema/base antes das fatias paralelas.
 
 ## Marco 2 — carteira e transação simples
 
-- [ ] **FIN-001 Ledger schema e domínio:** accounts, user transactions, events, entries, categorias e constraints de soma/escopo conforme ADR.
+- [ ] **FIN-001 Ledger schema e domínio:** accounts, user transactions, events, entries, categorias, constraints de soma/escopo e guards de imutabilidade de evento publicado conforme ADR; testar insert/update/delete, alteração de cabeçalho e unpublish.
 - [ ] **FIN-002 Carteira:** saldo inicial, saldo atual, conferência e ajuste com motivo; testes de conservação e concorrência.
 - [ ] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
 - [ ] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer.
@@ -155,7 +155,7 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 - [ ] **ADMIN-003 Operação de jobs:** saúde, dead-letter, retry idempotente e correlation IDs sem conteúdo sensível.
 - [ ] **ADMIN-004 Auditoria administrativa:** motivo obrigatório, filtros, retenção e step-up para ações críticas.
 - [ ] **SEC-001 Threat model:** autenticação, isolamento, import, admin, PWA cache, logs e supply chain; resolver riscos altos.
-- [ ] **SEC-002 Privacidade/operação:** termos aprovados quando aplicável, política, exportação/exclusão do titular, backup/restore testado e runbooks.
+- [ ] **SEC-002 Privacidade/operação:** termos aprovados quando aplicável, operacionalizar a política de retenção já aprovada (30/35/365 dias), exportação/exclusão do titular, backup/restore testado e runbooks.
 - [ ] **QA-001 Matriz E2E:** jornadas críticas em mobile/desktop, dois usuários/dois espaços, calendário, falhas de rede e concorrência.
 - [ ] **QA-002 Acessibilidade:** axe quando útil + teclado/foco/reflow/zoom/contraste/leitor de tela proporcional ao risco.
 - [ ] **QA-003 Performance:** budgets aprovados para shell, listas, captura e dashboard; carga representativa de 50 mil linhas/import.

@@ -42,9 +42,10 @@ Papéis do MVP:
 ### Desativação e exclusão do espaço
 
 - Somente o owner pode iniciar a desativação, com autenticação recente, confirmação explícita do nome do espaço e motivo auditado.
-- A operação é idempotente: bloqueia novas mutações, revoga sessões/memberships domésticas, cancela ou interrompe jobs pendentes e preserva a trilha append-only durante a retenção definida pela política de privacidade.
-- O estado `deletion_pending`/`deactivated` é visível ao owner; recuperação só é possível durante a janela de retenção aprovada. A purga física posterior é job administrativo separado, com retry idempotente, auditoria e evidência de backup/restore.
-- Histórico, autoria, exports e arquivos seguem a mesma decisão de retenção; não há exclusão física parcial nem acesso de membro após a confirmação.
+- A operação é idempotente: bloqueia novas mutações, revoga as capacidades/memberships domésticas de membros, cancela ou interrompe jobs pendentes e preserva a trilha append-only durante a retenção definida nesta spec. Ela não revoga a sessão global de identidade nem o acesso da mesma pessoa a outros espaços.
+- O estado `deletion_pending` é visível em rota de recuperação ao owner por uma entitlement `workspace_deletion_recovery` vinculada ao espaço; essa entitlement permite somente visualizar estado e cancelar a desativação, não ler dados domésticos. A entitlement não depende de membership operacional e expira com a janela de recuperação.
+- Política concreta do MVP: a janela de recuperação é de 30 dias corridos; exports, downloads, novos convites e jobs são bloqueados imediatamente; no vencimento, o job de purge remove dados domésticos, memberships, objetos e exports. Backups podem conter o espaço por no máximo 35 dias e, ao restaurar, tombstones de exclusão são reaplicados antes de servir dados. Auditoria conserva somente metadados pseudonimizados da ação por 365 dias, sem conteúdo financeiro/produtos.
+- Após o purge, a entitlement expira e não há recuperação. Histórico, autoria e objetos seguem o mesmo prazo; não há exclusão física parcial nem acesso de membro após a confirmação.
 
 ## Perfil e preferências
 
@@ -97,6 +98,7 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - [ ] Revogação/downgrade concorrente com mutação e com lote de job é serializada e o perdedor não altera dados.
 - [ ] Convite expirado, revogado, reenviado e aceito concorrentemente permanece consistente.
 - [ ] Owner transfere propriedade antes de sair; último owner/admin não pode ser removido.
-- [ ] Owner desativa/exclui o espaço com confirmação, idempotência, bloqueio de novas mutações, tratamento de jobs e retenção/purga auditáveis.
+- [ ] Owner desativa/exclui o espaço com confirmação, idempotência, bloqueio de novas mutações, sessão de outros espaços preservada, recuperação por entitlement até 30 dias e retenção/purga auditáveis.
+- [ ] Relógio controlado comprova cutoff de 30 dias, purge retryable, expiração de objetos/exports em 35 dias e reaplicação de tombstone em restore.
 - [ ] Console administrativo elimina operações rotineiras via terminal e não expõe conteúdo do espaço.
 - [ ] Suspensão, revogação, promoção e jobs administrativos exigem motivo, proteção reforçada e auditoria.
