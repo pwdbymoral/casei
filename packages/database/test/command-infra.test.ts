@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -41,12 +42,13 @@ if (!adminUrl) {
 } else {
   test("unit of work, idempotência, outbox e worker respeitam lease e membership", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
-    const databaseName = `casei_plat004_${process.pid}_${Date.now()}`;
+    const suffix = randomUUID();
+    const databaseName = `casei_plat004_${suffix}`;
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;
     let pool: Pool | undefined;
     let runtimePool: Pool | undefined;
-    const runtimeLogin = `casei_plat004_runtime_${process.pid}_${Date.now()}`;
+    const runtimeLogin = `casei_plat004_runtime_${suffix}`;
     const runtimePassword = "casei-plat004-runtime-password";
 
     try {

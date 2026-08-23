@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,7 +22,8 @@ if (!adminUrl) {
 } else {
   test("aplica e reverte migration, isola dois espaços e preserva auditoria", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
-    const databaseName = `casei_plat001_${process.pid}_${Date.now()}`;
+    const suffix = randomUUID();
+    const databaseName = `casei_plat001_${suffix}`;
     const databaseIdentifier = `"${databaseName}"`;
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;
@@ -29,9 +31,9 @@ if (!adminUrl) {
 
     try {
       await ensureApplicationRole(adminPool);
-      const unsafeRole = `casei_plat001_unsafe_${process.pid}_${Date.now()}`;
-      const ownershipRole = `casei_plat001_owner_${process.pid}_${Date.now()}`;
-      const ownedTable = `casei_plat001_owned_${process.pid}_${Date.now()}`;
+      const unsafeRole = `casei_plat001_unsafe_${suffix}`;
+      const ownershipRole = `casei_plat001_owner_${suffix}`;
+      const ownedTable = `casei_plat001_owned_${suffix}`;
       try {
         await adminPool.query(`CREATE ROLE "${unsafeRole}" NOLOGIN SUPERUSER`);
         await assert.rejects(
