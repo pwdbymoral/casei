@@ -8,4 +8,14 @@ export async function ensureApplicationRole(pool: Pool) {
       throw error;
     }
   }
+
+  const result = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+    `SELECT rolsuper, rolbypassrls
+     FROM pg_roles
+     WHERE rolname = 'casei_app'`,
+  );
+  const role = result.rows[0];
+  if (!role || role.rolsuper || role.rolbypassrls) {
+    throw new Error("casei_app must remain a non-superuser role without BYPASSRLS");
+  }
 }

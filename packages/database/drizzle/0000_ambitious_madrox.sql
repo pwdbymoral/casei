@@ -223,6 +223,8 @@ GRANT USAGE ON SCHEMA "public", "app" TO casei_app;
 --> statement-breakpoint
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "public" TO casei_app;
 --> statement-breakpoint
+REVOKE UPDATE, DELETE ON TABLE "audit_event" FROM casei_app;
+--> statement-breakpoint
 GRANT EXECUTE ON FUNCTION "app"."current_workspace_id"() TO casei_app;
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION "app"."current_actor_id"() TO casei_app;

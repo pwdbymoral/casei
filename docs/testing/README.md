@@ -56,7 +56,7 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 - `pnpm check`: executa lint, typecheck, testes e build em sequência.
 - `pnpm audit --prod --audit-level=high`: falha quando dependências de produção possuem vulnerabilidades de severidade alta ou crítica conhecidas.
 
-Para validar a base PostgreSQL em um banco descartável, configure `DATABASE_URL_TEST` com uma conexão administrativa a PostgreSQL 18 e execute `pnpm --filter @casei/database test`. O teste cria um banco temporário, aplica a migration, verifica role/RLS e isolamento entre dois espaços e remove o banco ao terminar. O job `quality` do CI fornece PostgreSQL 18 e configura essa variável automaticamente; sem ela, o teste de integração não altera nenhum banco local.
+Para validar a base PostgreSQL em um banco descartável, configure `DATABASE_URL_TEST` com uma conexão administrativa a PostgreSQL 18 e execute `pnpm --filter @casei/database test`. O teste cria um banco temporário, aplica a migration, verifica role/RLS, isolamento entre dois espaços, auditoria append-only e rollback pelo companion `packages/database/drizzle/0000_ambitious_madrox.down.sql`, e remove o banco ao terminar. O job `quality` do CI fornece PostgreSQL 18 e configura essa variável automaticamente; sem ela, o teste de integração não altera nenhum banco local.
 
 No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a adição de dependências com vulnerabilidades conhecidas de severidade alta ou crítica. Ele exige que o recurso **Dependency graph** esteja habilitado nas configurações de segurança do repositório e é obrigatório para merge na `main`.
 

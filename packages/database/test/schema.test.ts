@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -11,9 +12,9 @@ import { ensureApplicationRole } from "../src/roles.js";
 const adminUrl = process.env.DATABASE_URL_TEST;
 
 if (!adminUrl) {
-  test.skip("aplica migration, isola dois espaços e remove o banco descartável");
+  test.skip("aplica e reverte migration, isola dois espaços e preserva auditoria");
 } else {
-  test("aplica migration, isola dois espaços e remove o banco descartável", async () => {
+  test("aplica e reverte migration, isola dois espaços e preserva auditoria", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
     const databaseName = `casei_plat001_${process.pid}_${Date.now()}`;
     const databaseIdentifier = `"${databaseName}"`;
@@ -23,6 +24,16 @@ if (!adminUrl) {
 
     try {
       await ensureApplicationRole(adminPool);
+      await adminPool.query("ALTER ROLE casei_app SUPERUSER");
+      try {
+        await assert.rejects(
+          ensureApplicationRole(adminPool),
+          /casei_app must remain a non-superuser role without BYPASSRLS/,
+        );
+      } finally {
+        await adminPool.query("ALTER ROLE casei_app NOSUPERUSER NOBYPASSRLS");
+      }
+
       await adminPool.query(`CREATE DATABASE ${databaseIdentifier}`);
       pool = new Pool({ connectionString: databaseUrl.toString() });
       await migrate(drizzle(pool), {
@@ -52,6 +63,12 @@ if (!adminUrl) {
           ($1, $3, 'owner'),
           ($2, $4, 'owner')`,
         [firstWorkspaceId, secondWorkspaceId, firstUser, secondUser],
+      );
+      await pool.query(
+        `INSERT INTO "audit_event"
+          (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason)
+         VALUES ('security', 'schema_test', $1, $2, 'workspace', $2, 'test', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'success', 'fixture')`,
+        [firstUser, firstWorkspaceId],
       );
 
       const role = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
@@ -84,6 +101,25 @@ if (!adminUrl) {
             ),
           );
           await appClient.query("ROLLBACK TO SAVEPOINT cross_workspace_attempt");
+
+          await appClient.query("SAVEPOINT audit_update_attempt");
+          await assert.rejects(
+            appClient.query(
+              `UPDATE "audit_event" SET reason = 'tampered'
+               WHERE workspace_id = $1`,
+              [firstWorkspaceId],
+            ),
+          );
+          await appClient.query("ROLLBACK TO SAVEPOINT audit_update_attempt");
+
+          await appClient.query("SAVEPOINT audit_delete_attempt");
+          await assert.rejects(
+            appClient.query(`DELETE FROM "audit_event" WHERE workspace_id = $1`, [
+              firstWorkspaceId,
+            ]),
+          );
+          await appClient.query("ROLLBACK TO SAVEPOINT audit_delete_attempt");
+
           await appClient.query("COMMIT");
         } catch (error) {
           await appClient.query("ROLLBACK");
@@ -103,6 +139,32 @@ if (!adminUrl) {
         relrowsecurity: true,
         relforcerowsecurity: true,
       });
+
+      const downSql = await readFile(
+        fileURLToPath(new URL("../drizzle/0000_ambitious_madrox.down.sql", import.meta.url)),
+        "utf8",
+      );
+      await pool.query(downSql);
+      const remainingTables = await pool.query<{ tablename: string }>(
+        `SELECT tablename
+         FROM pg_catalog.pg_tables
+         WHERE schemaname = 'public'
+           AND tablename IN (
+             'audit_event', 'auth_email_intent', 'auth_email_outbox',
+             'idempotency_key', 'job', 'membership', 'outbox_event',
+             'workspace_preference', 'workspace', 'account', 'session',
+             'user', 'verification'
+           )
+         ORDER BY tablename`,
+      );
+      assert.deepEqual(remainingTables.rows, []);
+      const remainingSchemas = await pool.query<{ nspname: string }>(
+        `SELECT nspname
+         FROM pg_namespace
+         WHERE nspname IN ('app', 'drizzle')
+         ORDER BY nspname`,
+      );
+      assert.deepEqual(remainingSchemas.rows, []);
     } finally {
       await pool?.end();
       await adminPool.query(`DROP DATABASE ${databaseIdentifier} WITH (FORCE)`);
