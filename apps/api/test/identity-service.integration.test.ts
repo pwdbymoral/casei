@@ -17,7 +17,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
     const databaseName = `casei_auth005_${suffix}`;
     const databaseUrl = new URL(adminUrl!);
     databaseUrl.pathname = `/${databaseName}`;
-    let pool: Pool | undefined;
+    let pool: ReturnType<typeof getDatabasePool> | undefined;
     const clock = { now: new Date("2030-01-01T00:00:00.000Z") };
     const ownerId = `auth005-owner-${suffix}`;
     const memberId = `auth005-member-${suffix}`;
