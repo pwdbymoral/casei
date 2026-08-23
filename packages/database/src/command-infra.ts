@@ -438,7 +438,7 @@ export class PostgresJobWorker {
 
     const handler = this.handlers.get(handlerKey(job.jobType, job.jobVersion));
     if (!handler) {
-      await this.markFailed(job, new Error("Unsupported job handler"), true, now);
+      await this.markFailed(job, new Error("Unsupported job handler"), true);
       return { state: "dead", jobId: job.id };
     }
 
@@ -461,7 +461,7 @@ export class PostgresJobWorker {
         await this.markCancelled(job);
         return { state: "cancelled", jobId: job.id };
       }
-      const dead = await this.markFailed(job, error, false, now);
+      const dead = await this.markFailed(job, error, false);
       return { state: dead ? "dead" : "failed", jobId: job.id };
     }
   }
@@ -639,7 +639,6 @@ export class PostgresJobWorker {
     job: JobRecord,
     error: unknown,
     forceDead: boolean,
-    now: Date,
   ): Promise<boolean> {
     if (!job.workspaceId) return true;
     const dead = forceDead || job.attempts >= this.options.maxAttempts;
@@ -651,14 +650,16 @@ export class PostgresJobWorker {
       async ({ client }) => {
         await client.query(
           `UPDATE "job"
-           SET state = $3, available_at = $4, lease_until = NULL, lease_token = NULL,
+           SET state = $3,
+               available_at = clock_timestamp() + ($4 * interval '1 millisecond'),
+               lease_until = NULL, lease_token = NULL,
                last_error = $5, updated_at = clock_timestamp()
            WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
           [
             job.id,
             job.leaseToken,
             nextState,
-            new Date(now.valueOf() + delay),
+            delay,
             sanitizeError(error),
           ],
         );

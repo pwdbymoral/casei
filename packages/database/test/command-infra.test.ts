@@ -295,6 +295,38 @@ if (!adminUrl) {
 
       await pool.query(
         `INSERT INTO "job"
+          (job_type, job_version, workspace_id, actor_id, idempotency_key, payload, correlation_id)
+         VALUES ('slow-failure.job', 1, $1, $2, 'slow-failure-key', '{}'::jsonb, '01ARZ3NDEKTSV4RRFFQ69G5FAV')`,
+        [workspaceId, actorId],
+      );
+      const slowWorker = new PostgresJobWorker(
+        pool,
+        new Map([
+          [
+            "slow-failure.job:1",
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              throw new Error("slow failure");
+            },
+          ],
+        ]),
+        {
+          applicationRole: "casei_app",
+          maxAttempts: 2,
+          backoffBaseMs: 500,
+          random: () => 0,
+          authorizeCapability: ({ role }) => role === "owner",
+        },
+      );
+      assert.equal((await slowWorker.runOnce(workspaceId)).state, "failed");
+      const delayedRetry = await pool.query<{ delayed: boolean }>(
+        `SELECT available_at > clock_timestamp() + interval '100 milliseconds' AS delayed
+         FROM "job" WHERE job_type = 'slow-failure.job'`,
+      );
+      assert.equal(delayedRetry.rows[0]?.delayed, true);
+
+      await pool.query(
+        `INSERT INTO "job"
           (job_type, job_version, workspace_id, actor_id, idempotency_key, payload,
            state, lease_until, lease_token, correlation_id)
          VALUES ('lease.job', 1, $1, $2, 'lease-key', '{}'::jsonb, 'running', now() - interval '1 minute', 'expired-token', '01ARZ3NDEKTSV4RRFFQ69G5FAV')`,

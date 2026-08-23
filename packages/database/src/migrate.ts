@@ -3,7 +3,8 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { createDatabase, getDatabasePool } from "./index.js";
 import { ensureApplicationRole } from "./roles.js";
 
-const pool = getDatabasePool();
+const migrationUrl = process.env.DATABASE_URL_MIGRATION;
+const pool = migrationUrl ? getDatabasePool({ connectionString: migrationUrl }) : getDatabasePool();
 
 try {
   await ensureApplicationRole(pool, {
