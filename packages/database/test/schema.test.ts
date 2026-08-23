@@ -67,8 +67,8 @@ if (!adminUrl) {
       await pool.query(
         `INSERT INTO "audit_event"
           (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason)
-         VALUES ('security', 'schema_test', $1, $2, 'workspace', $2::text, 'test', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'success', 'fixture')`,
-        [firstUser, firstWorkspaceId],
+         VALUES ('security', 'schema_test', $1, $2, 'workspace', $3, 'test', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'success', 'fixture')`,
+        [firstUser, firstWorkspaceId, firstWorkspaceId],
       );
 
       const role = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
