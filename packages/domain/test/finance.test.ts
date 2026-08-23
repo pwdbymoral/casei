@@ -3,6 +3,8 @@ import {
   assertBalancedLedgerEvent,
   calculateSafeToSpend,
   calculateStatementDates,
+  canonicalCardPaymentPostings,
+  canonicalTransactionPostings,
   distributeInstallments,
   generateRecurrenceDates,
   requiredGoalContribution,
@@ -26,6 +28,58 @@ describe("financial domain", () => {
       ]),
     ).toThrow(/soma/);
     expect(() => assertBalancedLedgerEvent([{ accountId: "wallet", amount: brl(0n) }])).toThrow();
+  });
+
+  it("keeps wallet, card purchase and statement payment effects separate", () => {
+    const accounts = {
+      wallet: "wallet",
+      income: "income",
+      expense: "expense",
+      adjustment: "adjustment",
+    };
+    const income = canonicalTransactionPostings({
+      kind: "income",
+      instrument: "wallet",
+      amount: brl(100n),
+      accounts,
+    });
+    expect(income).toEqual([
+      { accountId: "wallet", amount: brl(100n) },
+      { accountId: "income", amount: brl(-100n) },
+    ]);
+    const expense = canonicalTransactionPostings({
+      kind: "expense",
+      instrument: "wallet",
+      amount: brl(40n),
+      accounts,
+    });
+    expect(expense).toEqual([
+      { accountId: "expense", amount: brl(40n) },
+      { accountId: "wallet", amount: brl(-40n) },
+    ]);
+    const purchase = canonicalTransactionPostings({
+      kind: "expense",
+      instrument: "card",
+      amount: brl(40n),
+      accounts: { ...accounts, cardLiability: "card" },
+    });
+    expect(purchase).toEqual([
+      { accountId: "expense", amount: brl(40n) },
+      { accountId: "card", amount: brl(-40n) },
+    ]);
+    const payment = canonicalCardPaymentPostings({
+      amount: brl(40n),
+      wallet: "wallet",
+      cardLiability: "card",
+    });
+    expect(payment).toEqual([
+      { accountId: "wallet", amount: brl(-40n) },
+      { accountId: "card", amount: brl(40n) },
+    ]);
+    expect(purchase.some((entry) => entry.accountId === "wallet")).toBe(false);
+    expect(payment.some((entry) => entry.accountId === "expense")).toBe(false);
+    assertBalancedLedgerEvent(purchase);
+    assertBalancedLedgerEvent(payment);
   });
 
   it("distributes installments exactly, with deterministic cents", () => {

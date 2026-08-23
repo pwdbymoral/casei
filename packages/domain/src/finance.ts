@@ -7,6 +7,86 @@ export interface LedgerPosting {
   readonly amount: Money;
 }
 
+export interface CanonicalPostingAccounts {
+  readonly wallet: string;
+  readonly income: string;
+  readonly expense: string;
+  readonly adjustment: string;
+  readonly cardLiability?: string;
+}
+
+/** Canonical double-entry effects used by wallet, card purchases and payments. */
+export function canonicalTransactionPostings(input: {
+  kind: "income" | "expense" | "transfer" | "adjustment";
+  instrument: "wallet" | "card";
+  amount: Money;
+  accounts: CanonicalPostingAccounts;
+}): readonly LedgerPosting[] {
+  if (input.amount.minor <= 0n) {
+    throw new DomainError("validation_failed", "O valor do lançamento deve ser positivo.");
+  }
+  if (input.instrument === "card") {
+    if (input.kind !== "expense" || !input.accounts.cardLiability) {
+      throw new DomainError(
+        "validation_failed",
+        "Somente despesas podem usar o passivo do cartão.",
+      );
+    }
+    return [
+      { accountId: input.accounts.expense, amount: input.amount },
+      {
+        accountId: input.accounts.cardLiability,
+        amount: Money.fromTrusted(-input.amount.minor, input.amount.currency),
+      },
+    ];
+  }
+  if (input.kind === "income") {
+    return [
+      { accountId: input.accounts.wallet, amount: input.amount },
+      {
+        accountId: input.accounts.income,
+        amount: Money.fromTrusted(-input.amount.minor, input.amount.currency),
+      },
+    ];
+  }
+  if (input.kind === "expense") {
+    return [
+      { accountId: input.accounts.expense, amount: input.amount },
+      {
+        accountId: input.accounts.wallet,
+        amount: Money.fromTrusted(-input.amount.minor, input.amount.currency),
+      },
+    ];
+  }
+  if (input.kind === "adjustment") {
+    return [
+      { accountId: input.accounts.wallet, amount: input.amount },
+      {
+        accountId: input.accounts.adjustment,
+        amount: Money.fromTrusted(-input.amount.minor, input.amount.currency),
+      },
+    ];
+  }
+  throw new DomainError("validation_failed", "Uma transferência exige contas de origem e destino.");
+}
+
+export function canonicalCardPaymentPostings(input: {
+  amount: Money;
+  wallet: string;
+  cardLiability: string;
+}): readonly LedgerPosting[] {
+  if (input.amount.minor <= 0n) {
+    throw new DomainError("validation_failed", "O pagamento deve ser positivo.");
+  }
+  return [
+    {
+      accountId: input.wallet,
+      amount: Money.fromTrusted(-input.amount.minor, input.amount.currency),
+    },
+    { accountId: input.cardLiability, amount: input.amount },
+  ];
+}
+
 /**
  * A published event is valid only when its postings form one balanced,
  * non-zero, single-currency unit. The database repeats this invariant with a
