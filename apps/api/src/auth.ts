@@ -4,10 +4,12 @@ import { createDatabase } from "@casei/database";
 import type { BetterAuthOptions } from "better-auth";
 import { betterAuth } from "better-auth/minimal";
 import {
+  type AuthEmailEnqueueFailureSink,
   type AuthEmailIntentStore,
   type AuthEmailKind,
   type AuthEmailMessage,
   DrizzleAuthEmailIntentStore,
+  LoggingAuthEmailEnqueueFailureSink,
   MemoryAuthEmailIntentStore,
   queueAuthEmail,
   smtpConfigFromEnvironment,
@@ -19,6 +21,8 @@ export interface AuthOptions {
   database?: BetterAuthOptions["database"];
   emailStore?: AuthEmailIntentStore;
   emailPort?: TransactionalEmailPort;
+  emailFailureSink?: AuthEmailEnqueueFailureSink;
+  emailEnqueueMaxAttempts?: number;
   baseURL?: string;
   trustedOrigins?: string[];
   secret?: string;
@@ -164,6 +168,7 @@ export function createAuth(options: AuthOptions = {}) {
           applicationDatabase as NonNullable<typeof applicationDatabase>,
           secret ?? "development-only-secret",
         ));
+  const emailFailureSink = options.emailFailureSink ?? new LoggingAuthEmailEnqueueFailureSink();
   // The API process only persists intents. The worker constructs the actual
   // transport; production still validates its SMTP configuration at startup.
   if (isProduction) smtpConfigFromEnvironment();
@@ -175,7 +180,9 @@ export function createAuth(options: AuthOptions = {}) {
     expiresIn: number,
   ) => {
     const message = makeAuthMessage(kind, data, request, origins, expiresIn);
-    await queueAuthEmail(emailStore, message);
+    await queueAuthEmail(emailStore, message, emailFailureSink, {
+      maxAttempts: options.emailEnqueueMaxAttempts,
+    });
   };
 
   return betterAuth({

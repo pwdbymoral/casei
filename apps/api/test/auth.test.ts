@@ -4,11 +4,15 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { createAuth } from "../src/auth.js";
 import {
+  type AuthEmailEnqueueFailure,
+  CaptureAuthEmailEnqueueFailureSink,
   CaptureTransactionalEmailPort,
   MemoryAuthEmailIntentStore,
   processPendingAuthEmails,
   queueAuthEmail,
+  recoverAuthEmailEnqueueFailure,
   smtpConfigFromEnvironment,
+  type TransactionalEmailPort,
   verifyTransactionalEmailPort,
 } from "../src/auth-email.js";
 
@@ -291,21 +295,28 @@ describe("AUTH-001 identidade", () => {
     await Promise.all([queueAuthEmail(store, message), queueAuthEmail(store, message)]);
     expect(transport.messages).toHaveLength(0);
     expect(
-      await processPendingAuthEmails(store, {
-        send: async () => {
-          throw new Error("temporary SMTP failure");
+      await processPendingAuthEmails(
+        store,
+        {
+          send: async () => {
+            throw new Error("temporary SMTP failure");
+          },
         },
-      }),
+        {
+          backoffBaseMs: 0,
+        },
+      ),
     ).toBe(0);
     expect(store.states[0]).toMatchObject({ state: "failed" });
     const concurrentDeliveries = await Promise.all([
-      processPendingAuthEmails(store, transport),
-      processPendingAuthEmails(store, transport),
+      processPendingAuthEmails(store, transport, { backoffBaseMs: 0 }),
+      processPendingAuthEmails(store, transport, { backoffBaseMs: 0 }),
     ]);
     expect(concurrentDeliveries.reduce((total, value) => total + value, 0)).toBe(1);
     await processPendingAuthEmails(store, transport);
     expect(transport.messages).toHaveLength(1);
     expect(store.states[0]).toMatchObject({ state: "sent" });
+    expect(store.intentStates[0]).toMatchObject({ state: "sent" });
   });
 
   it("não reivindica novamente uma mensagem expirada", async () => {
@@ -325,6 +336,123 @@ describe("AUTH-001 identidade", () => {
     expect(await processPendingAuthEmails(store, transport)).toBe(0);
     expect(await processPendingAuthEmails(store, transport)).toBe(0);
     expect(transport.messages).toHaveLength(0);
+    expect(store.intentStates[0]).toMatchObject({ state: "expired" });
+  });
+
+  it("renova lease durante entrega lenta e evita claim concorrente", async () => {
+    const store = new MemoryAuthEmailIntentStore();
+    const transport = new CaptureTransactionalEmailPort();
+    await queueAuthEmail(store, {
+      kind: "verification",
+      userId: "user-slow",
+      email: "slow@example.com",
+      url: `${apiOrigin}/verify-slow`,
+      token: "slow-token",
+      callbackUrl: "/",
+      correlationId: "01J6Q3B5M8G7T5N4R3Q2P1WXYZ",
+      expiresAt: new Date(Date.now() + 60_000),
+      sourceId: "slow-source",
+    });
+    let firstSend = true;
+    const slowTransport = {
+      send: async (message: Parameters<TransactionalEmailPort["send"]>[0]) => {
+        if (firstSend) {
+          firstSend = false;
+          await new Promise((resolve) => setTimeout(resolve, 140));
+        }
+        await transport.send(message);
+      },
+    };
+    const first = processPendingAuthEmails(store, slowTransport, {
+      leaseSeconds: 0.2,
+      deliveryTimeoutMs: 1_000,
+      backoffBaseMs: 0,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const second = processPendingAuthEmails(store, transport, {
+      leaseSeconds: 0.2,
+      backoffBaseMs: 0,
+    });
+    expect(await Promise.all([first, second])).toEqual([1, 0]);
+    expect(transport.messages).toHaveLength(1);
+  });
+
+  it("aplica backoff e move falhas persistentes para dead-letter terminal", async () => {
+    const store = new MemoryAuthEmailIntentStore();
+    await queueAuthEmail(store, {
+      kind: "verification",
+      userId: "user-dead",
+      email: "dead@example.com",
+      url: `${apiOrigin}/verify-dead`,
+      token: "dead-token",
+      callbackUrl: "/",
+      correlationId: "01J6Q3B5M8G7T5N4R3Q2P1WXYZ",
+      expiresAt: new Date(Date.now() + 60_000),
+      sourceId: "dead-source",
+    });
+    const failing = {
+      send: async () => {
+        throw new Error("SMTP down");
+      },
+    };
+    expect(
+      await processPendingAuthEmails(store, failing, { maxAttempts: 2, backoffBaseMs: 100 }),
+    ).toBe(0);
+    expect(
+      await processPendingAuthEmails(store, failing, { maxAttempts: 2, backoffBaseMs: 0 }),
+    ).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(
+      await processPendingAuthEmails(store, failing, { maxAttempts: 2, backoffBaseMs: 0 }),
+    ).toBe(0);
+    expect(store.deadLetters).toEqual(["dead-source"]);
+    expect(store.intentStates[0]).toMatchObject({ state: "failed" });
+  });
+
+  it("expõe falha de enqueue mesmo quando Better Auth retorna sucesso", async () => {
+    const emailPort = new CaptureTransactionalEmailPort();
+    const emailStore = new MemoryAuthEmailIntentStore();
+    const failureSink = new CaptureAuthEmailEnqueueFailureSink();
+    const originalEnqueue = emailStore.enqueue.bind(emailStore);
+    let fail = true;
+    emailStore.enqueue = async (message) => {
+      if (fail) {
+        fail = false;
+        throw new Error("database unavailable");
+      }
+      return originalEnqueue(message);
+    };
+    const auth = createAuth({
+      database: memoryAdapter(memoryDatabase()),
+      emailPort,
+      emailStore,
+      emailFailureSink: failureSink,
+      emailEnqueueMaxAttempts: 1,
+      baseURL: apiOrigin,
+      trustedOrigins: [apiOrigin, webOrigin],
+      secret: authSecret,
+    });
+    const app = createApp(undefined, {
+      authHandler: (request) => auth.handler(request),
+      authOrigins: [apiOrigin, webOrigin],
+    });
+    const response = await authRequest(app, "sign-up/email", {
+      ...jsonBody({
+        name: "Ada Lovelace",
+        email: "enqueue-failure@example.com",
+        password: "correct-horse-battery",
+      }),
+      headers: { "X-Forwarded-For": "198.51.100.43" },
+    });
+    expect(response.status).toBe(200);
+    expect(failureSink.failures).toHaveLength(1);
+    expect(failureSink.failures[0]?.message.token).toBeTruthy();
+    await recoverAuthEmailEnqueueFailure(
+      emailStore,
+      failureSink.failures[0] as AuthEmailEnqueueFailure,
+    );
+    await processPendingAuthEmails(emailStore, emailPort);
+    expect(emailPort.messages).toHaveLength(1);
   });
 
   it("revoga sessões existentes depois de redefinir a senha", async () => {
