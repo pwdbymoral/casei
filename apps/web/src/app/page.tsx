@@ -1,4 +1,5 @@
 import { ArrowRightIcon, ChartNoAxesCombinedIcon, HouseIcon, TargetIcon } from "lucide-react";
+import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,8 +25,8 @@ export default function Home() {
             Planeje finanças, acompanhe metas e cuide da casa com clareza — sozinho, a dois ou em
             grupo.
           </p>
-          <Button className="mt-8" disabled>
-            Em breve
+          <Button className="mt-8" render={<Link href="/onboarding" />}>
+            Começar agora
             <ArrowRightIcon data-icon="inline-end" />
           </Button>
         </div>
