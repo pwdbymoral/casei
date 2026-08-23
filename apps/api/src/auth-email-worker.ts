@@ -2,8 +2,10 @@ import { createDatabase } from "@casei/database";
 
 import {
   DrizzleAuthEmailIntentStore,
+  FileAuthEmailEnqueueFailureSink,
   NodemailerTransactionalEmailPort,
   processPendingAuthEmails,
+  recoverDurableAuthEmailEnqueueFailures,
   smtpConfigFromEnvironment,
   verifyTransactionalEmailPort,
 } from "./auth-email.js";
@@ -16,14 +18,19 @@ function createWorkerResources() {
   const database = createDatabase();
   const store = new DrizzleAuthEmailIntentStore(database, secret);
   const transport = new NodemailerTransactionalEmailPort(smtpConfigFromEnvironment());
-  return { store, transport };
+  const recovery = new FileAuthEmailEnqueueFailureSink(
+    process.env.CASEI_AUTH_EMAIL_RECOVERY_SPOOL ?? "/var/lib/casei/auth-email-recovery.ndjson",
+    secret,
+  );
+  return { store, transport, recovery };
 }
 
 /** Process one batch so orchestration can run this handler under its own lease/supervision. */
 export async function runAuthEmailWorkerOnce(): Promise<number> {
   const resources = createWorkerResources();
-  const { store, transport } = resources;
+  const { store, transport, recovery } = resources;
   await verifyTransactionalEmailPort(transport);
+  await recoverDurableAuthEmailEnqueueFailures(store, recovery);
   return processPendingAuthEmails(store, transport);
 }
 
@@ -38,7 +45,10 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const runBatch = () => processPendingAuthEmails(resources.store, resources.transport);
+  const runBatch = async () => {
+    await recoverDurableAuthEmailEnqueueFailures(resources.store, resources.recovery);
+    return processPendingAuthEmails(resources.store, resources.transport);
+  };
   await runBatch();
   const timer = setInterval(
     () => {

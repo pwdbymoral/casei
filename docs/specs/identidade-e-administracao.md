@@ -87,6 +87,16 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - Toda consulta de domínio filtra por membership válida e espaço; testes tentam IDs válidos de outro espaço.
 - Respostas de recurso inexistente e não autorizado não permitem enumeração.
 - Rate limiting protege login, recuperação, convite, import e endpoints administrativos.
+- O rate limit de identidade usa o IP resolvido por `x-forwarded-for` somente quando os CIDRs dos
+  proxies reversos estão explicitamente configurados em `CASEI_TRUSTED_PROXIES` (e a origem não é
+  alcançável diretamente pelos clientes). Sem proxy confiável configurado, headers de IP enviados
+  pelo cliente são ignorados e o sistema usa o bucket compartilhado como fallback seguro.
+- Se o callback de identidade ocorrer depois do commit e a gravação da intent/outbox falhar, a
+  mensagem fica em spool local criptografado e persistente (`CASEI_AUTH_EMAIL_RECOVERY_SPOOL`),
+  drenado pelo worker após restart antes de novas claims. O spool não registra token ou URL em claro.
+- Claims de e-mail têm lease renovável por item; `sent`, `failed`, `expired` e dead-letter só podem
+  transicionar enquanto o lease CAS ainda estiver válido. Lotes não deixam itens aguardando uma
+  entrega lenta perderem o lease silenciosamente.
 - Cookies/sessões usam propriedades seguras adequadas ao ambiente publicado; CSRF, CORS e origem são configurados explicitamente.
 - Logs redigem tokens, cookies, senhas, conteúdo financeiro e arquivos.
 

@@ -1,16 +1,21 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
-import { createAuth } from "../src/auth.js";
+import { createAuth, defaultAuthIpAddressOptions, defaultTrustedProxies } from "../src/auth.js";
 import {
   type AuthEmailEnqueueFailure,
   CaptureAuthEmailEnqueueFailureSink,
   CaptureTransactionalEmailPort,
+  FileAuthEmailEnqueueFailureSink,
   MemoryAuthEmailIntentStore,
   processPendingAuthEmails,
   queueAuthEmail,
   recoverAuthEmailEnqueueFailure,
+  recoverDurableAuthEmailEnqueueFailures,
   smtpConfigFromEnvironment,
   type TransactionalEmailPort,
   verifyTransactionalEmailPort,
@@ -33,6 +38,7 @@ function fixture() {
     emailStore,
     baseURL: apiOrigin,
     trustedOrigins: [apiOrigin, webOrigin],
+    trustedProxies: ["127.0.0.1"],
     secret: authSecret,
   });
   const app = createApp(undefined, {
@@ -430,6 +436,7 @@ describe("AUTH-001 identidade", () => {
       emailEnqueueMaxAttempts: 1,
       baseURL: apiOrigin,
       trustedOrigins: [apiOrigin, webOrigin],
+      trustedProxies: ["127.0.0.1"],
       secret: authSecret,
     });
     const app = createApp(undefined, {
@@ -453,6 +460,115 @@ describe("AUTH-001 identidade", () => {
     );
     await processPendingAuthEmails(emailStore, emailPort);
     expect(emailPort.messages).toHaveLength(1);
+  });
+
+  it("recupera falha de enqueue de um spool criptografado depois de reiniciar o processo", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "casei-auth-email-"));
+    const spoolPath = join(directory, "recovery.ndjson");
+    const message = {
+      kind: "verification" as const,
+      userId: "user-restart",
+      email: "restart@example.com",
+      url: `${apiOrigin}/verify-restart?token=secret-token`,
+      token: "secret-token",
+      callbackUrl: "/",
+      correlationId: "01J6Q3B5M8G7T5N4R3Q2P1WXYZ",
+      expiresAt: new Date(Date.now() + 60_000),
+      sourceId: "restart-source",
+    };
+    const failedStore = new MemoryAuthEmailIntentStore();
+    failedStore.enqueue = async () => {
+      throw new Error("database unavailable");
+    };
+    const firstProcessSink = new FileAuthEmailEnqueueFailureSink(spoolPath, authSecret);
+
+    await expect(
+      queueAuthEmail(failedStore, message, firstProcessSink, { maxAttempts: 1 }),
+    ).rejects.toThrow("database unavailable");
+    expect(await readFile(spoolPath, "utf8")).not.toContain("secret-token");
+
+    const afterRestartStore = new MemoryAuthEmailIntentStore();
+    const afterRestartSink = new FileAuthEmailEnqueueFailureSink(spoolPath, authSecret);
+    expect(await recoverDurableAuthEmailEnqueueFailures(afterRestartStore, afterRestartSink)).toBe(
+      1,
+    );
+    expect(
+      await processPendingAuthEmails(afterRestartStore, new CaptureTransactionalEmailPort()),
+    ).toBe(1);
+    await expect(readFile(spoolPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("não permite transição depois que o lease expirou", async () => {
+    const store = new MemoryAuthEmailIntentStore();
+    await queueAuthEmail(store, {
+      kind: "verification",
+      userId: "user-stale-lease",
+      email: "stale@example.com",
+      url: `${apiOrigin}/verify-stale`,
+      token: "stale-token",
+      callbackUrl: "/",
+      correlationId: "01J6Q3B5M8G7T5N4R3Q2P1WXYZ",
+      expiresAt: new Date(Date.now() + 60_000),
+      sourceId: "stale-source",
+    });
+    const [claimed] = await store.claimPending(1, 0.01);
+    if (!claimed) throw new Error("expected a claimed message");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await store.markSent(claimed.id, claimed.leaseUntil);
+    await store.markFailed(claimed.id, "late", claimed.leaseUntil);
+    await store.markDeadLetter(claimed.id, "late", claimed.leaseUntil);
+    expect(store.states[0]).toMatchObject({ state: "pending" });
+  });
+
+  it("renova todos os leases de um lote durante entregas lentas", async () => {
+    const store = new MemoryAuthEmailIntentStore();
+    for (const suffix of ["one", "two", "three"]) {
+      await queueAuthEmail(store, {
+        kind: "verification",
+        userId: `user-batch-${suffix}`,
+        email: `${suffix}@example.com`,
+        url: `${apiOrigin}/verify-${suffix}`,
+        token: `${suffix}-token`,
+        callbackUrl: "/",
+        correlationId: "01J6Q3B5M8G7T5N4R3Q2P1WXYZ",
+        expiresAt: new Date(Date.now() + 60_000),
+        sourceId: `batch-${suffix}`,
+      });
+    }
+    const transport = new CaptureTransactionalEmailPort();
+    const slowTransport = {
+      send: async (message: Parameters<TransactionalEmailPort["send"]>[0]) => {
+        await new Promise((resolve) => setTimeout(resolve, 140));
+        await transport.send(message);
+      },
+    };
+
+    expect(
+      await processPendingAuthEmails(store, slowTransport, {
+        leaseSeconds: 0.2,
+        deliveryTimeoutMs: 1_000,
+        backoffBaseMs: 0,
+      }),
+    ).toBe(3);
+    expect(transport.messages).toHaveLength(3);
+  });
+
+  it("só usa headers de IP quando proxies confiáveis estão configurados", () => {
+    expect(defaultAuthIpAddressOptions([])).toEqual({ ipAddressHeaders: [] });
+    expect(defaultAuthIpAddressOptions(["10.20.30.40/32"])).toEqual({
+      ipAddressHeaders: ["x-forwarded-for"],
+      trustedProxies: ["10.20.30.40/32"],
+    });
+    const previous = process.env.CASEI_TRUSTED_PROXIES;
+    try {
+      process.env.CASEI_TRUSTED_PROXIES = "not-an-ip";
+      expect(() => defaultTrustedProxies()).toThrow(/Invalid trusted proxy/);
+    } finally {
+      if (previous === undefined) delete process.env.CASEI_TRUSTED_PROXIES;
+      else process.env.CASEI_TRUSTED_PROXIES = previous;
+    }
   });
 
   it("revoga sessões existentes depois de redefinir a senha", async () => {

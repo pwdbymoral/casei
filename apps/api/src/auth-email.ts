@@ -1,6 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { authEmailIntent, authEmailOutbox, type createDatabase } from "@casei/database";
-import { and, eq, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, lte, or, sql } from "drizzle-orm";
 import nodemailer from "nodemailer";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -42,6 +44,10 @@ export interface AuthEmailEnqueueFailureSink {
   record(failure: AuthEmailEnqueueFailure): Promise<void>;
 }
 
+export interface AuthEmailEnqueueFailureRecoverySource {
+  recover(store: AuthEmailIntentStore): Promise<number>;
+}
+
 /** Test/local sink that exposes failures without logging token-bearing data. */
 export class CaptureAuthEmailEnqueueFailureSink implements AuthEmailEnqueueFailureSink {
   readonly failures: AuthEmailEnqueueFailure[] = [];
@@ -63,6 +69,97 @@ export class LoggingAuthEmailEnqueueFailureSink implements AuthEmailEnqueueFailu
   }
 }
 
+/**
+ * Encrypted append-only recovery spool for the small window in which Better
+ * Auth has committed a user but the primary database cannot persist the
+ * email intent. The worker drains it before claiming the regular outbox.
+ * Deployments must place this file on persistent, process-private storage.
+ */
+export class FileAuthEmailEnqueueFailureSink
+  implements AuthEmailEnqueueFailureSink, AuthEmailEnqueueFailureRecoverySource
+{
+  private operation = Promise.resolve();
+
+  constructor(
+    private readonly filePath: string,
+    private readonly encryptionSecret: string,
+  ) {}
+
+  async record(failure: AuthEmailEnqueueFailure): Promise<void> {
+    await this.serialized(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
+      const line = `${JSON.stringify({
+        occurredAt: failure.occurredAt.toISOString(),
+        payload: encryptPayload(failure.message, this.encryptionSecret),
+      })}\n`;
+      await appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
+    });
+  }
+
+  async recover(store: AuthEmailIntentStore): Promise<number> {
+    return this.serialized(async () => {
+      let content: string;
+      try {
+        content = await readFile(this.filePath, "utf8");
+      } catch (error) {
+        if (isFileNotFound(error)) return 0;
+        throw error;
+      }
+
+      const remaining: string[] = [];
+      let recovered = 0;
+      for (const line of content.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const record = JSON.parse(line) as { payload?: unknown };
+          if (typeof record.payload !== "string") throw new Error("invalid recovery record");
+          const message = decryptPayload(record.payload, this.encryptionSecret);
+          await store.enqueue(message);
+          recovered += 1;
+        } catch {
+          // A transient store failure, a partial write, or a future schema
+          // version stays durable for a later supervised retry.
+          remaining.push(line);
+        }
+      }
+
+      if (remaining.length === 0) {
+        await unlink(this.filePath).catch((error: unknown) => {
+          if (!isFileNotFound(error)) throw error;
+        });
+      } else if (recovered > 0) {
+        const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
+        await writeFile(temporaryPath, `${remaining.join("\n")}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+        });
+        await rename(temporaryPath, this.filePath);
+      }
+      return recovered;
+    });
+  }
+
+  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.operation;
+    let release!: () => void;
+    this.operation = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+}
+
+function isFileNotFound(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 export interface ClaimedAuthEmail {
   id: string;
   state: "pending" | "failed";
@@ -75,10 +172,10 @@ export interface AuthEmailIntentStore {
   enqueue(message: AuthEmailMessage): Promise<QueuedAuthEmail>;
   claimPending(limit?: number, leaseSeconds?: number): Promise<ClaimedAuthEmail[]>;
   renewLease(id: string, leaseUntil: Date, leaseSeconds: number): Promise<Date | null>;
-  markSent(id: string, leaseUntil?: Date): Promise<void>;
-  markFailed(id: string, reason: string, leaseUntil?: Date, retryAt?: Date): Promise<void>;
-  markExpired(id: string, leaseUntil?: Date): Promise<void>;
-  markDeadLetter(id: string, reason: string, leaseUntil?: Date): Promise<void>;
+  markSent(id: string, leaseUntil: Date): Promise<void>;
+  markFailed(id: string, reason: string, leaseUntil: Date, retryAt?: Date): Promise<void>;
+  markExpired(id: string, leaseUntil: Date): Promise<void>;
+  markDeadLetter(id: string, reason: string, leaseUntil: Date): Promise<void>;
   pending(): Promise<AuthEmailMessage[]>;
 }
 
@@ -229,9 +326,13 @@ export class MemoryAuthEmailIntentStore implements AuthEmailIntentStore {
     return { id: item.id, state: item.state };
   }
 
-  async markSent(id: string, leaseUntil?: Date): Promise<void> {
+  async markSent(id: string, leaseUntil: Date): Promise<void> {
     const item = this.findById(id);
-    if (item && (!leaseUntil || item.availableAt.getTime() === leaseUntil.getTime())) {
+    if (
+      item &&
+      item.availableAt.getTime() === leaseUntil.getTime() &&
+      item.availableAt.getTime() > Date.now()
+    ) {
       item.state = "sent";
       item.intentState = "sent";
     }
@@ -240,29 +341,41 @@ export class MemoryAuthEmailIntentStore implements AuthEmailIntentStore {
   async markFailed(
     id: string,
     _reason: string,
-    leaseUntil?: Date,
+    leaseUntil: Date,
     retryAt = new Date(),
   ): Promise<void> {
     const item = this.findById(id);
-    if (item && (!leaseUntil || item.availableAt.getTime() === leaseUntil.getTime())) {
+    if (
+      item &&
+      item.availableAt.getTime() === leaseUntil.getTime() &&
+      item.availableAt.getTime() > Date.now()
+    ) {
       item.state = "failed";
       item.intentState = "failed";
       item.availableAt = retryAt;
     }
   }
 
-  async markExpired(id: string, leaseUntil?: Date): Promise<void> {
+  async markExpired(id: string, leaseUntil: Date): Promise<void> {
     const item = this.findById(id);
-    if (item && (!leaseUntil || item.availableAt.getTime() === leaseUntil.getTime())) {
+    if (
+      item &&
+      item.availableAt.getTime() === leaseUntil.getTime() &&
+      item.availableAt.getTime() > Date.now()
+    ) {
       item.state = "failed";
       item.intentState = "expired";
       item.availableAt = NEVER_AVAILABLE;
     }
   }
 
-  async markDeadLetter(id: string, _reason: string, leaseUntil?: Date): Promise<void> {
+  async markDeadLetter(id: string, _reason: string, leaseUntil: Date): Promise<void> {
     const item = this.findById(id);
-    if (item && (!leaseUntil || item.availableAt.getTime() === leaseUntil.getTime())) {
+    if (
+      item &&
+      item.availableAt.getTime() === leaseUntil.getTime() &&
+      item.availableAt.getTime() > Date.now()
+    ) {
       item.state = "failed";
       item.intentState = "failed";
       item.deadLetter = true;
@@ -298,7 +411,13 @@ export class MemoryAuthEmailIntentStore implements AuthEmailIntentStore {
 
   async renewLease(id: string, leaseUntil: Date, leaseSeconds: number): Promise<Date | null> {
     const item = this.findById(id);
-    if (!item || item.availableAt.getTime() !== leaseUntil.getTime()) return null;
+    if (
+      !item ||
+      item.availableAt.getTime() !== leaseUntil.getTime() ||
+      item.availableAt.getTime() <= Date.now()
+    ) {
+      return null;
+    }
     const renewed = new Date(Date.now() + leaseSeconds * 1000);
     item.availableAt = renewed;
     return renewed;
@@ -432,14 +551,16 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
 
   private async transition(
     id: string,
-    leaseUntil: Date | undefined,
+    leaseUntil: Date,
     outboxValues: AuthEmailOutboxUpdate,
     intentState: "queued" | "sent" | "failed" | "expired",
   ): Promise<void> {
-    const where = leaseUntil
-      ? and(eq(authEmailOutbox.id, id), eq(authEmailOutbox.availableAt, leaseUntil))
-      : eq(authEmailOutbox.id, id);
     await this.database.transaction(async (transaction) => {
+      const where = and(
+        eq(authEmailOutbox.id, id),
+        eq(authEmailOutbox.availableAt, leaseUntil),
+        gt(authEmailOutbox.availableAt, new Date()),
+      );
       const [row] = await transaction
         .select({ intentId: authEmailOutbox.intentId })
         .from(authEmailOutbox)
@@ -455,7 +576,7 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
     });
   }
 
-  async markSent(id: string, leaseUntil?: Date): Promise<void> {
+  async markSent(id: string, leaseUntil: Date): Promise<void> {
     await this.transition(
       id,
       leaseUntil,
@@ -467,7 +588,7 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
   async markFailed(
     id: string,
     reason: string,
-    leaseUntil?: Date,
+    leaseUntil: Date,
     retryAt = new Date(),
   ): Promise<void> {
     await this.transition(
@@ -478,7 +599,7 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
     );
   }
 
-  async markExpired(id: string, leaseUntil?: Date): Promise<void> {
+  async markExpired(id: string, leaseUntil: Date): Promise<void> {
     await this.transition(
       id,
       leaseUntil,
@@ -487,7 +608,7 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
     );
   }
 
-  async markDeadLetter(id: string, reason: string, leaseUntil?: Date): Promise<void> {
+  async markDeadLetter(id: string, reason: string, leaseUntil: Date): Promise<void> {
     await this.transition(
       id,
       leaseUntil,
@@ -553,11 +674,18 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
   }
 
   async renewLease(id: string, leaseUntil: Date, leaseSeconds: number): Promise<Date | null> {
-    const renewed = new Date(Date.now() + leaseSeconds * 1000);
+    const now = new Date();
+    const renewed = new Date(now.getTime() + leaseSeconds * 1000);
     const [row] = await this.database
       .update(authEmailOutbox)
       .set({ availableAt: renewed })
-      .where(and(eq(authEmailOutbox.id, id), eq(authEmailOutbox.availableAt, leaseUntil)))
+      .where(
+        and(
+          eq(authEmailOutbox.id, id),
+          eq(authEmailOutbox.availableAt, leaseUntil),
+          gt(authEmailOutbox.availableAt, now),
+        ),
+      )
       .returning({ availableAt: authEmailOutbox.availableAt });
     return row?.availableAt ?? null;
   }
@@ -609,6 +737,14 @@ export async function recoverAuthEmailEnqueueFailure(
   return queueAuthEmail(store, failure.message);
 }
 
+/** Drain the encrypted process-restart spool before regular outbox claims. */
+export async function recoverDurableAuthEmailEnqueueFailures(
+  store: AuthEmailIntentStore,
+  source: AuthEmailEnqueueFailureRecoverySource,
+): Promise<number> {
+  return source.recover(store);
+}
+
 /** @deprecated Use queueAuthEmail; delivery is owned by processPendingAuthEmails. */
 export const dispatchQueuedAuthEmail = queueAuthEmail;
 
@@ -625,66 +761,78 @@ export async function processPendingAuthEmails(
   const maxAttempts = workerOptions.maxAttempts ?? 5;
   const backoffBaseMs = workerOptions.backoffBaseMs ?? 1_000;
   const backoffMaxMs = workerOptions.backoffMaxMs ?? 60 * 60 * 1000;
-  let delivered = 0;
-  for (const claimed of await store.claimPending(limit, leaseSeconds)) {
-    if (claimed.message.expiresAt.getTime() <= Date.now()) {
-      await store.markExpired(claimed.id, claimed.leaseUntil);
-      continue;
-    }
-    if (claimed.attempts > maxAttempts) {
-      await store.markDeadLetter(
-        claimed.id,
-        "maximum delivery attempts exceeded",
-        claimed.leaseUntil,
-      );
-      continue;
-    }
+  const claimedItems = await store.claimPending(limit, leaseSeconds);
 
-    let currentLease = claimed.leaseUntil;
-    let renewalInFlight: Promise<void> | undefined;
-    const renewalInterval = setInterval(
-      () => {
-        if (renewalInFlight) return;
-        renewalInFlight = store
-          .renewLease(claimed.id, currentLease, leaseSeconds)
-          .then((renewed) => {
-            if (renewed) currentLease = renewed;
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            renewalInFlight = undefined;
-          });
-      },
-      Math.max(50, (leaseSeconds * 1000) / 3),
-    );
-
-    try {
-      await withTimeout(transport.send(claimed.message), deliveryTimeoutMs);
-      await store.markSent(claimed.id, currentLease);
-      delivered += 1;
-    } catch {
-      // Provider errors can contain recipients, URLs or provider response
-      // bodies. Keep the durable error safe for operators and retries.
-      if (claimed.attempts >= maxAttempts) {
-        await store.markDeadLetter(claimed.id, "maximum delivery attempts exceeded", currentLease);
-      } else {
-        const backoff = Math.min(
-          backoffMaxMs,
-          backoffBaseMs * 2 ** Math.max(0, claimed.attempts - 1),
-        );
-        const jitter = backoff > 0 ? Math.floor(Math.random() * Math.max(1, backoff * 0.1)) : 0;
-        await store.markFailed(
-          claimed.id,
-          "email delivery failed",
-          currentLease,
-          new Date(Date.now() + backoff + jitter),
-        );
+  // Each claimed row has its own lease-renewal loop. Processing the whole
+  // batch concurrently prevents the first rows from expiring while later
+  // rows are waiting behind a slow SMTP provider.
+  const results = await Promise.all(
+    claimedItems.map(async (claimed) => {
+      if (claimed.message.expiresAt.getTime() <= Date.now()) {
+        await store.markExpired(claimed.id, claimed.leaseUntil);
+        return 0;
       }
-    } finally {
-      clearInterval(renewalInterval);
-    }
-  }
-  return delivered;
+      if (claimed.attempts > maxAttempts) {
+        await store.markDeadLetter(
+          claimed.id,
+          "maximum delivery attempts exceeded",
+          claimed.leaseUntil,
+        );
+        return 0;
+      }
+
+      let currentLease = claimed.leaseUntil;
+      let renewalInFlight: Promise<void> | undefined;
+      const renewalInterval = setInterval(
+        () => {
+          if (renewalInFlight) return;
+          renewalInFlight = store
+            .renewLease(claimed.id, currentLease, leaseSeconds)
+            .then((renewed) => {
+              if (renewed) currentLease = renewed;
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              renewalInFlight = undefined;
+            });
+        },
+        Math.max(50, (leaseSeconds * 1000) / 3),
+      );
+
+      try {
+        await withTimeout(transport.send(claimed.message), deliveryTimeoutMs);
+        if (renewalInFlight) await renewalInFlight;
+        await store.markSent(claimed.id, currentLease);
+        return 1;
+      } catch {
+        // Provider errors can contain recipients, URLs or provider response
+        // bodies. Keep the durable error safe for operators and retries.
+        if (claimed.attempts >= maxAttempts) {
+          await store.markDeadLetter(
+            claimed.id,
+            "maximum delivery attempts exceeded",
+            currentLease,
+          );
+        } else {
+          const backoff = Math.min(
+            backoffMaxMs,
+            backoffBaseMs * 2 ** Math.max(0, claimed.attempts - 1),
+          );
+          const jitter = backoff > 0 ? Math.floor(Math.random() * Math.max(1, backoff * 0.1)) : 0;
+          await store.markFailed(
+            claimed.id,
+            "email delivery failed",
+            currentLease,
+            new Date(Date.now() + backoff + jitter),
+          );
+        }
+        return 0;
+      } finally {
+        clearInterval(renewalInterval);
+      }
+    }),
+  );
+  return results.reduce<number>((total, value) => total + value, 0);
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

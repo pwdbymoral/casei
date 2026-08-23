@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { createDatabase } from "@casei/database";
 import type { BetterAuthOptions } from "better-auth";
@@ -9,6 +10,7 @@ import {
   type AuthEmailKind,
   type AuthEmailMessage,
   DrizzleAuthEmailIntentStore,
+  FileAuthEmailEnqueueFailureSink,
   LoggingAuthEmailEnqueueFailureSink,
   MemoryAuthEmailIntentStore,
   queueAuthEmail,
@@ -25,6 +27,7 @@ export interface AuthOptions {
   emailEnqueueMaxAttempts?: number;
   baseURL?: string;
   trustedOrigins?: string[];
+  trustedProxies?: string[];
   secret?: string;
 }
 
@@ -37,6 +40,42 @@ function envList(value: string | undefined): string[] {
 
 function originOf(value: string): string {
   return new URL(value).origin;
+}
+
+function isValidProxyEntry(value: string): boolean {
+  const parts = value.split("/");
+  if (parts.length > 2) return false;
+  const [address, prefix] = parts;
+  const version = address ? isIP(address) : 0;
+  if (!version) return false;
+  if (prefix === undefined) return true;
+  if (!/^\d+$/.test(prefix)) return false;
+  const size = version === 4 ? 32 : 128;
+  const numericPrefix = Number(prefix);
+  return numericPrefix >= 0 && numericPrefix <= size;
+}
+
+export function defaultTrustedProxies(): string[] {
+  const configured = envList(
+    process.env.CASEI_TRUSTED_PROXIES ?? process.env.BETTER_AUTH_TRUSTED_PROXIES,
+  );
+  const invalid = configured.filter((entry) => !isValidProxyEntry(entry));
+  if (invalid.length > 0) {
+    throw new Error(`Invalid trusted proxy CIDR configuration: ${invalid.join(", ")}`);
+  }
+  return configured;
+}
+
+export function defaultAuthIpAddressOptions(trustedProxies = defaultTrustedProxies()) {
+  // Without an explicitly trusted reverse proxy, do not read any client-
+  // supplied forwarding header. Better Auth falls back to a shared bucket in
+  // production, which is safer than allowing an attacker to rotate IPs.
+  if (trustedProxies.length === 0) return { ipAddressHeaders: [] as string[] };
+  const headers = envList(process.env.CASEI_CLIENT_IP_HEADERS);
+  return {
+    ipAddressHeaders: headers.length > 0 ? headers : ["x-forwarded-for"],
+    trustedProxies,
+  };
 }
 
 export function defaultAuthOrigins(): string[] {
@@ -168,7 +207,15 @@ export function createAuth(options: AuthOptions = {}) {
           applicationDatabase as NonNullable<typeof applicationDatabase>,
           secret ?? "development-only-secret",
         ));
-  const emailFailureSink = options.emailFailureSink ?? new LoggingAuthEmailEnqueueFailureSink();
+  const emailFailureSink =
+    options.emailFailureSink ??
+    (isProduction
+      ? new FileAuthEmailEnqueueFailureSink(
+          process.env.CASEI_AUTH_EMAIL_RECOVERY_SPOOL ??
+            "/var/lib/casei/auth-email-recovery.ndjson",
+          secret ?? "development-only-secret",
+        )
+      : new LoggingAuthEmailEnqueueFailureSink());
   // The API process only persists intents. The worker constructs the actual
   // transport; production still validates its SMTP configuration at startup.
   if (isProduction) smtpConfigFromEnvironment();
@@ -191,6 +238,9 @@ export function createAuth(options: AuthOptions = {}) {
     basePath: "/api/auth",
     secret,
     trustedOrigins: origins,
+    advanced: {
+      ipAddress: defaultAuthIpAddressOptions(options.trustedProxies),
+    },
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: true,
