@@ -1,0 +1,205 @@
+# Plano: MVP operacional do Casei
+
+- Status: ativo — Gate 0 concluído; pronto para iniciar o Marco 1
+- Spec associada: [MVP Casei](../../specs/mvp-casei.md)
+- Arquitetura: [modelo de domínio do MVP](../../architecture/modelo-de-dominio-mvp.md)
+
+## Objetivo
+
+Entregar, em fatias verticais verificáveis, o núcleo doméstico e financeiro descrito nas specs do MVP, preservando isolamento, auditabilidade, ausência de dupla contagem e captura cotidiana de baixo atrito.
+
+## Estado inicial
+
+- Monorepo, PWA, API, contratos, pacote de domínio, boundary de banco, CI e imagens OCI existem.
+- Há apenas contrato inicial de papéis `owner/member`; `viewer` e permissões completas ainda não existem.
+- Banco, autenticação, módulos de negócio, jobs e jornadas autenticadas ainda não foram implementados.
+- A homepage é uma apresentação estática de fundação; não há design system de produto validado no navegador.
+- A spec de fundação ainda possui decisões abertas de autenticação/e-mail que este plano propõe resolver.
+
+## Regra de execução por agentes
+
+Cada item abaixo é uma unidade de PR por padrão. Um agente deve:
+
+1. ler `AGENTS.md`, a spec vinculada, este plano e somente a arquitetura relevante;
+2. declarar critério de aceite, arquivos previstos e dependências antes de editar;
+3. atualizar primeiro spec/ADR quando descobrir decisão ausente; não decidir silenciosamente no código;
+4. para comportamento testável, demonstrar Red pela razão esperada, implementar o mínimo e manter Green;
+5. não alterar contratos de outra fatia sem coordenar com seu responsável;
+6. executar teste focado, lint, typecheck e testes completos pertinentes; build/check segue as regras de ambiente do repositório;
+7. registrar no PR requisitos atendidos, evidência, migração, impacto de segurança, screenshots/browser e limitações.
+
+### Coordenação paralela
+
+- Somente um agente por vez é dono de migrações em `packages/database`; os demais propõem contratos e aguardam a migração-base ou trabalham em write sets independentes.
+- Mudanças em `packages/contracts/src/index.ts`, shell/navegação global, tokens CSS e configuração de autenticação exigem dono explícito para evitar merge concorrente.
+- UI pode avançar com fixtures tipadas depois de contratos aprovados, mas não inventa responses. API pode avançar contra os mesmos contratos.
+- Fatias do mesmo grupo paralelo só começam depois dos gates indicados e devem integrar uma por vez com `pnpm check` entre merges.
+- Nenhuma tarefa posterior “corrige” regra de domínio por cálculo no cliente.
+
+## Gate 0 — aprovação e decisões
+
+- [x] **MVP-000 Aprovar produto:** revisar e confirmar as oito [decisões de produto](../../specs/mvp-casei.md#decisões-de-produto-aprovadas), terminologia, escopo e non-goals.
+- [x] **MVP-001 Resolver drift documental:** marcar specs como vigentes, encerrar questões substituídas na spec de fundação e atualizar README/mapa de documentação.
+- [x] **MVP-002 ADR ledger:** aprovar dupla entrada, reconhecimento, reversão e projeções; incluir exemplos canônicos e invariantes SQL com FK composta de moeda, checks e constraint trigger `DEFERRABLE INITIALLY DEFERRED` de soma zero.
+- [x] **MVP-003 ADR operação:** decidir e-mail (`better-auth@1.6.16`, `nodemailer@9.0.5`), objeto temporário, executor de jobs e RLS/defesa em profundidade com versões, revalidação de jobs/downloads e documentação oficial.
+- [x] **MVP-004 Mapa de jornadas:** produzir [wireflows de baixa fidelidade](../../ux/wireflows-mvp.md) para onboarding, captura rápida, fatura, import, lista de compras e admin; revisar por tarefa, não por estética.
+- [x] **MVP-005 Contratos transversais:** aprovar [IDs, Money, datas civis, erro HTTP, paginação, idempotência, optimistic concurrency e eventos de auditoria](../../architecture/contratos-transversais-mvp.md).
+
+**Saída do gate:** nenhum requisito material aberto; ADRs aprovadas; contratos e wireflows definidos; tarefas seguintes podem ser atribuídas sem decisão de produto local.
+
+Gate concluído documentalmente em 2026-08-23, com as decisões de concorrência, revogação, outbox e invariantes SQL explicitadas nesta revisão. Os contratos serão materializados e testados em PLAT-001–004; ainda não há evidência de runtime nesta etapa exclusivamente documental.
+
+## Marco 1 — plataforma segura e espaço compartilhado
+
+Executar schema/base antes das fatias paralelas.
+
+- [ ] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.16`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Testar migration up/down em banco descartável e verificar versões pinadas.
+- [ ] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade.
+- [ ] **PLAT-003 Boundary HTTP:** `/v1`, parsing Zod, envelope de erro, correlation ID, auth actor, workspace scope, cursor e versionamento.
+- [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter; persistir ator/capacidade de jobs e revalidar membership antes de cada lote/transição.
+- [ ] **AUTH-001 Identidade:** cadastro, verificação, login, logout, recuperação e sessões com testes de enumeração/rate limit; spike contra `better-auth@1.6.16` para `auth_email_intent`/outbox, callback pós-commit, recovery de token, reenvio, expiração, falha de persistência, idempotência e callback URL.
+- [ ] **AUTH-002 Onboarding:** criação idempotente de espaço/owner, moeda/fuso/saldo inicial opcional e retomada após falha.
+- [ ] **AUTH-003 Memberships:** convite, reenvio, expiração, aceite, remoção e transferência de propriedade.
+- [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped, lock de membership e suíte negativa/concorrente entre dois espaços.
+- [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`, entitlement de recuperação por 30 dias sem revogar identidade/outros espaços, cancelamento de jobs, purge idempotente de conteúdo/objetos no dia 30, backups até 35 dias, tombstone/auditoria por 365 dias e restore com tombstone.
+- [ ] **WEB-001 App shell:** layouts autenticado/admin, troca de espaço, navegação responsiva, loading/error/offline/permission states.
+- [ ] **WEB-002 Design primitives:** instalar via shadcn somente os primitives aprovados; criar MoneyInput/StatusBadge/AsyncState com testes acessíveis.
+- [ ] **WEB-003 Onboarding UI:** fluxo responsivo, recuperação de rascunho, erros e validação Playwright.
+
+**Gate 1:** usuário autenticado cria/troca espaço; permissões são comprovadas no servidor; shell passa teclado, 320 px, tablet e desktop; nenhum dado cruza espaços.
+
+## Marco 2 — carteira e transação simples
+
+- [ ] **FIN-001 Ledger schema e domínio:** accounts, user transactions, events, entries, categorias, constraints de soma/escopo e guards de imutabilidade de evento publicado conforme ADR; testar insert/update/delete, alteração de cabeçalho e unpublish.
+- [ ] **FIN-002 Carteira:** saldo inicial, saldo atual, conferência e ajuste com motivo; testes de conservação e concorrência.
+- [ ] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
+- [ ] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer.
+- [ ] **FIN-005 Linha do tempo:** busca, período, filtros em URL, paginação, estados e detalhe auditável.
+- [ ] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia.
+
+**Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
+
+## Marco 3 — compromissos, recorrências e parcelas
+
+- [ ] **PLAN-001 Planejado/liquidação parcial:** vencimento, valor planejado/efetivo, atraso derivado e múltiplas liquidações.
+- [ ] **PLAN-002 Recurrence engine:** semanal/mensal/anual, variável/fixa, janela de 12 meses, meses curtos, pausa e job idempotente.
+- [ ] **PLAN-003 Edição de série:** somente esta, esta e futuras, futuras não liquidadas; preservar liquidadas e tratar exceções.
+- [ ] **PLAN-004 Installment engine:** distribuição exata de centavos, preview, edição e cancelamento futuro.
+- [ ] **PLAN-005 UI de compromissos:** próximos, vencidos, confirmar valor variável, pagar/receber parcial e editar escopo.
+
+**Gate 3:** relógio/fuso determinísticos; geração repetida não duplica; soma de parcelas é exata; histórico liquidado é imutável.
+
+## Marco 4 — cartões e faturas
+
+- [ ] **CARD-001 Cartão e ciclos:** cadastro, arquivamento, cálculo persistido de ciclos e limites de mês.
+- [ ] **CARD-002 Compra/cartão:** compra à vista/parcelada gera despesa/passivo e associação idempotente à fatura sugerida.
+- [ ] **CARD-003 Fatura:** abrir, fechar, reabrir com confirmação, ajuste pós-fechamento, total e estados.
+- [ ] **CARD-004 Pagamento:** total, parcial, excedente/crédito e cancelamento como transferência ledger.
+- [ ] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
+- [ ] **CARD-006 UI cartões/fatura:** visão por ciclo, composição explicável, ações frequentes e correção de fatura.
+
+**Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
+
+## Marco 5 — empréstimos e metas
+
+Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam seriadas.
+
+- [ ] **LOAN-001 Empréstimo concedido/recebido:** contrato, contraparte, principal e eventos ledger.
+- [ ] **LOAN-002 Pagamentos:** parcial, agenda opcional, separação de principal/juros/tarifas, baixa/perdão.
+- [ ] **LOAN-003 UI empréstimos:** resumo de saldo, cronograma, registrar pagamento, histórico e previsão de quitação.
+- [ ] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura.
+- [ ] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total.
+- [ ] **GOAL-003 UI metas:** captura simples, progresso, ritmo, reserva descoberta e simulação de contribuição.
+
+**Gate 5:** empréstimo nunca vira renda/despesa de principal; meta nunca altera saldo por reservar; gastos vinculados reconciliam atomicamente.
+
+## Marco 6 — estoque e compras domésticas
+
+Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro somente após Gate 2.
+
+- [ ] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes, arquivamento e regra de unidade.
+- [ ] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência e histórico.
+- [ ] **STOCK-003 Lista de compras:** derivação por mínimo/marcação, itens livres, deduplicação e colaboração.
+- [ ] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
+- [ ] **STOCK-005 UI estoque:** busca, filtros, lista touch, quick actions, modo avançado responsivo e estados offline.
+- [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
+
+**Gate 6:** quantidade e histórico reconciliam; concorrência não duplica lista; jornada no mercado passa em telefone e teclado.
+
+## Marco 7 — intercâmbio de dados
+
+- [ ] **DATA-001 ADR e adapters de arquivo:** storage S3-compatible, expiração, streaming seguro e varredura/validação de formato.
+- [ ] **DATA-002 Parser/mapeamento:** CSV/XLSX, encoding/locale, sugestão editável e perfis salvos.
+- [ ] **DATA-003 Validação/preflight:** resultado por linha, fingerprints, política de duplicata e conflito de versão.
+- [ ] **DATA-004 Aplicação:** jobs em lotes chamando casos de uso, revalidação de ator/capacidade antes de cada lote, atomicidade por linha, cancelamento/retry/reversão.
+- [ ] **DATA-005 Export:** CSVs versionados, ZIP/manifesto/checksum, formula injection e streaming/proxy autorizado no download, sem URL presignada para export sensível.
+- [ ] **DATA-006 UI import/export:** upload, mapping, preview, progresso, resultado, retry e relatório acessível.
+
+**Gate 7:** arquivos maliciosos/maiores são rejeitados; reimport não duplica; export reimporta; acesso expirado ou de outro espaço falha sem vazamento.
+
+## Marco 8 — painel, projeção e relatórios
+
+- [ ] **INSIGHT-001 Read models:** agregados reconstruíveis de saldo, resultado, compromissos, faturas, reservas e estoque.
+- [ ] **INSIGHT-002 Projeção 12 meses:** timeline de caixa com decomposição por eventos e desconhecidos explícitos.
+- [ ] **INSIGHT-003 Valor seguro:** fórmula de 30 dias, margem, déficit, cobertura de reservas e níveis de confiança.
+- [ ] **INSIGHT-004 Painel Hoje:** prioridade acionável, personalização, ocultar valores e deep links para origem.
+- [ ] **INSIGHT-005 Relatórios:** mensal/categorias com tabela equivalente, filtros compartilhados e reconciliação com export.
+- [ ] **INSIGHT-006 Simulações:** mudanças temporárias isoladas e aplicação explícita como planejamento.
+
+**Gate 8:** todo total abre sua composição; read models podem ser reconstruídos; nenhuma compra/fatura ou reserva/saldo é contada duas vezes; baixa confiança é honesta.
+
+## Marco 9 — administração e prontidão de beta
+
+- [ ] **ADMIN-001 Papéis de plataforma/bootstrap:** primeiro admin por procedimento único, promoção posterior no console, proteção do último admin.
+- [ ] **ADMIN-002 Console de contas:** busca e metadados mínimos, suspensão/reativação, sessões e reenvios.
+- [ ] **ADMIN-003 Operação de jobs:** saúde, dead-letter, retry idempotente e correlation IDs sem conteúdo sensível.
+- [ ] **ADMIN-004 Auditoria administrativa:** motivo obrigatório, filtros, retenção e step-up para ações críticas.
+- [ ] **SEC-001 Threat model:** autenticação, isolamento, import, admin, PWA cache, logs e supply chain; resolver riscos altos.
+- [ ] **SEC-002 Privacidade/operação:** termos aprovados quando aplicável, operacionalizar a política de retenção já aprovada (30/35/365 dias), exportação/exclusão do titular, backup/restore testado e runbooks.
+- [ ] **QA-001 Matriz E2E:** jornadas críticas em mobile/desktop, dois usuários/dois espaços, calendário, falhas de rede e concorrência.
+- [ ] **QA-002 Acessibilidade:** axe quando útil + teclado/foco/reflow/zoom/contraste/leitor de tela proporcional ao risco.
+- [ ] **QA-003 Performance:** budgets aprovados para shell, listas, captura e dashboard; carga representativa de 50 mil linhas/import.
+- [ ] **QA-004 Observabilidade:** dashboards/alertas sanitizados, SLO inicial e teste de falha/recovery de jobs.
+
+**Gate 9 / Go-live:** `pnpm check`, build OCI, migração/rollback ensaiados, browser matrix aprovada, backup restaurado, nenhum risco alto aberto e specs/README/runbooks sincronizados.
+
+## Matriz de rastreabilidade resumida
+
+| Resultado | Tarefas principais | Evidência mínima |
+| --- | --- | --- |
+| Captura simples | FIN-003/004 | domínio + API + E2E cronometrado/contagem de passos |
+| Isolamento e papéis | AUTH-003/004 | matriz de integração com IDs de outro espaço |
+| Sem dupla contagem | FIN-001, CARD-002/004, GOAL-001/002 | property tests + reconciliação de cenários |
+| Recorrência/parcelas | PLAN-002/003/004 | relógio controlado + calendários/property tests |
+| Estoque simples | STOCK-001/002/003/005 | domínio + concorrência + browser mobile |
+| Import/export | DATA-002–006 | corpus de arquivos + segurança + round trip |
+| Decisão de gasto | INSIGHT-001–006 | fixtures reconciliadas + explicação E2E |
+| Administração segura | ADMIN-001–004 | autorização negativa + auditoria + step-up |
+
+## Riscos e mitigação
+
+- **Escopo grande para um MVP:** gates entregam valor utilizável; beta interno pode iniciar no Gate 4 enquanto demais módulos avançam, sem chamar o produto inteiro de concluído.
+- **Complexidade contábil oculta:** ledger imutável, exemplos canônicos, property tests e um único serviço de cálculo.
+- **Datas e ciclos:** LocalDate/fuso no kernel, relógio injetável e corpus de fim de mês/ano bissexto/DST.
+- **Concorrência de agentes:** donos explícitos de arquivos centrais, migrations seriadas e contratos integrados antes de UI/API paralelas.
+- **Importação insegura:** storage temporário, prévia, limites, jobs idempotentes e aplicação pelos casos de uso.
+- **Admin excessivamente poderoso:** metadados mínimos, separação de papéis, step-up e nenhum acesso implícito ao espaço.
+- **Interface “simples” que esconde consequências:** progressive disclosure preserva defaults e prévias; ações compostas explicam efeito antes de confirmar.
+- **Projeção com falsa precisão:** desconhecidos e confiança aparecem junto do valor; fórmula é aberta e navegável.
+
+## Validação do planejamento
+
+- Revisão cruzada de cada regra entre spec, modelo arquitetural e tarefa.
+- Busca por termos conflitantes (`conta`, `carteira`, `saldo`, `pagamento`, `owner/member/viewer`).
+- Verificação de todos os links Markdown.
+- Revisão do diff para garantir que este trabalho alterou apenas documentação de planejamento.
+- TDD não se aplica nesta etapa exclusivamente documental; a implementação seguirá o ciclo obrigatório descrito no repositório.
+
+## Decisões durante o planejamento
+
+- O responsável do produto aprovou integralmente as decisões propostas e as specs foram promovidas a vigentes em 2026-08-23.
+- Carteira é única na experiência, enquanto contas contábeis internas preservam os invariantes.
+- Compra de cartão reconhece despesa; pagamento de fatura é transferência.
+- Metas são reservas virtuais, não carteiras adicionais.
+- Estoque e finanças têm integração explícita e opcional, sem inferir itens a partir do valor de uma compra.
+- Administração usa o mesmo PWA com boundary separado para reduzir operação sem misturar privilégios.

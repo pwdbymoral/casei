@@ -54,6 +54,10 @@ As exceções limitam-se a mudanças exclusivamente documentais, ausência de co
 
 Uma falha não autoriza modificar um teste válido apenas para fazer a implementação passar. Consulte primeiro a spec: se ela mudou, atualize spec e teste; caso contrário, corrija a implementação. Consulte a estratégia completa em [`docs/testing/README.md`](docs/testing/README.md).
 
+## Revisão agêntica
+
+Antes do merge de mudança produzida por agente, use um agente que não tenha sido o autor para executar a skill [`agentic-code-review`](.agents/skills/agentic-code-review/SKILL.md). A revisão é inicialmente read-only e realiza duas passagens: conformidade entre requisito, spec, testes, implementação e documentação; depois análise adversarial independente. O revisor registra achados priorizados e evidenciados, sem corrigir a própria revisão, aprovar ou fazer merge salvo autorização separada.
+
 ## Validação, ferramentas e documentação
 
 Não declare algo corrigido, funcionando, implementado ou concluído por mera inspeção quando houver validação prática. Execute testes, lint, type check, build, browser, logs ou outra verificação pertinente e relate somente o que a ferramenta realmente confirmou.

@@ -7,9 +7,12 @@ Esta árvore é o sistema de registro do projeto. Ela cresce por necessidade: cr
 - `specs/`: comportamento que o produto deve oferecer. Comece pelo [`template de specification`](specs/_template.md).
 - `architecture/`: estrutura, boundaries, contratos internos e princípios arquiteturais vigentes. Crie documentação quando decisões reais existirem.
 - `architecture/decisions/`: ADRs para decisões relevantes, contexto e trade-offs históricos. Use o [`template de ADR`](architecture/decisions/_template.md).
+- `ux/`: contratos de jornada e artefatos de experiência que atravessam mais de uma spec.
 - `plans/`: trabalho necessário para entregar mudanças não triviais. Use o [`template de plano`](plans/_template.md). Crie `active/` ao iniciar o primeiro plano e `completed/` somente quando um plano concluído merecer retenção histórica.
 - [`testing/`](testing/README.md): estratégia, convenções, evidência de qualidade e comandos de validação quando existirem.
 - `references/`: crie quando uma referência externa ou material de apoio precisar permanecer disponível no contexto dos agentes.
+
+O produto vigente começa na [spec do MVP](specs/mvp-casei.md), é detalhado pelas specs de cada domínio, usa o [modelo de domínio](architecture/modelo-de-dominio-mvp.md), os [contratos transversais](architecture/contratos-transversais-mvp.md) e os [wireflows](ux/wireflows-mvp.md), e será executado pelo [plano ativo](plans/active/mvp-casei.md). O Gate 0 está concluído; o Marco 1 pode iniciar seguindo suas dependências e regras de coordenação.
 
 Specs descrevem o que o produto deve fazer. Arquitetura descreve como o sistema é estruturado. Planos descrevem o trabalho. ADRs preservam decisões e seus trade-offs. Não misture essas responsabilidades.
 

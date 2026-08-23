@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic Code Review"
+  short_description: "Two-pass review for agent-authored changes"
+  default_prompt: "Use $agentic-code-review to review this Git change in independent contract and adversarial passes."
