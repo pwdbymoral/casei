@@ -1,8 +1,18 @@
 import type { Pool } from "pg";
 
-export async function ensureApplicationRole(pool: Pool) {
+const defaultApplicationRole = "casei_app";
+
+function quoteRoleIdentifier(roleName: string) {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(roleName)) {
+    throw new Error(`Invalid PostgreSQL role name: ${roleName}`);
+  }
+  return `"${roleName}"`;
+}
+
+export async function ensureApplicationRole(pool: Pool, roleName = defaultApplicationRole) {
+  const roleIdentifier = quoteRoleIdentifier(roleName);
   try {
-    await pool.query("CREATE ROLE casei_app NOLOGIN NOSUPERUSER NOBYPASSRLS");
+    await pool.query(`CREATE ROLE ${roleIdentifier} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   } catch (error) {
     if (!error || typeof error !== "object" || !("code" in error) || error.code !== "42710") {
       throw error;
@@ -12,10 +22,26 @@ export async function ensureApplicationRole(pool: Pool) {
   const result = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
     `SELECT rolsuper, rolbypassrls
      FROM pg_roles
-     WHERE rolname = 'casei_app'`,
+     WHERE rolname = $1`,
+    [roleName],
   );
   const role = result.rows[0];
   if (!role || role.rolsuper || role.rolbypassrls) {
-    throw new Error("casei_app must remain a non-superuser role without BYPASSRLS");
+    throw new Error(`${roleName} must remain a non-superuser role without BYPASSRLS`);
+  }
+
+  const ownership = await pool.query<{ relname: string }>(
+    `SELECT c.relname
+     FROM pg_class AS c
+     JOIN pg_roles AS r ON r.oid = c.relowner
+     JOIN pg_namespace AS n ON n.oid = c.relnamespace
+     WHERE r.rolname = $1
+       AND n.nspname = 'public'
+       AND c.relkind IN ('r', 'p')
+     LIMIT 1`,
+    [roleName],
+  );
+  if (ownership.rows[0]) {
+    throw new Error(`${roleName} must not own public table ${ownership.rows[0].relname}`);
   }
 }

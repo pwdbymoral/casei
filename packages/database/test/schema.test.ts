@@ -15,7 +15,9 @@ if (!adminUrl) {
   if (process.env.CI) {
     throw new Error("DATABASE_URL_TEST is required for database integration tests in CI");
   }
-  test.skip("aplica e reverte migration, isola dois espaços e preserva auditoria");
+  test("aplica e reverte migration, isola dois espaços e preserva auditoria", {
+    skip: "DATABASE_URL_TEST is not configured",
+  }, () => {});
 } else {
   test("aplica e reverte migration, isola dois espaços e preserva auditoria", async () => {
     const adminPool = new Pool({ connectionString: adminUrl });
@@ -27,14 +29,27 @@ if (!adminUrl) {
 
     try {
       await ensureApplicationRole(adminPool);
-      await adminPool.query("ALTER ROLE casei_app SUPERUSER");
+      const unsafeRole = `casei_plat001_unsafe_${process.pid}_${Date.now()}`;
+      const ownershipRole = `casei_plat001_owner_${process.pid}_${Date.now()}`;
+      const ownedTable = `casei_plat001_owned_${process.pid}_${Date.now()}`;
       try {
+        await adminPool.query(`CREATE ROLE "${unsafeRole}" NOLOGIN SUPERUSER`);
         await assert.rejects(
-          ensureApplicationRole(adminPool),
-          /casei_app must remain a non-superuser role without BYPASSRLS/,
+          ensureApplicationRole(adminPool, unsafeRole),
+          new RegExp(`${unsafeRole} must remain a non-superuser role without BYPASSRLS`),
+        );
+
+        await adminPool.query(`CREATE ROLE "${ownershipRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+        await adminPool.query(`CREATE TABLE "${ownedTable}" (id integer)`);
+        await adminPool.query(`ALTER TABLE "${ownedTable}" OWNER TO "${ownershipRole}"`);
+        await assert.rejects(
+          ensureApplicationRole(adminPool, ownershipRole),
+          new RegExp(`${ownershipRole} must not own public table ${ownedTable}`),
         );
       } finally {
-        await adminPool.query("ALTER ROLE casei_app NOSUPERUSER NOBYPASSRLS");
+        await adminPool.query(`DROP TABLE IF EXISTS "${ownedTable}"`);
+        await adminPool.query(`DROP ROLE IF EXISTS "${ownershipRole}"`);
+        await adminPool.query(`DROP ROLE IF EXISTS "${unsafeRole}"`);
       }
 
       await adminPool.query(`CREATE DATABASE ${databaseIdentifier}`);
