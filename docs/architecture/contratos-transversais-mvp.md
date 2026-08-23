@@ -195,4 +195,8 @@ O boundary inicial da API está em `apps/api/src/http/` e é montado sob `/v1` p
 de sessão e membership permanece fora desta fatia: AUTH-001 injeta os
 resolvers sem permitir que handlers escolham o actor ou o espaço a partir do
 body. Rotas de workspace devem usar o ID da rota e podem chamar
-`assertWorkspaceIdMatch` quando um contrato legado repetir esse campo.
+`assertWorkspaceIdMatch` quando um contrato legado repetir esse campo; o parser
+também faz essa verificação antes de schemas Zod removerem campos desconhecidos.
+Respostas privadas sob `/v1` recebem `Cache-Control: no-store`, e respostas de
+rate limit incluem `Retry-After` (60 segundos por padrão, configurável pelo
+helper). IDs de domínio são UUIDv7 lowercase e `UserId` continua opaco.

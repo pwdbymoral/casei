@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import type { z } from "zod";
 
 import { ApiHttpError, validationError } from "./errors.js";
+import { assertWorkspaceIdMatch } from "./middleware.js";
 import type { ApiEnv } from "./types.js";
 
 export async function parseJsonBody<TSchema extends z.ZodType>(
@@ -16,6 +17,8 @@ export async function parseJsonBody<TSchema extends z.ZodType>(
     throw new ApiHttpError(400, "malformed_request", { cause });
   }
 
+  // Check the route-owned scope before Zod object parsing can strip unknown keys.
+  assertWorkspaceIdMatch(context, body);
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
     throw validationError(parsed.error);

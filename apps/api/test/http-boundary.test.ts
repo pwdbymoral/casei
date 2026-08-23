@@ -1,10 +1,10 @@
+import { correlationIdSchema, domainIdSchema, workspaceMembershipSchema } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createApp } from "../src/app.js";
 import {
   assertIfMatch,
-  assertWorkspaceIdMatch,
   createActorMiddleware,
   createWorkspaceScopeMiddleware,
   decodeCursor,
@@ -13,11 +13,30 @@ import {
   InvalidCursorError,
   parseJsonBody,
   parseListQuery,
+  rateLimitedError,
   requireIfMatch,
   setVersionHeaders,
 } from "../src/http/index.js";
 
+const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
+const otherWorkspaceId = "0190f3c8-2a10-7abc-8def-1234567890ac";
+
 describe("HTTP boundary transversal", () => {
+  it("mantém IDs de domínio como UUIDv7 lowercase e user ID opaco", () => {
+    expect(
+      workspaceMembershipSchema.parse({
+        userId: "better-auth-user-01",
+        workspaceId,
+        role: "member",
+      }),
+    ).toMatchObject({ userId: "better-auth-user-01", workspaceId });
+    expect(domainIdSchema.safeParse(workspaceId).success).toBe(true);
+    expect(domainIdSchema.safeParse("550e8400-e29b-41d4-a716-446655440000").success).toBe(false);
+    expect(domainIdSchema.safeParse(workspaceId.toUpperCase()).success).toBe(false);
+    expect(correlationIdSchema.safeParse("81J6Q3B5M8G7T5N4R3Q2P1WXYZ").success).toBe(false);
+    expect(correlationIdSchema.safeParse("01J6Q3B5M8G7T5N4R3Q2P1WXYZ").success).toBe(true);
+  });
+
   it("gera e propaga correlation ID ULID sem vazar detalhes internos", async () => {
     const app = createApp();
 
@@ -91,16 +110,16 @@ describe("HTTP boundary transversal", () => {
       );
     });
 
-    const response = await app.request(
-      "http://localhost/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/payload",
-      { method: "POST" },
-    );
+    const response = await app.request(`http://localhost/v1/workspaces/${workspaceId}/payload`, {
+      method: "POST",
+    });
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({
       actor: { userId: "auth-user-1" },
       scope: {
         actor: { userId: "auth-user-1" },
-        workspaceId: "550e8400-e29b-41d4-a716-446655440000",
+        workspaceId,
         role: "member",
       },
     });
@@ -115,7 +134,7 @@ describe("HTTP boundary transversal", () => {
       );
     });
     const noSession = await unauthenticated.request(
-      "http://localhost/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/payload",
+      `http://localhost/v1/workspaces/${workspaceId}/payload`,
     );
     expect(noSession.status).toBe(401);
     await expect(noSession.json()).resolves.toMatchObject({
@@ -131,7 +150,7 @@ describe("HTTP boundary transversal", () => {
       );
     });
     const noScope = await noMembership.request(
-      "http://localhost/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/payload",
+      `http://localhost/v1/workspaces/${workspaceId}/payload`,
     );
     expect(noScope.status).toBe(404);
     await expect(noScope.json()).resolves.toMatchObject({
@@ -142,24 +161,42 @@ describe("HTTP boundary transversal", () => {
   it("rejeita workspaceId no body quando diverge da rota", async () => {
     const app = createApp((v1) => {
       v1.post("/workspaces/:workspaceId/payload", async (context) => {
-        const body = await parseJsonBody(context, z.object({ workspaceId: z.string().optional() }));
-        assertWorkspaceIdMatch(context, body);
+        await parseJsonBody(context, z.object({ value: z.string().optional() }));
         return context.json({ ok: true });
       });
     });
 
-    const response = await app.request(
-      "http://localhost/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/payload",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId: "550e8400-e29b-41d4-a716-446655440001" }),
-      },
-    );
+    const response = await app.request(`http://localhost/v1/workspaces/${workspaceId}/payload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: otherWorkspaceId }),
+    });
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "validation_failed", fieldErrors: { workspaceId: expect.any(Array) } },
     });
+  });
+
+  it("envia Retry-After configurável e default para rate limit", async () => {
+    const app = createApp((v1) => {
+      v1.get("/limited-default", () => {
+        throw rateLimitedError();
+      });
+      v1.get("/limited-custom", () => {
+        throw rateLimitedError(17);
+      });
+    });
+
+    const defaultResponse = await app.request("http://localhost/v1/limited-default");
+    expect(defaultResponse.status).toBe(429);
+    expect(defaultResponse.headers.get("retry-after")).toBe("60");
+    await expect(defaultResponse.json()).resolves.toMatchObject({
+      error: { code: "rate_limited" },
+    });
+
+    const customResponse = await app.request("http://localhost/v1/limited-custom");
+    expect(customResponse.status).toBe(429);
+    expect(customResponse.headers.get("retry-after")).toBe("17");
   });
 
   it("protege cursores opacos contra adulteração e limita paginação", () => {

@@ -9,6 +9,10 @@ export function createApp(configureV1?: V1Configurator): Hono<ApiEnv> {
   const v1 = new Hono<ApiEnv>();
 
   app.use("*", correlationMiddleware());
+  v1.use("*", async (context, next) => {
+    context.header("Cache-Control", "no-store");
+    await next();
+  });
   app.onError((error, context) => errorResponse(context, error));
   app.notFound((context) => errorResponse(context, notFoundError()));
 

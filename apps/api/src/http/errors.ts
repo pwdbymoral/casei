@@ -7,6 +7,8 @@ import { createCorrelationId } from "./correlation.js";
 import { InvalidCursorError } from "./cursor.js";
 import type { ApiContext } from "./types.js";
 
+export const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
+
 const DEFAULT_MESSAGES: Record<ErrorCode, string> = {
   malformed_request: "A requisição não pôde ser lida.",
   validation_failed: "Revise os campos indicados.",
@@ -29,6 +31,7 @@ export class ApiHttpError extends Error {
   readonly code: ErrorCode;
   readonly fieldErrors?: FieldErrors;
   readonly currentVersion?: number;
+  readonly retryAfterSeconds?: number;
 
   constructor(
     status: ContentfulStatusCode,
@@ -37,6 +40,7 @@ export class ApiHttpError extends Error {
       message?: string;
       fieldErrors?: FieldErrors;
       currentVersion?: number;
+      retryAfterSeconds?: number;
       cause?: unknown;
     } = {},
   ) {
@@ -46,6 +50,10 @@ export class ApiHttpError extends Error {
     this.code = code;
     this.fieldErrors = options.fieldErrors;
     this.currentVersion = options.currentVersion;
+    this.retryAfterSeconds =
+      code === "rate_limited"
+        ? normalizeRetryAfter(options.retryAfterSeconds)
+        : options.retryAfterSeconds;
   }
 }
 
@@ -73,6 +81,12 @@ export function permissionDeniedError(): ApiHttpError {
   return new ApiHttpError(403, "permission_denied");
 }
 
+export function rateLimitedError(
+  retryAfterSeconds = DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS,
+): ApiHttpError {
+  return new ApiHttpError(429, "rate_limited", { retryAfterSeconds });
+}
+
 export function errorResponse(context: ApiContext, error: unknown): Response {
   const correlationId = getCorrelationId(context);
   const normalized = normalizeError(error);
@@ -90,6 +104,9 @@ export function errorResponse(context: ApiContext, error: unknown): Response {
 
   context.header("X-Correlation-ID", correlationId);
   context.header("Cache-Control", "no-store");
+  if (normalized.retryAfterSeconds !== undefined) {
+    context.header("Retry-After", String(normalized.retryAfterSeconds));
+  }
   return context.json(body, normalized.status);
 }
 
@@ -104,6 +121,7 @@ function normalizeError(error: unknown): {
   message: string;
   fieldErrors?: FieldErrors;
   currentVersion?: number;
+  retryAfterSeconds?: number;
 } {
   if (error instanceof ApiHttpError) {
     return {
@@ -112,6 +130,7 @@ function normalizeError(error: unknown): {
       message: error.message,
       fieldErrors: error.fieldErrors,
       currentVersion: error.currentVersion,
+      retryAfterSeconds: error.retryAfterSeconds,
     };
   }
 
@@ -134,4 +153,10 @@ function normalizeError(error: unknown): {
   }
 
   return { status: 500, code: "internal_error", message: DEFAULT_MESSAGES.internal_error };
+}
+
+function normalizeRetryAfter(value: number | undefined): number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS;
 }

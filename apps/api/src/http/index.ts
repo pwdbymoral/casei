@@ -5,6 +5,7 @@ export {
   errorResponse,
   notFoundError,
   permissionDeniedError,
+  rateLimitedError,
   unauthenticatedError,
   validationError,
 } from "./errors.js";
