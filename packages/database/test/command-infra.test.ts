@@ -242,7 +242,10 @@ if (!adminUrl) {
             role === "owner" && capability === "test.run",
         },
       );
-      assert.deepEqual(await worker.runOnce(workspaceId), { state: "succeeded", jobId });
+      assert.deepEqual(
+        await worker.runOnce(workspaceId, new Date(Date.now() + 60_000)),
+        { state: "succeeded", jobId },
+      );
       assert.equal(handled, 1);
 
       const success = await pool.query<{ state: string; attempts: number }>(
@@ -390,7 +393,7 @@ if (!adminUrl) {
           authorizeCapability: ({ role }) => role === "owner",
         },
       );
-      const fencingResult = fencingWorker.runOnce(workspaceId);
+      const fencingResult = fencingWorker.runOnce(workspaceId, new Date(Date.now() + 60_000));
       await entered;
       assert.deepEqual(await fencingResult, { state: "lease_lost", jobId: fenceJobId });
       const fencingAudit = await pool.query<{ count: string }>(
@@ -469,7 +472,7 @@ if (!adminUrl) {
         ]),
         { applicationRole: "casei_app", authorizeCapability: ({ role }) => role === "owner" },
       );
-      const batchRun = batchWorker.runOnce(workspaceId);
+      const batchRun = batchWorker.runOnce(workspaceId, new Date(Date.now() + 60_000));
       await firstBatch;
       await pool.query(
         `UPDATE "membership" SET status = 'revoked' WHERE workspace_id = $1 AND user_id = $2`,
