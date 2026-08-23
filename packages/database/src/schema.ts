@@ -129,6 +129,7 @@ export const outboxEvent = pgTable(
     actorId: text("actor_id").references(() => user.id, {
       onDelete: "set null",
     }),
+    requiredCapability: text("required_capability"),
     correlationId: varchar("correlation_id", { length: 26 }).notNull(),
     payload: jsonb("payload").notNull(),
     status: text("status").notNull().default("pending"),

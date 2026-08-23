@@ -9,7 +9,18 @@ function quoteRoleIdentifier(roleName: string) {
   return `"${roleName}"`;
 }
 
-export async function ensureApplicationRole(pool: Pool, roleName = defaultApplicationRole) {
+export interface ApplicationRoleOptions {
+  roleName?: string;
+  /** Optional non-superuser LOGIN role that is allowed to SET ROLE to the app role. */
+  grantee?: string;
+}
+
+export async function ensureApplicationRole(
+  pool: Pool,
+  roleOrOptions: string | ApplicationRoleOptions = defaultApplicationRole,
+) {
+  const options = typeof roleOrOptions === "string" ? { roleName: roleOrOptions } : roleOrOptions;
+  const roleName = options.roleName ?? defaultApplicationRole;
   const roleIdentifier = quoteRoleIdentifier(roleName);
   try {
     await pool.query(`CREATE ROLE ${roleIdentifier} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
@@ -45,5 +56,24 @@ export async function ensureApplicationRole(pool: Pool, roleName = defaultApplic
     throw new Error(
       `${roleName} must not own table ${ownership.rows[0].schema}.${ownership.rows[0].relname}`,
     );
+  }
+
+  if (options.grantee) {
+    const granteeIdentifier = quoteRoleIdentifier(options.grantee);
+    const granteeResult = await pool.query<{
+      rolcanlogin: boolean;
+      rolsuper: boolean;
+      rolbypassrls: boolean;
+    }>(
+      `SELECT rolcanlogin, rolsuper, rolbypassrls
+       FROM pg_roles
+       WHERE rolname = $1`,
+      [options.grantee],
+    );
+    const grantee = granteeResult.rows[0];
+    if (!grantee?.rolcanlogin || grantee.rolsuper || grantee.rolbypassrls) {
+      throw new Error(`${options.grantee} must be a non-superuser LOGIN role without BYPASSRLS`);
+    }
+    await pool.query(`GRANT ${roleIdentifier} TO ${granteeIdentifier}`);
   }
 }

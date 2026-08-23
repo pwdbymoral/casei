@@ -868,6 +868,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "required_capability": {
+          "name": "required_capability",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "correlation_id": {
           "name": "correlation_id",
           "type": "varchar(26)",
