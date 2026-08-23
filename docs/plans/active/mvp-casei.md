@@ -62,9 +62,11 @@ Executar schema/base antes das fatias paralelas.
 - [ ] **AUTH-003 Memberships:** convite, reenvio, expiração, aceite, remoção e transferência de propriedade.
 - [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped, lock de membership e suíte negativa/concorrente entre dois espaços.
 - [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`, entitlement de recuperação por 30 dias sem revogar identidade/outros espaços, cancelamento de jobs, purge idempotente de conteúdo/objetos no dia 30, backups até 35 dias, tombstone/auditoria por 365 dias e restore com tombstone.
-- [ ] **WEB-001 App shell:** layouts autenticado/admin, troca de espaço, navegação responsiva, loading/error/offline/permission states.
-- [ ] **WEB-002 Design primitives:** instalar via shadcn somente os primitives aprovados; criar MoneyInput/StatusBadge/AsyncState com testes acessíveis.
-- [ ] **WEB-003 Onboarding UI:** fluxo responsivo, recuperação de rascunho, erros e validação Playwright.
+- [x] **WEB-001 App shell:** layouts separados para experiência doméstica e administração, `WorkspaceAdapter` explícito, default de produção negando sessão, troca de espaço com reset de escopo, navegação mobile/desktop e estados loading/error/offline/permission/empty. A composição autenticada só é renderizada após guard server-side; AUTH-002/003 ainda precisa fornecer o adapter real.
+- [x] **WEB-002 Design primitives:** primitives oficiais Base UI/shadcn (Alert, Empty, Field, Input, Label, Dialog, Separator e Skeleton) e componentes de domínio `MoneyInput`, `StatusBadge` e `AsyncState`; parsing/caret monetário e estados de acesso cobertos por Vitest.
+- [x] **WEB-003 Onboarding UI:** fluxo responsivo em três passos, moeda BRL/fuso visíveis, saldo opcional, retomada de rascunho local, validação com foco no resumo do primeiro erro e retry sem perder dados. A validação Playwright permanece parte do Gate 1 porque o runtime autenticado ainda depende de AUTH-002/003.
+
+Implementação web publicada no PR #16. O guard de produção não usa fixtures: sem um `WorkspaceAdapter` autenticado ou papel `platform_admin`, `/app` e `/admin` exibem somente estado de acesso negado. Fixtures permanecem disponíveis apenas para testes/componentes isolados.
 
 **Gate 1:** usuário autenticado cria/troca espaço; permissões são comprovadas no servidor; shell passa teclado, 320 px, tablet e desktop; nenhum dado cruza espaços.
 

@@ -6,6 +6,7 @@
     "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -28,7 +29,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.0.18"
   },
   "packageManager": "pnpm@11.3.0"
 }
