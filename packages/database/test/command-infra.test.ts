@@ -88,14 +88,19 @@ if (!adminUrl) {
         runtimePool,
         { workspaceId, actorId, applicationRole: "casei_app" },
         async ({ client }) => {
-          const result = await client.query<{ current_user: string; current_role: string }>(
-            `SELECT current_user, current_role`,
+          const result = await client.query<{
+            session_user: string;
+            current_user: string;
+            current_role: string;
+          }>(
+            `SELECT session_user, current_user, current_role`,
           );
           return result.rows[0];
         },
       );
       assert.deepEqual(runtimeIdentity, {
-        current_user: runtimeLogin,
+        session_user: runtimeLogin,
+        current_user: "casei_app",
         current_role: "casei_app",
       });
 
