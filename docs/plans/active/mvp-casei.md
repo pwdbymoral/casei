@@ -53,7 +53,7 @@ Gate concluído documentalmente em 2026-08-23, com as decisões de concorrência
 
 Executar schema/base antes das fatias paralelas.
 
-- [ ] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.22`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Testar migration up/down em banco descartável e verificar versões pinadas.
+- [x] **PLAT-001 Schema base:** users/auth tables conforme `better-auth@1.6.22`, workspaces, memberships, preferences, audit, idempotency, `auth_email_intent`, outbox/jobs e constraints de escopo. Migration up/down, isolamento/RLS, auditoria append-only, role segura e versões pinadas são exercitados no teste PostgreSQL descartável do CI.
 - [ ] **PLAT-002 Kernel de domínio:** tipos opacos de ID, Money inteiro, LocalDate/fuso, relógio injetável, Result/errors e testes de propriedade.
 - [ ] **PLAT-003 Boundary HTTP:** `/v1`, parsing Zod, envelope de erro, correlation ID, auth actor, workspace scope, cursor e versionamento.
 - [ ] **PLAT-004 Infra de comandos:** transação unit-of-work, idempotência, outbox e worker com lease/retry/dead-letter; persistir ator/capacidade de jobs e revalidar membership antes de cada lote/transição.
