@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup src/server.ts --format esm --target node24 --out-dir dist",
+    "worker": "node dist/auth-email-worker.js",
+    "worker:dev": "tsx src/auth-email-worker.ts",
+    "build": "tsup src/server.ts src/auth-email-worker.ts --format esm --target node24 --out-dir dist",
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

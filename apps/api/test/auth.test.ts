@@ -5,8 +5,11 @@ import { createApp } from "../src/app.js";
 import { createAuth } from "../src/auth.js";
 import {
   CaptureTransactionalEmailPort,
-  dispatchQueuedAuthEmail,
   MemoryAuthEmailIntentStore,
+  processPendingAuthEmails,
+  queueAuthEmail,
+  smtpConfigFromEnvironment,
+  verifyTransactionalEmailPort,
 } from "../src/auth-email.js";
 
 const apiOrigin = "http://localhost:3001";
@@ -60,7 +63,7 @@ function sessionCookie(response: Response): string {
 
 describe("AUTH-001 identidade", () => {
   it("cadastra, captura verificação, verifica e impede enumeração do token", async () => {
-    const { app, emailPort } = fixture();
+    const { app, emailPort, emailStore } = fixture();
     const response = await authRequest(
       app,
       "sign-up/email",
@@ -73,6 +76,8 @@ describe("AUTH-001 identidade", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(emailPort.messages).toHaveLength(0);
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
     const body = await response.json();
     expect(body).toMatchObject({
       token: null,
@@ -83,6 +88,8 @@ describe("AUTH-001 identidade", () => {
     const verificationMessage = emailPort.messages[0];
     if (!verificationMessage) throw new Error("expected verification message");
     expect(verificationMessage).toMatchObject({ kind: "verification", email: "ada@example.com" });
+    expect(verificationMessage.sourceId).toMatch(/^[a-f0-9]{64}$/);
+    expect(verificationMessage.sourceId).not.toContain(verificationMessage.token);
 
     const verification = await app.request(verificationMessage.url, {
       headers: { Origin: webOrigin },
@@ -92,7 +99,7 @@ describe("AUTH-001 identidade", () => {
   });
 
   it("faz login, lista, revoga sessão e encerra a sessão atual", async () => {
-    const { app, emailPort } = fixture();
+    const { app, emailPort, emailStore } = fixture();
     await authRequest(
       app,
       "sign-up/email",
@@ -103,6 +110,7 @@ describe("AUTH-001 identidade", () => {
         callbackURL: `${webOrigin}/welcome`,
       }),
     );
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
     const verificationMessage = emailPort.messages[0];
     if (!verificationMessage) throw new Error("expected verification message");
     await app.request(verificationMessage.url, { headers: { Origin: webOrigin } });
@@ -149,7 +157,7 @@ describe("AUTH-001 identidade", () => {
   });
 
   it("usa a mesma resposta de recuperação para e-mail existente e inexistente", async () => {
-    const { app, emailPort } = fixture();
+    const { app, emailPort, emailStore } = fixture();
     const unknown = await authRequest(
       app,
       "request-password-reset",
@@ -168,6 +176,7 @@ describe("AUTH-001 identidade", () => {
         callbackURL: `${webOrigin}/welcome`,
       }),
     );
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
     const verificationMessage = emailPort.messages[0];
     if (!verificationMessage) throw new Error("expected verification message");
     await app.request(verificationMessage.url, { headers: { Origin: webOrigin } });
@@ -177,6 +186,7 @@ describe("AUTH-001 identidade", () => {
       jsonBody({ email: "ada@example.com", redirectTo: `${webOrigin}/reset` }),
     );
     expect(known.status).toBe(200);
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
     await expect(known.json()).resolves.toEqual(unknownBody);
     expect(emailPort.messages).toHaveLength(2);
     const resetMessage = emailPort.messages[1];
@@ -204,6 +214,23 @@ describe("AUTH-001 identidade", () => {
       jsonBody({ email: "ada@example.com", password: "new-correct-horse" }),
     );
     expect(login.status).toBe(200);
+  });
+
+  it("usa callback relativo padrão quando o cadastro não informa callbackURL", async () => {
+    const { app, emailPort, emailStore } = fixture();
+    const response = await authRequest(
+      app,
+      "sign-up/email",
+      jsonBody({
+        name: "Ada Lovelace",
+        email: "ada-default@example.com",
+        password: "correct-horse-battery",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
+    expect(emailPort.messages[0]).toMatchObject({ callbackUrl: "/" });
   });
 
   it("rejeita callback externo e aplica rate limit no cadastro", async () => {
@@ -247,7 +274,7 @@ describe("AUTH-001 identidade", () => {
     expect(limited.headers.get("retry-after")).toBeTruthy();
   });
 
-  it("persiste a intent antes da entrega e não duplica reprocessamento", async () => {
+  it("persiste a intent, recupera falha e não duplica reprocessamento", async () => {
     const store = new MemoryAuthEmailIntentStore();
     const transport = new CaptureTransactionalEmailPort();
     const message = {
@@ -261,9 +288,133 @@ describe("AUTH-001 identidade", () => {
       expiresAt: new Date(Date.now() + 60_000),
       sourceId: "verification:opaque",
     };
-    await dispatchQueuedAuthEmail(store, transport, message);
-    await dispatchQueuedAuthEmail(store, transport, message);
+    await Promise.all([queueAuthEmail(store, message), queueAuthEmail(store, message)]);
+    expect(transport.messages).toHaveLength(0);
+    expect(
+      await processPendingAuthEmails(store, {
+        send: async () => {
+          throw new Error("temporary SMTP failure");
+        },
+      }),
+    ).toBe(0);
+    expect(store.states[0]).toMatchObject({ state: "failed" });
+    const concurrentDeliveries = await Promise.all([
+      processPendingAuthEmails(store, transport),
+      processPendingAuthEmails(store, transport),
+    ]);
+    expect(concurrentDeliveries.reduce((total, value) => total + value, 0)).toBe(1);
+    await processPendingAuthEmails(store, transport);
     expect(transport.messages).toHaveLength(1);
     expect(store.states[0]).toMatchObject({ state: "sent" });
+  });
+
+  it("não reivindica novamente uma mensagem expirada", async () => {
+    const store = new MemoryAuthEmailIntentStore();
+    const transport = new CaptureTransactionalEmailPort();
+    await queueAuthEmail(store, {
+      kind: "verification",
+      userId: "user-expired",
+      email: "expired@example.com",
+      url: `${apiOrigin}/verify-expired`,
+      token: "expired-token",
+      callbackUrl: "/",
+      correlationId: "01J6Q3B5M8G7T5N4R3Q2P1WXYZ",
+      expiresAt: new Date(Date.now() - 1),
+      sourceId: "expired-source",
+    });
+    expect(await processPendingAuthEmails(store, transport)).toBe(0);
+    expect(await processPendingAuthEmails(store, transport)).toBe(0);
+    expect(transport.messages).toHaveLength(0);
+  });
+
+  it("revoga sessões existentes depois de redefinir a senha", async () => {
+    const { app, emailPort, emailStore } = fixture();
+    await authRequest(app, "sign-up/email", {
+      ...jsonBody({
+        name: "Ada Lovelace",
+        email: "reset-session@example.com",
+        password: "correct-horse-battery",
+      }),
+      headers: { "X-Forwarded-For": "198.51.100.42" },
+    });
+    await processPendingAuthEmails(emailStore, emailPort);
+    const verificationMessage = emailPort.messages[0];
+    if (!verificationMessage) throw new Error("expected verification message");
+    await app.request(verificationMessage.url, { headers: { Origin: webOrigin } });
+
+    const login = await authRequest(
+      app,
+      "sign-in/email",
+      jsonBody({ email: "reset-session@example.com", password: "correct-horse-battery" }),
+    );
+    const cookie = sessionCookie(login);
+    const resetRequest = await authRequest(
+      app,
+      "request-password-reset",
+      jsonBody({ email: "reset-session@example.com", redirectTo: `${webOrigin}/reset` }),
+    );
+    expect(resetRequest.status).toBe(200);
+    await processPendingAuthEmails(emailStore, emailPort);
+    const resetMessage = emailPort.messages[1];
+    if (!resetMessage) throw new Error("expected reset message");
+    const resetLink = await app.request(resetMessage.url, { headers: { Origin: webOrigin } });
+    const location = resetLink.headers.get("location");
+    if (!location) throw new Error("expected reset callback location");
+    const token = new URL(location).searchParams.get("token");
+    if (!token) throw new Error("expected reset token");
+    const reset = await authRequest(
+      app,
+      "reset-password",
+      jsonBody({ token, newPassword: "new-correct-horse" }),
+    );
+    expect(reset.status).toBe(200);
+    const current = await authRequest(app, "get-session", { headers: { Cookie: cookie } });
+    await expect(current.json()).resolves.toBeNull();
+  });
+
+  it("exige SMTP autenticado e TLS explícito em produção", () => {
+    const names = [
+      "SMTP_HOST",
+      "SMTP_PORT",
+      "SMTP_FROM",
+      "SMTP_USER",
+      "SMTP_PASSWORD",
+      "SMTP_SECURE",
+    ];
+    const previous = new Map(names.map((name) => [name, process.env[name]]));
+    try {
+      process.env.SMTP_HOST = "smtp.example.com";
+      process.env.SMTP_PORT = "465";
+      process.env.SMTP_FROM = "Casei <no-reply@example.com>";
+      process.env.SMTP_USER = "mailer";
+      process.env.SMTP_PASSWORD = "secret";
+      process.env.SMTP_SECURE = "true";
+      expect(smtpConfigFromEnvironment()).toMatchObject({ secure: true, user: "mailer" });
+
+      process.env.SMTP_SECURE = "false";
+      expect(() => smtpConfigFromEnvironment()).toThrow(/SMTP_SECURE/);
+
+      delete process.env.SMTP_PASSWORD;
+      expect(() => smtpConfigFromEnvironment()).toThrow(/SMTP_PASSWORD/);
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it("verifica transportes de produção no startup sem exigir verify no capture", async () => {
+    let verified = false;
+    await verifyTransactionalEmailPort({
+      send: async () => undefined,
+      verify: async () => {
+        verified = true;
+      },
+    });
+    expect(verified).toBe(true);
+    await expect(
+      verifyTransactionalEmailPort(new CaptureTransactionalEmailPort()),
+    ).resolves.toBeUndefined();
   });
 });
