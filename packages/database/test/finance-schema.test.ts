@@ -65,6 +65,10 @@ if (!adminUrl) {
           [workspaceId, event.rows[0]?.id, accounts.rows[0]?.id, accounts.rows[1]?.id],
         );
         await client.query("COMMIT");
+        // The first context was transaction-local. Re-establish the scope for
+        // the post-commit negative checks so RLS does not turn the UPDATE into
+        // a silent zero-row operation before the immutable trigger can run.
+        await client.query(`SELECT set_config('app.workspace_id', $1, false)`, [workspaceId]);
 
         await assert.rejects(
           client.query(`UPDATE ledger_event SET occurred_on = '2026-08-24' WHERE id = $1`, [
