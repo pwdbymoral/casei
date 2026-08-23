@@ -2,10 +2,9 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
-import { createDatabase, ensureApplicationRole } from "@casei/database";
+import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
 import { IdentityService } from "../src/identity-service.js";
 
 const adminUrl = process.env.DATABASE_URL_TEST;
@@ -13,7 +12,7 @@ const integrationIt = adminUrl ? it : it.skip;
 
 describe("AUTH-005 lifecycle PostgreSQL", () => {
   integrationIt("preserves membership state, retries recovery and purges on day 30", async () => {
-    const adminPool = new Pool({ connectionString: adminUrl });
+    const adminPool = getDatabasePool({ connectionString: adminUrl });
     const suffix = randomUUID().replaceAll("-", "");
     const databaseName = `casei_auth005_${suffix}`;
     const databaseUrl = new URL(adminUrl!);
@@ -27,7 +26,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
     try {
       await ensureApplicationRole(adminPool);
       await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-      pool = new Pool({ connectionString: databaseUrl.toString() });
+      pool = getDatabasePool({ connectionString: databaseUrl.toString() });
       await migrate(createDatabase(pool), {
         migrationsFolder: fileURLToPath(
           new URL("../../../packages/database/drizzle", import.meta.url),
