@@ -19,8 +19,8 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   type CreditCard,
-  type FinanceAdapter,
   canWriteFinance,
+  type FinanceAdapter,
   financeAdapterForEnvironment,
   type Statement,
   type Transaction,
