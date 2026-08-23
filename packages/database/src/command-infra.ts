@@ -635,11 +635,7 @@ export class PostgresJobWorker {
     );
   }
 
-  private async markFailed(
-    job: JobRecord,
-    error: unknown,
-    forceDead: boolean,
-  ): Promise<boolean> {
+  private async markFailed(job: JobRecord, error: unknown, forceDead: boolean): Promise<boolean> {
     if (!job.workspaceId) return true;
     const dead = forceDead || job.attempts >= this.options.maxAttempts;
     const delay = dead ? 0 : backoffDelay(job.attempts, this.options, this.options.random());
@@ -655,13 +651,7 @@ export class PostgresJobWorker {
                lease_until = NULL, lease_token = NULL,
                last_error = $5, updated_at = clock_timestamp()
            WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > clock_timestamp()`,
-          [
-            job.id,
-            job.leaseToken,
-            nextState,
-            delay,
-            sanitizeError(error),
-          ],
+          [job.id, job.leaseToken, nextState, delay, sanitizeError(error)],
         );
       },
     );
