@@ -43,6 +43,9 @@ export class Money {
 
   /** Construtor interno usado somente depois da validação dos value objects. */
   static fromTrusted(minor: bigint, currency: CurrencyCode): Money {
+    if (typeof minor !== "bigint" || !withinRange(minor) || !CURRENCY_PATTERN.test(currency)) {
+      throw new RangeError("Money.fromTrusted requires a valid minor value and currency code");
+    }
     return new Money(minor, currency);
   }
 
