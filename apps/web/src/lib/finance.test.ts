@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createFixtureFinanceAdapter, createHttpFinanceAdapter } from "./finance";
+import {
+  createFixtureFinanceAdapter,
+  createHttpFinanceAdapter,
+  createRequestGuard,
+} from "./finance";
 
 describe("finance adapter", () => {
   it("sends idempotent transaction commands to the versioned API", async () => {
@@ -93,5 +97,46 @@ describe("finance adapter", () => {
       "/v1/workspaces/workspace/statements/019b5d9e-3c12-7a11-8d47-7b5b5dd7a211/reopen",
       expect.any(Object),
     );
+  });
+
+  it("preserves the current version from a conflict response", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(
+        {
+          error: {
+            message: "O recurso foi alterado.",
+            currentVersion: 4,
+          },
+        },
+        { status: 412 },
+      ),
+    );
+    const adapter = createHttpFinanceAdapter({ fetch });
+    await expect(
+      adapter.reopenStatement("workspace", {
+        id: "019b5d9e-3c12-7a11-8d47-7b5b5dd7a211",
+        workspaceId: "workspace",
+        cardId: "card",
+        periodStart: "2026-08-11",
+        closingOn: "2026-09-10",
+        dueOn: "2026-09-17",
+        state: "closed",
+        total: { currency: "BRL", minor: "2500" },
+        paid: { currency: "BRL", minor: "0" },
+        openAmount: { currency: "BRL", minor: "2500" },
+        version: 3,
+      }),
+    ).rejects.toMatchObject({ status: 412, currentVersion: 4 });
+  });
+
+  it("invalidates stale statement composition requests", () => {
+    const guard = createRequestGuard();
+    const first = guard.begin();
+    const second = guard.begin();
+
+    expect(guard.isCurrent(first)).toBe(false);
+    expect(guard.isCurrent(second)).toBe(true);
+    guard.invalidate();
+    expect(guard.isCurrent(second)).toBe(false);
   });
 });

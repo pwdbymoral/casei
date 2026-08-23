@@ -24,6 +24,8 @@ export interface FinanceAppOptions {
   scopeMiddleware: MiddlewareHandler<ApiEnv>;
   /** PostgreSQL role used by every finance command and query. */
   applicationRole?: string;
+  /** Secret used to sign private finance list cursors. */
+  cursorSecret?: string;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -64,6 +66,7 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
     configureFinanceRoutes(v1, {
       service: new FinanceService(options.finance.pool, {
         applicationRole: options.finance.applicationRole,
+        cursorSecret: options.finance.cursorSecret,
       }),
       scopeMiddleware: options.finance.scopeMiddleware,
     });

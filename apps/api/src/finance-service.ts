@@ -5,6 +5,7 @@ import {
   createInstallmentPlanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
+  domainIdSchema,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
 import { executeIdempotent, type JsonValue, withUnitOfWork } from "@casei/database";
@@ -18,6 +19,7 @@ import {
   Money,
   parseLocalDate,
 } from "@casei/domain";
+import { decodeCursor, encodeCursor, InvalidCursorError } from "./http/cursor.js";
 
 export interface FinanceScope {
   workspaceId: string;
@@ -30,6 +32,8 @@ export interface FinanceScope {
 export interface FinanceServiceOptions {
   /** Non-login PostgreSQL role used for all request data operations. */
   applicationRole?: string;
+  /** Secret used to sign private list cursors. */
+  cursorSecret?: string;
 }
 
 export interface TransactionView {
@@ -96,6 +100,15 @@ export interface StatementItemView {
   amount: { currency: string; minor: string };
 }
 
+export interface StatementItemsPage {
+  items: StatementItemView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
+const statementItemsCursorOrdering = "occurred_on,created_at,id";
+
 interface TransactionRow {
   id: string;
   workspace_id: string;
@@ -117,12 +130,18 @@ interface TransactionRow {
 
 export class FinanceService {
   private readonly applicationRole: string;
+  private readonly cursorSecret: string;
 
   constructor(
     private readonly pool: Pool,
     options: FinanceServiceOptions = {},
   ) {
     this.applicationRole = options.applicationRole ?? "casei_app";
+    const cursorSecret = options.cursorSecret ?? process.env.CASEI_CURSOR_SECRET;
+    if (process.env.NODE_ENV === "production" && !cursorSecret) {
+      throw new Error("CASEI_CURSOR_SECRET is required in production");
+    }
+    this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
   }
 
   async createTransaction(
@@ -236,42 +255,79 @@ export class FinanceService {
     });
   }
 
-  async listStatementItems(scope: FinanceScope, statementId: string): Promise<StatementItemView[]> {
+  async listStatementItems(
+    scope: FinanceScope,
+    statementId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<StatementItemsPage> {
     return this.withScopedClient(scope, async (client) => {
       const statement = await client.query<{ id: string }>(
         `SELECT id FROM credit_statement WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, statementId],
       );
       if (!statement.rows[0]) throw new FinanceNotFoundError();
+      const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+      const cursor = options.cursor
+        ? decodeStatementItemsCursor(options.cursor, this.cursorSecret)
+        : null;
+      const values: unknown[] = [scope.workspaceId, statementId];
+      const cursorClause = cursor
+        ? `
+             AND (
+               t.occurred_on > $3::date
+               OR (t.occurred_on = $3::date AND t.created_at > $4::timestamptz)
+               OR (t.occurred_on = $3::date AND t.created_at = $4::timestamptz AND t.id > $5::uuid)
+             )`
+        : "";
+      if (cursor) values.push(cursor[0], cursor[1], cursor[2]);
+      const limitParameter = values.length + 1;
+      values.push(limit + 1);
       const result = await client.query<{
         id: string;
         statement_id: string;
         state: StatementItemView["state"];
         description: string;
         occurred_on: string;
+        created_at: Date | string;
         amount_minor: string | bigint;
         currency_code: string;
         payment_id: string | null;
       }>(
         `SELECT t.id, t.statement_id, t.state, t.description, t.occurred_on,
-                t.amount_minor, t.currency_code, p.id AS payment_id
+                t.created_at, t.amount_minor, t.currency_code, p.id AS payment_id
            FROM finance_transaction t
            LEFT JOIN card_payment p
              ON p.workspace_id = t.workspace_id AND p.transaction_id = t.id
           WHERE t.workspace_id = $1 AND t.statement_id = $2
-          ORDER BY t.occurred_on ASC, t.created_at ASC, t.id ASC`,
-        [scope.workspaceId, statementId],
+                ${cursorClause}
+          ORDER BY t.occurred_on ASC, t.created_at ASC, t.id ASC
+          LIMIT $${limitParameter}`,
+        values,
       );
-      return result.rows.map((row) => ({
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+      const items = rows.map((row) => ({
         id: row.id,
         transactionId: row.id,
         statementId: row.statement_id,
-        type: row.payment_id ? "payment" : "purchase",
+        type: row.payment_id ? ("payment" as const) : ("purchase" as const),
         state: row.state,
         description: row.description,
         occurredOn: row.occurred_on,
         amount: { currency: row.currency_code, minor: row.amount_minor.toString() },
       }));
+      const last = rows.at(-1);
+      const nextCursor =
+        hasMore && last
+          ? encodeCursor(
+              {
+                ordering: statementItemsCursorOrdering,
+                position: [last.occurred_on, new Date(last.created_at).toISOString(), last.id],
+              },
+              this.cursorSecret,
+            )
+          : null;
+      return { items, nextCursor, hasMore };
     });
   }
 
@@ -300,7 +356,7 @@ export class FinanceService {
           const row = current.rows[0] as Record<string, unknown> | undefined;
           if (!row) throw new FinanceNotFoundError();
           if (expectedVersion !== undefined && Number(row.version) !== expectedVersion) {
-            throw new VersionConflictError();
+            throw new VersionConflictError(Number(row.version));
           }
           if (row.state !== "open") {
             throw new FinanceConflictError("Somente uma fatura aberta pode ser fechada.");
@@ -347,7 +403,8 @@ export class FinanceService {
           );
           const row = current.rows[0] as Record<string, unknown> | undefined;
           if (!row) throw new FinanceNotFoundError();
-          if (Number(row.version) !== expectedVersion) throw new VersionConflictError();
+          if (Number(row.version) !== expectedVersion)
+            throw new VersionConflictError(Number(row.version));
           assertStatementCanReopen({
             state: String(row.state),
             paidMinor: BigInt(String(row.paid_minor)),
@@ -1189,7 +1246,7 @@ export class FinanceService {
           const row = current.rows[0];
           if (!row) throw new FinanceNotFoundError();
           if (expectedVersion !== undefined && row.version !== expectedVersion)
-            throw new VersionConflictError();
+            throw new VersionConflictError(row.version);
           const value = await callback(client, row);
           return { statusCode: 200, response: value as unknown as JsonValue };
         },
@@ -1249,6 +1306,10 @@ export class FinanceConflictError extends Error {
 }
 export class VersionConflictError extends Error {
   readonly code = "version_conflict" as const;
+
+  constructor(readonly currentVersion?: number) {
+    super("O recurso foi alterado. Revise e tente novamente.");
+  }
 }
 
 export function assertStatementCanReopen(input: { state: string; paidMinor: bigint }): void {
@@ -1260,6 +1321,28 @@ export function assertStatementCanReopen(input: { state: string; paidMinor: bigi
   if (input.state !== "closed") {
     throw new FinanceConflictError("Somente uma fatura fechada pode ser reaberta.");
   }
+}
+
+function decodeStatementItemsCursor(cursor: string, secret: string): StatementItemsCursorPosition {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== statementItemsCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 3 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [occurredOn, createdAt, id] = position as [string, string, string];
+  if (
+    !parseLocalDate(occurredOn).ok ||
+    Number.isNaN(Date.parse(createdAt)) ||
+    !domainIdSchema.safeParse(id).success
+  ) {
+    throw new InvalidCursorError();
+  }
+  return [occurredOn, createdAt, id];
 }
 
 async function setFinanceScope(client: PgPoolClient, scope: FinanceScope, applicationRole: string) {

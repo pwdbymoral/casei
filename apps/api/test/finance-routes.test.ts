@@ -189,19 +189,27 @@ describe("finance HTTP composition", () => {
   });
 
   it("explains statement composition and reopens a closed statement explicitly", async () => {
+    let receivedItemsQuery: unknown;
     const fakeService = {
-      listStatementItems: async () => [
-        {
-          id: statementItemId,
-          transactionId,
-          statementId,
-          type: "purchase",
-          state: "posted",
-          description: "Mercado",
-          occurredOn: "2026-08-23",
-          amount: { currency: "BRL", minor: "2500" },
-        },
-      ],
+      listStatementItems: async (_scope: unknown, _statementId: string, query: unknown) => {
+        receivedItemsQuery = query;
+        return {
+          items: [
+            {
+              id: statementItemId,
+              transactionId,
+              statementId,
+              type: "purchase",
+              state: "posted",
+              description: "Mercado",
+              occurredOn: "2026-08-23",
+              amount: { currency: "BRL", minor: "2500" },
+            },
+          ],
+          nextCursor: "opaque-next-cursor",
+          hasMore: true,
+        };
+      },
       reopenStatement: async () => ({
         id: statementId,
         workspaceId,
@@ -232,12 +240,13 @@ describe("finance HTTP composition", () => {
     );
 
     const items = await app.request(
-      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/items`,
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/items?limit=1&cursor=opaque-cursor`,
     );
     expect(items.status).toBe(200);
+    expect(receivedItemsQuery).toEqual({ cursor: "opaque-cursor", limit: 1 });
     await expect(items.json()).resolves.toEqual({
       items: [expect.objectContaining({ transactionId, type: "purchase" })],
-      page: { nextCursor: null, hasMore: false },
+      page: { nextCursor: "opaque-next-cursor", hasMore: true },
     });
 
     const rejected = await app.request(

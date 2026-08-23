@@ -81,8 +81,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
 
   router.get("/workspaces/:workspaceId/statements/:statementId/items", async (context) => {
     const statementId = parseDomainId(context.req.param("statementId"));
-    const items = await service.listStatementItems(scopeOf(context), statementId);
-    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+    const query = parseQuery(context, paginationQuerySchema);
+    const page = await service.listStatementItems(scopeOf(context), statementId, query);
+    return context.json({
+      items: page.items,
+      page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+    });
   });
 
   router.post("/workspaces/:workspaceId/transactions/:id/post", async (context) => {
@@ -235,7 +239,8 @@ function parseDomainId(value: string | undefined): string {
 export function financeErrorToHttp(error: unknown): unknown {
   if (error instanceof FinanceNotFoundError) return notFoundError();
   if (error instanceof FinancePermissionError) return new ApiHttpError(403, "permission_denied");
-  if (error instanceof VersionConflictError) return new ApiHttpError(412, "version_conflict");
+  if (error instanceof VersionConflictError)
+    return new ApiHttpError(412, "version_conflict", { currentVersion: error.currentVersion });
   if (error instanceof FinanceConflictError)
     return new ApiHttpError(409, "validation_failed", { message: error.message });
   return error;

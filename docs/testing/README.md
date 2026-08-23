@@ -77,7 +77,7 @@ de sessões, callback externo, rate limit, hash de token, falha/recovery e repro
 idempotente da outbox. A API apenas grava a intent/outbox; `pnpm --filter @casei/api worker` é o
 processo separado que faz claim com lease, entrega e retry dos e-mails persistidos. Em produção,
 `SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_SECURE=true` e
-`BETTER_AUTH_SECRET` são obrigatórios; o adapter Nodemailer exige TLS autenticado e falha no
+`BETTER_AUTH_SECRET` e `CASEI_CURSOR_SECRET` são obrigatórios; o adapter Nodemailer exige TLS autenticado e falha no
 startup com diagnóstico sanitizado quando a configuração está incompleta. Os testes também
 cobrem sink de falha de enqueue (inclusive a rejeição absorvida pelo Better Auth), recuperação
 após restart por spool criptografado persistente, transição atômica de intent/outbox, renovação de

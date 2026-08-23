@@ -131,6 +131,7 @@ export class FinanceAdapterError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    readonly currentVersion?: number,
   ) {
     super(message);
     this.name = "FinanceAdapterError";
@@ -155,7 +156,7 @@ export function createHttpFinanceAdapter(
       credentials: "include",
     });
     const payload = (await response.json().catch(() => null)) as
-      | { error?: { message?: string } }
+      | { error?: { message?: string; currentVersion?: number } }
       | T
       | null;
     if (!response.ok) {
@@ -163,9 +164,14 @@ export function createHttpFinanceAdapter(
         payload && typeof payload === "object" && "error" in payload
           ? payload.error?.message
           : undefined;
+      const currentVersion =
+        payload && typeof payload === "object" && "error" in payload
+          ? payload.error?.currentVersion
+          : undefined;
       throw new FinanceAdapterError(
         message ?? "Não foi possível concluir a operação financeira.",
         response.status,
+        currentVersion,
       );
     }
     return payload as T;
@@ -404,4 +410,20 @@ export function financeAdapterForEnvironment(): FinanceAdapter {
 
 export function canWriteFinance(role: WorkspaceRole): boolean {
   return role !== "viewer";
+}
+
+export function createRequestGuard() {
+  let latestRequest = 0;
+  return {
+    begin(): number {
+      latestRequest += 1;
+      return latestRequest;
+    },
+    invalidate(): void {
+      latestRequest += 1;
+    },
+    isCurrent(request: number): boolean {
+      return request === latestRequest;
+    },
+  };
 }

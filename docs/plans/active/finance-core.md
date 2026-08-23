@@ -14,7 +14,7 @@
 - [x] Correções de invariantes: reversão atualiza fatura aberta atomicamente, faturas fechadas/pagas não mudam silenciosamente, recorrência variável não liquida sem confirmação, pagamentos cancelados são rejeitados e eventos/lançamentos publicados permanecem append-only.
 - [x] Rotas `/v1/workspaces/:workspaceId/{transactions,categories,cards,recurrences,installments}` e pagamento de fatura, aguardando composição com o middleware de sessão/membership.
 - [x] Testes de domínio/contrato e integração PostgreSQL cobrindo soma zero, parcelas, meses curtos, datas civis, role real e imutabilidade de eventos publicados.
-- [x] Incremento de fatura: composição ordenada de compras e pagamentos, reabertura explícita somente para fatura fechada sem pagamentos, concorrência otimista e confirmação acessível na interface.
+- [x] Incremento de fatura: composição ordenada de compras e pagamentos com cursor/limite estável e `hasMore`, reabertura explícita somente para fatura fechada sem pagamentos, conflito otimista com versão atual e recarregar/revisar na interface, além de confirmação acessível.
 
 ## Limitações rastreáveis
 

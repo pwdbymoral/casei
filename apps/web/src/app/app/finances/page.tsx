@@ -31,7 +31,9 @@ import { Input } from "@/components/ui/input";
 import {
   type CreditCard,
   canWriteFinance,
+  createRequestGuard,
   type FinanceAdapter,
+  FinanceAdapterError,
   financeAdapterForEnvironment,
   type Statement,
   type StatementItem,
@@ -112,6 +114,7 @@ function FinanceDashboard({
     type: "close" | "reopen";
     statement: Statement;
   } | null>(null);
+  const [statementItemsRequest] = useState(createRequestGuard);
   const writeAccess = canWriteFinance(role);
 
   const load = useCallback(async () => {
@@ -223,6 +226,14 @@ function FinanceDashboard({
           : "Fatura reaberta. Novos lançamentos podem voltar a compor este ciclo.",
       );
     } catch (cause) {
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setPendingStatementAction(null);
+        await load();
+        setNotice(
+          "A fatura mudou enquanto você revisava. Recarregamos os dados; revise antes de tentar novamente.",
+        );
+        return;
+      }
       setError(
         cause instanceof Error
           ? cause.message
@@ -233,20 +244,42 @@ function FinanceDashboard({
     }
   }
 
-  async function openStatementComposition(statement: Statement) {
-    setViewingStatement(statement);
+  const viewingStatementId = viewingStatement?.id;
+
+  useEffect(() => {
+    if (!viewingStatementId) {
+      statementItemsRequest.invalidate();
+      setStatementItems([]);
+      setLoadingStatementItems(false);
+      return;
+    }
+    const request = statementItemsRequest.begin();
+    let active = true;
     setStatementItems([]);
     setLoadingStatementItems(true);
     setError(null);
-    try {
-      setStatementItems(await adapter.listStatementItems(workspaceId, statement.id));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível carregar a composição.");
-      setViewingStatement(null);
-    } finally {
-      setLoadingStatementItems(false);
-    }
-  }
+    void adapter
+      .listStatementItems(workspaceId, viewingStatementId)
+      .then((items) => {
+        if (active && statementItemsRequest.isCurrent(request)) setStatementItems(items);
+      })
+      .catch((cause) => {
+        if (!active || !statementItemsRequest.isCurrent(request)) return;
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar a composição.",
+        );
+        setViewingStatement(null);
+      })
+      .finally(() => {
+        if (active && statementItemsRequest.isCurrent(request)) {
+          setLoadingStatementItems(false);
+        }
+      });
+    return () => {
+      active = false;
+      statementItemsRequest.invalidate();
+    };
+  }, [adapter, statementItemsRequest, viewingStatementId, workspaceId]);
 
   async function payStatement(statement: Statement) {
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
@@ -560,7 +593,7 @@ function FinanceDashboard({
                           <Button
                             size="sm"
                             variant="ghost"
-                            onClick={() => void openStatementComposition(statement)}
+                            onClick={() => setViewingStatement(statement)}
                           >
                             <ListTreeIcon data-icon="inline-start" aria-hidden="true" />
                             Composição
