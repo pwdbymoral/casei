@@ -6,13 +6,13 @@ import {
   createTransactionSchema,
   domainIdSchema,
   paginationQuerySchema,
-  positiveMoneySchema,
+  payStatementSchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
-import { z } from "zod";
 import {
   FinanceConflictError,
   FinanceNotFoundError,
+  FinancePermissionError,
   type FinanceScope,
   type FinanceService,
   VersionConflictError,
@@ -118,7 +118,7 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
 
   router.post("/workspaces/:workspaceId/statements/:statementId/payments", async (context) => {
     const statementId = parseDomainId(context.req.param("statementId"));
-    const input = await parseJsonBody(context, zodPaymentInput);
+    const input = await parseJsonBody(context, payStatementSchema);
     const result = await service.payStatement(
       scopeOf(context),
       statementId,
@@ -149,16 +149,16 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   });
 }
 
-const zodPaymentInput = z.object({
-  amount: positiveMoneySchema.optional(),
-  allowCredit: z.boolean().default(false),
-});
-
 function scopeOf(context: Parameters<MiddlewareHandler<ApiEnv>>[0]): FinanceScope {
   const scope = context.get("workspaceScope");
   const correlationId = context.get("correlationId");
   if (!scope || !correlationId) throw new ApiHttpError(401, "unauthenticated");
-  return { workspaceId: scope.workspaceId, actorId: scope.actor.userId, correlationId };
+  return {
+    workspaceId: scope.workspaceId,
+    actorId: scope.actor.userId,
+    role: scope.role,
+    correlationId,
+  };
 }
 
 function requiredIdempotencyKey(context: Parameters<MiddlewareHandler<ApiEnv>>[0]): string {
@@ -179,6 +179,7 @@ function parseDomainId(value: string | undefined): string {
 
 export function financeErrorToHttp(error: unknown): unknown {
   if (error instanceof FinanceNotFoundError) return notFoundError();
+  if (error instanceof FinancePermissionError) return new ApiHttpError(403, "permission_denied");
   if (error instanceof VersionConflictError) return new ApiHttpError(412, "version_conflict");
   if (error instanceof FinanceConflictError)
     return new ApiHttpError(409, "validation_failed", { message: error.message });

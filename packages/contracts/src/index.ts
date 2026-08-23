@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const workspaceRoleSchema = z.enum(["owner", "member"]);
+export const workspaceRoleSchema = z.enum(["owner", "member", "viewer"]);
 
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 
@@ -74,6 +74,16 @@ export const errorEnvelopeSchema = z.object({
 
 export type ErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
+const civilDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+    if (year === 0 || month < 1 || month > 12 || day < 1) return false;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return day <= lastDay;
+  }, "date must be a real civil date");
+
 const minorAmountSchema = z
   .string()
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
@@ -111,11 +121,8 @@ export const transactionSchema = z.object({
   state: transactionStateSchema,
   amount: positiveMoneySchema,
   settledAmount: moneySchema,
-  occurredOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  dueOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .nullable(),
+  occurredOn: civilDateSchema,
+  dueOn: civilDateSchema.nullable(),
   postedOn: z.string().datetime({ offset: true }).nullable(),
   description: z.string().max(500),
   categoryId: domainIdSchema.nullable(),
@@ -129,15 +136,8 @@ export type TransactionContract = z.infer<typeof transactionSchema>;
 export const createTransactionSchema = z.object({
   kind: transactionKindSchema,
   amount: positiveMoneySchema,
-  occurredOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional(),
-  dueOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .nullable()
-    .optional(),
+  occurredOn: civilDateSchema.optional(),
+  dueOn: civilDateSchema.nullable().optional(),
   state: z.enum(["planned", "posted"]).default("posted"),
   description: z.string().trim().max(500).default(""),
   categoryId: domainIdSchema.nullable().optional(),
@@ -193,9 +193,9 @@ export const createCreditCardSchema = z.object({
 export const statementSchema = z.object({
   id: domainIdSchema,
   cardId: domainIdSchema,
-  periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  closingOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  periodStart: civilDateSchema,
+  closingOn: civilDateSchema,
+  dueOn: civilDateSchema,
   state: z.enum(["open", "closed", "partially_paid", "paid", "canceled"]),
   total: moneySchema,
   paid: moneySchema,
@@ -205,10 +205,7 @@ export const statementSchema = z.object({
 
 export const payStatementSchema = z.object({
   amount: positiveMoneySchema.optional(),
-  occurredOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional(),
+  occurredOn: civilDateSchema.optional(),
   allowCredit: z.boolean().default(false),
 });
 
@@ -217,12 +214,8 @@ export const createRecurrenceSchema = z.object({
   amount: positiveMoneySchema,
   frequency: z.enum(["weekly", "monthly", "annual"]),
   interval: z.number().int().min(1).max(12).default(1),
-  startOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  endOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .nullable()
-    .optional(),
+  startOn: civilDateSchema,
+  endOn: civilDateSchema.nullable().optional(),
   maxOccurrences: z.number().int().min(1).max(120).nullable().optional(),
   variable: z.boolean().default(false),
   estimatedAmount: positiveMoneySchema.nullable().optional(),
@@ -232,6 +225,6 @@ export const createRecurrenceSchema = z.object({
 export const createInstallmentPlanSchema = z.object({
   total: positiveMoneySchema,
   count: z.number().int().min(2).max(999),
-  firstDueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  firstDueOn: civilDateSchema,
   description: z.string().trim().max(500).default(""),
 });

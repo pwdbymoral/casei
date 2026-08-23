@@ -23,6 +23,8 @@ export interface AppOptions {
 export interface FinanceAppOptions {
   pool: Pool;
   scopeMiddleware: MiddlewareHandler<ApiEnv>;
+  /** PostgreSQL role used by every finance command and query. */
+  applicationRole?: string;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -61,7 +63,9 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
   configureV1?.(v1);
   if (options.finance) {
     configureFinanceRoutes(v1, {
-      service: new FinanceService(options.finance.pool),
+      service: new FinanceService(options.finance.pool, {
+        applicationRole: options.finance.applicationRole,
+      }),
       scopeMiddleware: options.finance.scopeMiddleware,
     });
   }

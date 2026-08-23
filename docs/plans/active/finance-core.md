@@ -1,6 +1,6 @@
 # Plano: núcleo financeiro vertical
 
-- Status: fatia implementada; integração/revisão pendentes
+- Status: fatia implementada; hardening aplicado; integração/revisão pendentes
 - Specs: [finanças](../../specs/financas.md), [cartões](../../specs/cartoes-de-credito.md), [metas e planejamento](../../specs/metas-e-planejamento.md)
 - Arquitetura: [modelo de domínio](../../architecture/modelo-de-dominio-mvp.md) e [ADR do ledger](../../architecture/decisions/0004-livro-razao-financeiro.md)
 
@@ -10,8 +10,10 @@
 - [x] Kernel puro para balanceamento do ledger, distribuição exata de centavos, recorrência em calendário civil, ciclos de cartão, contribuição de meta e valor seguro.
 - [x] Migration `0002_finance_core`: contas internas, categorias, transações, eventos/lançamentos imutáveis, recorrências/ocorrências, planos/parcelas, cartão/fatura/pagamento, FK composta de espaço/moeda, RLS e trigger diferido de soma zero.
 - [x] Serviço API transacional com idempotência, unidade de trabalho, realização/cancelamento por versão e operações de compra no cartão/pagamento de fatura.
+- [x] Hardening de revisão: todas as operações usam `casei_app` configurável; comandos têm escopos de idempotência distintos; papel/capacidade é validado no servidor; datas civis, fuso, moeda do espaço e categorias arquivadas/incompatíveis são rejeitados; mappers HTTP são camelCase.
+- [x] Correções de invariantes: reversão atualiza fatura aberta atomicamente, faturas fechadas/pagas não mudam silenciosamente, recorrência variável não liquida sem confirmação, pagamentos cancelados são rejeitados e eventos/lançamentos publicados permanecem append-only.
 - [x] Rotas `/v1/workspaces/:workspaceId/{transactions,categories,cards,recurrences,installments}` e pagamento de fatura, aguardando composição com o middleware de sessão/membership.
-- [x] Testes de domínio cobrindo soma zero, parcelas, meses curtos, ciclos de fechamento e fórmula de valor seguro.
+- [x] Testes de domínio/contrato e integração PostgreSQL cobrindo soma zero, parcelas, meses curtos, datas civis, role real e imutabilidade de eventos publicados.
 
 ## Limitações rastreáveis
 
