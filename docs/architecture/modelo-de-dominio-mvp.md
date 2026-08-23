@@ -71,7 +71,7 @@ Juros e tarifas usam despesa separada. Estorno e cancelamento após lançamento 
 ### Workspace
 
 - Raiz: `Workspace`; filhos: `Membership`, `Invitation`, `WorkspacePreference`.
-- `Workspace` possui ciclo de vida `active`, `deletion_pending` e `deactivated`; durante `deletion_pending`, somente a entitlement de recuperação do owner pode consultar estado/cancelar a desativação.
+- `Workspace` possui ciclo de vida `active` → `deletion_pending` → `deactivated`; durante `deletion_pending`, somente a entitlement de recuperação do owner pode consultar estado/cancelar a desativação. `deactivated` é tombstone sem conteúdo, retido por 365 dias para impedir reidratação de backup e então purgado.
 - Todo agregado de negócio carrega `workspaceId` imutável.
 - Referências entre entidades com escopo usam chave composta `(workspace_id, id)` sempre que o banco permitir, impedindo vínculos cruzados.
 - Membership e papel são consultados a cada mutação; esconder botão no cliente não autoriza ação.

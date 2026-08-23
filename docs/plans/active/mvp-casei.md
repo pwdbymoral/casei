@@ -61,7 +61,7 @@ Executar schema/base antes das fatias paralelas.
 - [ ] **AUTH-002 Onboarding:** criação idempotente de espaço/owner, moeda/fuso/saldo inicial opcional e retomada após falha.
 - [ ] **AUTH-003 Memberships:** convite, reenvio, expiração, aceite, remoção e transferência de propriedade.
 - [ ] **AUTH-004 Autorização:** matriz owner/member/viewer, repositories scoped, lock de membership e suíte negativa/concorrente entre dois espaços.
-- [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`, entitlement de recuperação por 30 dias sem revogar identidade/outros espaços, cancelamento de jobs, purge idempotente no dia 30, objetos/backups até 35 dias, auditoria por 365 dias e restore com tombstone.
+- [ ] **AUTH-005 Desativação do espaço:** confirmação do owner, estado `deletion_pending`, entitlement de recuperação por 30 dias sem revogar identidade/outros espaços, cancelamento de jobs, purge idempotente de conteúdo/objetos no dia 30, backups até 35 dias, tombstone/auditoria por 365 dias e restore com tombstone.
 - [ ] **WEB-001 App shell:** layouts autenticado/admin, troca de espaço, navegação responsiva, loading/error/offline/permission states.
 - [ ] **WEB-002 Design primitives:** instalar via shadcn somente os primitives aprovados; criar MoneyInput/StatusBadge/AsyncState com testes acessíveis.
 - [ ] **WEB-003 Onboarding UI:** fluxo responsivo, recuperação de rascunho, erros e validação Playwright.
