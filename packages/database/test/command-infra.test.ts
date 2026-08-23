@@ -485,7 +485,7 @@ if (!adminUrl) {
       await runtimePool?.end();
       await pool?.end();
       await adminPool.query(`DROP ROLE IF EXISTS "${runtimeLogin}"`);
-      await adminPool.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+      await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
       await adminPool.end();
     }
   });

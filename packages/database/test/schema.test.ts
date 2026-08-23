@@ -191,7 +191,7 @@ if (!adminUrl) {
       assert.deepEqual(remainingSchemas.rows, []);
     } finally {
       await pool?.end();
-      await adminPool.query(`DROP DATABASE ${databaseIdentifier} WITH (FORCE)`);
+      await adminPool.query(`DROP DATABASE IF EXISTS ${databaseIdentifier} WITH (FORCE)`);
       await adminPool.end();
     }
   });
