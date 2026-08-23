@@ -295,8 +295,8 @@ if (!adminUrl) {
 
       await pool.query(
         `INSERT INTO "job"
-          (job_type, job_version, workspace_id, actor_id, idempotency_key, payload, correlation_id)
-         VALUES ('slow-failure.job', 1, $1, $2, 'slow-failure-key', '{}'::jsonb, '01ARZ3NDEKTSV4RRFFQ69G5FAV')`,
+          (job_type, job_version, workspace_id, actor_id, idempotency_key, payload, available_at, correlation_id)
+         VALUES ('slow-failure.job', 1, $1, $2, 'slow-failure-key', '{}'::jsonb, clock_timestamp() - interval '1 second', '01ARZ3NDEKTSV4RRFFQ69G5FAV')`,
         [workspaceId, actorId],
       );
       const slowWorker = new PostgresJobWorker(
