@@ -54,7 +54,7 @@ Estabelecer uma base técnica que permita iniciar o PWA e evoluir, sem reestrutu
 - Contratos de domínio e de API devem ser validados em runtime e compartilháveis sem depender de componentes de interface.
 - As instruções para agentes, decisões, contratos e comandos de validação devem ser versionados e concisos.
 
-## Questões em aberto
+## Decisões resolvidas pelo MVP
 
-- A autenticação inicial deve oferecer somente e-mail e senha, ou também login social?
-- Quais provedores de e-mail transacional e de armazenamento de arquivos serão necessários quando essas capacidades entrarem no escopo?
+- A autenticação inicial oferece e-mail verificado e senha; login social não faz parte do MVP, conforme [identidade e administração](identidade-e-administracao.md).
+- E-mail usa port próprio com adapter SMTP/Nodemailer, e arquivos temporários usam port próprio com adapter S3-compatible, conforme as ADRs de [autenticação/e-mail](../architecture/decisions/0005-autenticacao-e-email.md) e [armazenamento](../architecture/decisions/0007-armazenamento-temporario-de-objetos.md).
