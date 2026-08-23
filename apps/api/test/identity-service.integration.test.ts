@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { describe, expect, it } from "vitest";
-
-import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
 import { IdentityService } from "../src/identity-service.js";
 
 const adminUrl = process.env.DATABASE_URL_TEST;
@@ -12,10 +11,11 @@ const integrationIt = adminUrl ? it : it.skip;
 
 describe("AUTH-005 lifecycle PostgreSQL", () => {
   integrationIt("preserves membership state, retries recovery and purges on day 30", async () => {
+    if (!adminUrl) return;
     const adminPool = getDatabasePool({ connectionString: adminUrl });
     const suffix = randomUUID().replaceAll("-", "");
     const databaseName = `casei_auth005_${suffix}`;
-    const databaseUrl = new URL(adminUrl!);
+    const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;
     let pool: ReturnType<typeof getDatabasePool> | undefined;
     const clock = { now: new Date("2030-01-01T00:00:00.000Z") };
@@ -38,6 +38,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       );
       const workspaceId = workspace.rows[0]?.id;
       expect(workspaceId).toBeTruthy();
+      if (!workspaceId) throw new Error("workspace was not created");
       await pool.query(
         `INSERT INTO workspace_preference (workspace_id, currency_code, timezone)
          VALUES ($1, 'BRL', 'America/Fortaleza')`,
@@ -67,7 +68,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         recentAuthentication: true,
       };
       const service = new IdentityService(pool, { now: () => clock.now });
-      const scope = await service.resolveScope(owner, workspaceId!, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+      const scope = await service.resolveScope(owner, workspaceId, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
       expect(scope?.role).toBe("owner");
       if (!scope) throw new Error("owner scope was not resolved");
 
@@ -79,7 +80,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       await expect(
         service.retryDeactivation(
           owner,
-          workspaceId!,
+          workspaceId,
           {
             workspaceName: "Casa lifecycle",
             reason: "retry após perda de resposta",
@@ -106,7 +107,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         rows: [{ actor_id: null, required_capability: "system.purge", state: "pending" }],
       });
 
-      await service.cancelDeactivation(owner, workspaceId!, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+      await service.cancelDeactivation(owner, workspaceId, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
       const afterCancel = await pool.query<{ user_id: string; status: string }>(
         `SELECT user_id, status FROM membership WHERE workspace_id = $1 ORDER BY user_id`,
         [workspaceId],
@@ -119,7 +120,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
 
       const scopeAfterCancel = await service.resolveScope(
         owner,
-        workspaceId!,
+        workspaceId,
         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
       );
       expect(scopeAfterCancel?.role).toBe("owner");
@@ -129,17 +130,17 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         reason: "teste do cutoff",
       });
       clock.now = new Date("2030-01-30T23:59:59.999Z");
-      await expect(service.getRecovery(owner, workspaceId!)).resolves.toMatchObject({
+      await expect(service.getRecovery(owner, workspaceId)).resolves.toMatchObject({
         status: "active",
       });
-      const early = await service.createPurgeWorker().runOnce(workspaceId!, clock.now);
+      const early = await service.createPurgeWorker().runOnce(workspaceId, clock.now);
       expect(early.state).toBe("idle");
 
       clock.now = new Date("2030-01-31T00:00:00.000Z");
-      await expect(service.getRecovery(owner, workspaceId!)).resolves.toMatchObject({
+      await expect(service.getRecovery(owner, workspaceId)).resolves.toMatchObject({
         status: "expired",
       });
-      const purged = await service.createPurgeWorker().runOnce(workspaceId!, clock.now);
+      const purged = await service.createPurgeWorker().runOnce(workspaceId, clock.now);
       expect(purged.state).toBe("succeeded");
       await expect(
         pool.query(`SELECT workspace_id FROM workspace WHERE id = $1`, [workspaceId]),
