@@ -14,6 +14,7 @@
     "@better-auth/drizzle-adapter": "1.6.22",
     "@casei/contracts": "workspace:*",
     "@casei/database": "workspace:*",
+    "@casei/domain": "workspace:*",
     "@hono/node-server": "^2.1.1",
     "better-auth": "1.6.22",
     "hono": "^4.11.4",
