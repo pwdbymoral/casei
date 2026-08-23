@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { authEmailIntent, authEmailOutbox, type createDatabase } from "@casei/database";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import nodemailer from "nodemailer";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -271,7 +271,7 @@ export class DrizzleAuthEmailIntentStore implements AuthEmailIntentStore {
     const rows = await this.database
       .select({ payload: authEmailOutbox.encryptedPayload })
       .from(authEmailOutbox)
-      .where(eq(authEmailOutbox.state, "pending"));
+      .where(or(eq(authEmailOutbox.state, "pending"), eq(authEmailOutbox.state, "failed")));
     return rows.map((row) => decryptPayload(row.payload, this.encryptionSecret));
   }
 }
