@@ -16,6 +16,8 @@ Cada job possui tipo versionado, payload mínimo, chave idempotente, estado, pri
 
 Backoff exponencial com jitter e máximo por tipo evita tempestade. Handlers são idempotentes e usam constraints naturais; “exactly once” não é prometido. Jobs mortos aparecem no console administrativo e só podem ser reexecutados após checagem de pré-condições.
 
+O worker de e-mail aplica a mesma política: renova o lease em entregas longas, impõe timeout e move falhas que excedem o máximo para dead-letter. Enquanto PLAT-004 não puder adicionar um estado `dead` à tabela existente, o dead-letter de `auth_email_outbox` é representado por `state = 'failed'`, `last_error` sanitizado com prefixo operacional e `available_at` terminal; a reivindicação filtra esse sentinel, evitando reprocessamento infinito sem alterar migration.
+
 Outbox é gravada na mesma transação do evento de domínio. Um dispatcher idempotente converte outbox em job e marca publicação. Limpeza e retenção preservam metadados necessários à auditoria, removendo payload sensível conforme política.
 
 ## Consequências
