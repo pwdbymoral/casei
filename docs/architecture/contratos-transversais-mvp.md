@@ -185,3 +185,14 @@ Campos mínimos: ID, categoria doméstica/administrativa, ação, actor, workspa
 - cursor adulterado e paginação com itens de mesmo timestamp;
 - redaction de erro, log, evento, job e auditoria;
 - compatibilidade de schema entre API e web em CI.
+
+## Materialização no boundary HTTP
+
+O boundary inicial da API está em `apps/api/src/http/` e é montado sob `/v1` por
+`createApp`. Ele fornece parsing Zod de body/query, envelope seguro de erro,
+`X-Correlation-ID` com ULID uppercase, resolução injetável de actor e
+`WorkspaceScope`, cursores assinados e helpers de `If-Match`/`ETag`. A resolução
+de sessão e membership permanece fora desta fatia: AUTH-001 injeta os
+resolvers sem permitir que handlers escolham o actor ou o espaço a partir do
+body. Rotas de workspace devem usar o ID da rota e podem chamar
+`assertWorkspaceIdMatch` quando um contrato legado repetir esse campo.
