@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup src/server.ts --format esm --target node24 --out-dir dist",
+    "worker": "node dist/auth-email-worker.js",
+    "worker:dev": "tsx src/auth-email-worker.ts",
+    "build": "tsup src/server.ts src/auth-email-worker.ts --format esm --target node24 --out-dir dist",
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
@@ -16,11 +18,14 @@
     "@casei/database": "workspace:*",
     "@hono/node-server": "^2.1.1",
     "better-auth": "1.6.22",
+    "drizzle-orm": "^0.45.1",
     "hono": "^4.11.4",
+    "nodemailer": "9.0.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "@types/nodemailer": "^7.0.12",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",

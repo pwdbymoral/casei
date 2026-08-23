@@ -67,3 +67,21 @@ No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a 
 O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`. Além desse gate de execução, o ruleset `CodeQL merge protection` exige resultados de code scanning para a `main` e bloqueia alertas de code scanning classificados como erro ou alertas de segurança `high` ou superiores. O ruleset não possui bypass configurado.
 
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
+
+## Identidade
+
+Os testes de AUTH-001 executam o handler Better Auth 1.6.22 contra o adapter de memória e um
+`CaptureTransactionalEmailPort`; nenhum teste abre conexão SMTP. A integração cobre cadastro,
+verificação (inclusive callback relativo padrão), login, logout, recuperação, revogação/listagem
+de sessões, callback externo, rate limit, hash de token, falha/recovery e reprocessamento
+idempotente da outbox. A API apenas grava a intent/outbox; `pnpm --filter @casei/api worker` é o
+processo separado que faz claim com lease, entrega e retry dos e-mails persistidos. Em produção,
+`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_SECURE=true` e
+`BETTER_AUTH_SECRET` são obrigatórios; o adapter Nodemailer exige TLS autenticado e falha no
+startup com diagnóstico sanitizado quando a configuração está incompleta. Os testes também
+cobrem sink de falha de enqueue (inclusive a rejeição absorvida pelo Better Auth), recuperação
+após restart por spool criptografado persistente, transição atômica de intent/outbox, renovação de
+lease para todos os itens do lote, rejeição de transições com lease vencido, timeout, backoff,
+máximo de tentativas e dead-letter terminal. Também cobrem configuração fail-closed de IP quando
+nenhum proxy confiável está declarado e validação de CIDRs configurados. A execução de produção
+requer `pnpm --filter @casei/api build` antes de `worker`; para desenvolvimento use `worker:dev`.
