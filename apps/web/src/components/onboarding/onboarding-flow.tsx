@@ -21,7 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 
 type OnboardingFlowProps = {
-  onComplete?: (draft: OnboardingDraft) => Promise<void>;
+  onComplete: (draft: OnboardingDraft) => Promise<void>;
 };
 
 const draftStorageKey = "casei:onboarding-draft:v1";
@@ -120,7 +120,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onComplete?.(draft);
+      await onComplete(draft);
       clearDraft();
       setDone(true);
     } catch (cause) {
