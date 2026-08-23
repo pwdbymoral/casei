@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@casei/contracts": "workspace:*",
-    "@hono/node-server": "^1.19.6",
+    "@hono/node-server": "^2.1.1",
     "hono": "^4.11.4"
   },
   "devDependencies": {
