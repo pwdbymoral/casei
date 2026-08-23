@@ -45,6 +45,9 @@ if (!adminUrl) {
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${databaseName}`;
     let pool: Pool | undefined;
+    let runtimePool: Pool | undefined;
+    const runtimeLogin = `casei_plat004_runtime_${process.pid}_${Date.now()}`;
+    const runtimePassword = "casei-plat004-runtime-password";
 
     try {
       await ensureApplicationRole(adminPool);
@@ -53,6 +56,15 @@ if (!adminUrl) {
       await migrate(createDatabase(pool), {
         migrationsFolder: fileURLToPath(new URL("../drizzle", import.meta.url)),
       });
+      await adminPool.query(
+        `CREATE ROLE "${runtimeLogin}" LOGIN PASSWORD '${runtimePassword}' NOSUPERUSER NOBYPASSRLS`,
+      );
+      await ensureApplicationRole(adminPool, { grantee: runtimeLogin });
+      const runtimeUrl = new URL(databaseUrl);
+      runtimeUrl.username = runtimeLogin;
+      runtimeUrl.password = runtimePassword;
+      runtimePool = new Pool({ connectionString: runtimeUrl.toString() });
+      assert.ok(runtimePool);
 
       const actorId = "user-plat004";
       const workspaceId = (
@@ -71,6 +83,21 @@ if (!adminUrl) {
          VALUES ($1, $2, 'owner')`,
         [workspaceId, actorId],
       );
+
+      const runtimeIdentity = await withUnitOfWork(
+        runtimePool,
+        { workspaceId, actorId, applicationRole: "casei_app" },
+        async ({ client }) => {
+          const result = await client.query<{ current_user: string; current_role: string }>(
+            `SELECT current_user, current_role`,
+          );
+          return result.rows[0];
+        },
+      );
+      assert.deepEqual(runtimeIdentity, {
+        current_user: runtimeLogin,
+        current_role: "casei_app",
+      });
 
       const scope = {
         workspaceId,
@@ -113,6 +140,25 @@ if (!adminUrl) {
       );
       assert.equal(replay.replayed, true);
       assert.equal(replay.statusCode, 201);
+      const nullResponse = await withUnitOfWork(pool, scope, async ({ client }) =>
+        executeIdempotent(client, {
+          scope: "user-plat004:workspace-1:POST:/null-response",
+          key: "null-response-key",
+          request: { accepted: true },
+          execute: async () => ({ statusCode: 204, response: null }),
+        }),
+      );
+      assert.equal(nullResponse.response, null);
+      const nullReplay = await withUnitOfWork(pool, scope, async ({ client }) =>
+        executeIdempotent(client, {
+          scope: "user-plat004:workspace-1:POST:/null-response",
+          key: "null-response-key",
+          request: { accepted: true },
+          execute: async () => ({ statusCode: 500, response: { impossible: true } }),
+        }),
+      );
+      assert.equal(nullReplay.replayed, true);
+      assert.equal(nullReplay.response, null);
       await assert.rejects(
         withUnitOfWork(pool, scope, async ({ client }) =>
           executeIdempotent(client, {
@@ -265,6 +311,80 @@ if (!adminUrl) {
       );
       assert.equal((await leaseWorker.runOnce(workspaceId)).state, "succeeded");
 
+      const fenceJob = await pool.query<{ id: string }>(
+        `INSERT INTO "job"
+          (job_type, job_version, workspace_id, actor_id, required_capability,
+           idempotency_key, payload, correlation_id)
+         VALUES ('fence.job', 1, $1, $2, 'test.run', 'fence-key', '{}'::jsonb, '01ARZ3NDEKTSV4RRFFQ69G5FAV')
+         RETURNING id`,
+        [workspaceId, actorId],
+      );
+      const fenceJobId = fenceJob.rows[0]?.id;
+      assert.ok(fenceJobId);
+      let callbackEntered!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        callbackEntered = resolve;
+      });
+      const fencingWorker = new PostgresJobWorker(
+        pool,
+        new Map([
+          [
+            "fence.job:1",
+            async (_job, context) =>
+              context.runBatch(async ({ client, beforeTransition }) => {
+                callbackEntered();
+                await new Promise((resolve) => setTimeout(resolve, 50));
+                await beforeTransition();
+                await client.query(
+                  `INSERT INTO "audit_event"
+                    (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result)
+                   VALUES ('job', 'fence_should_rollback', $1, $2, 'test', 'fence', 'worker', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'success')`,
+                  [actorId, workspaceId],
+                );
+              }),
+          ],
+        ]),
+        {
+          applicationRole: "casei_app",
+          leaseMs: 20,
+          authorizeCapability: ({ role }) => role === "owner",
+        },
+      );
+      const fencingResult = fencingWorker.runOnce(workspaceId);
+      await entered;
+      assert.deepEqual(await fencingResult, { state: "lease_lost", jobId: fenceJobId });
+      const fencingAudit = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM "audit_event" WHERE target_id = 'fence'`,
+      );
+      assert.equal(fencingAudit.rows[0]?.count, "0");
+
+      const takeoverWorker = new PostgresJobWorker(
+        pool,
+        new Map([
+          [
+            "fence.job:1",
+            async (_job, context) =>
+              context.runBatch(async ({ client }) => {
+                await client.query(
+                  `INSERT INTO "audit_event"
+                    (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result)
+                   VALUES ('job', 'fence_takeover', $1, $2, 'test', 'fence', 'worker', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'success')`,
+                  [actorId, workspaceId],
+                );
+              }),
+          ],
+        ]),
+        { applicationRole: "casei_app", authorizeCapability: ({ role }) => role === "owner" },
+      );
+      assert.equal(
+        (await takeoverWorker.runOnce(workspaceId, new Date(Date.now() + 60_000))).state,
+        "succeeded",
+      );
+      const takeoverAudit = await pool.query<{ action: string }>(
+        `SELECT action FROM "audit_event" WHERE target_id = 'fence' ORDER BY action`,
+      );
+      assert.deepEqual(takeoverAudit.rows, [{ action: "fence_takeover" }]);
+
       let firstBatchReached!: () => void;
       let releaseSecondBatch!: () => void;
       const firstBatch = new Promise<void>((resolve) => {
@@ -322,7 +442,9 @@ if (!adminUrl) {
       );
       assert.deepEqual(batchActions.rows, [{ action: "first_batch" }]);
     } finally {
+      await runtimePool?.end();
       await pool?.end();
+      await adminPool.query(`DROP ROLE IF EXISTS "${runtimeLogin}"`);
       await adminPool.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
       await adminPool.end();
     }

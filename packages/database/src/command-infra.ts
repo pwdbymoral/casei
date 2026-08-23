@@ -212,10 +212,10 @@ export async function executeIdempotent<T extends JsonValue>(
     if (row.request_hash !== requestHash) {
       throw new IdempotencyConflictError();
     }
-    if (row.status_code === null || row.response === null) {
+    if (row.status_code === null) {
       throw new IdempotencyInProgressError();
     }
-    return { replayed: true, statusCode: row.status_code, response: row.response };
+    return { replayed: true, statusCode: row.status_code, response: row.response as T };
   }
 
   const result = await command.execute();
@@ -369,6 +369,15 @@ export class JobAuthorizationError extends Error {
   }
 }
 
+export class JobLeaseLostError extends Error {
+  readonly code = "job_lease_lost" as const;
+
+  constructor() {
+    super("Job lease is no longer valid");
+    this.name = "JobLeaseLostError";
+  }
+}
+
 export type CapabilityAuthorizer = (input: {
   role: string;
   capability: string | null;
@@ -400,7 +409,7 @@ export interface JobWorkerOptions extends CommandScope {
 export type JobRunResult =
   | { state: "idle" }
   | { state: "succeeded"; jobId: string }
-  | { state: "failed" | "dead" | "cancelled"; jobId: string };
+  | { state: "failed" | "dead" | "cancelled" | "lease_lost"; jobId: string };
 
 export class PostgresJobWorker {
   private readonly options: Required<
@@ -445,6 +454,9 @@ export class PostgresJobWorker {
         ? { state: "succeeded", jobId: job.id }
         : { state: "cancelled", jobId: job.id };
     } catch (error) {
+      if (error instanceof JobLeaseLostError) {
+        return { state: "lease_lost", jobId: job.id };
+      }
       if (error instanceof JobAuthorizationError) {
         await this.markCancelled(job);
         return { state: "cancelled", jobId: job.id };
@@ -500,12 +512,14 @@ export class PostgresJobWorker {
         actorId: job.actorId,
         applicationRole: this.options.applicationRole,
       },
-      async ({ client }) =>
-        assertMembership(
+      async ({ client }) => {
+        await assertLeaseFenced(client, job);
+        await assertMembership(
           client,
           job,
           this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
-        ),
+        );
+      },
     );
   }
 
@@ -522,20 +536,25 @@ export class PostgresJobWorker {
         applicationRole: this.options.applicationRole,
       },
       async ({ client }) => {
+        await assertLeaseFenced(client, job);
         await assertMembership(
           client,
           job,
           this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
         );
-        return callback({
+        const result = await callback({
           client,
-          beforeTransition: () =>
-            assertMembership(
+          beforeTransition: async () => {
+            await assertLeaseFenced(client, job);
+            await assertMembership(
               client,
               job,
               this.options.authorizeCapability ?? defaultCapabilityAuthorizer,
-            ),
+            );
+          },
         });
+        await assertLeaseFenced(client, job);
+        return result;
       },
     );
   }
@@ -549,7 +568,8 @@ export class PostgresJobWorker {
         const result = await client.query(
           `UPDATE "job"
            SET lease_until = now() + ($4 * interval '1 millisecond'), updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND workspace_id = $3`,
+           WHERE id = $1 AND state = 'running' AND lease_token = $2
+             AND workspace_id = $3 AND lease_until > now()`,
           [job.id, job.leaseToken, job.workspaceId, this.options.leaseMs],
         );
         return result.rowCount === 1;
@@ -567,6 +587,7 @@ export class PostgresJobWorker {
         applicationRole: this.options.applicationRole,
       },
       async ({ client }) => {
+        await assertLeaseFenced(client, job);
         try {
           await assertMembership(
             client,
@@ -579,7 +600,7 @@ export class PostgresJobWorker {
               `UPDATE "job"
                SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
                    last_error = $3, updated_at = now()
-               WHERE id = $1 AND state = 'running' AND lease_token = $2`,
+               WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
               [job.id, job.leaseToken, "job_authorization_revoked"],
             );
             return false;
@@ -589,7 +610,7 @@ export class PostgresJobWorker {
         const result = await client.query(
           `UPDATE "job"
            SET state = 'succeeded', lease_until = NULL, lease_token = NULL, updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2`,
+           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
           [job.id, job.leaseToken],
         );
         return result.rowCount === 1;
@@ -607,7 +628,7 @@ export class PostgresJobWorker {
           `UPDATE "job"
            SET state = 'cancelled', lease_until = NULL, lease_token = NULL,
                last_error = $3, updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2`,
+           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
           [job.id, job.leaseToken, "job_authorization_revoked"],
         );
       },
@@ -632,7 +653,7 @@ export class PostgresJobWorker {
           `UPDATE "job"
            SET state = $3, available_at = $4, lease_until = NULL, lease_token = NULL,
                last_error = $5, updated_at = now()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2`,
+           WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_until > now()`,
           [
             job.id,
             job.leaseToken,
@@ -693,6 +714,30 @@ function handlerKey(jobType: string, version: number): string {
 }
 
 const defaultCapabilityAuthorizer: CapabilityAuthorizer = ({ role }) => role === "owner";
+
+async function assertLeaseFenced(client: PoolClient, job: JobRecord): Promise<void> {
+  const result = await client.query<{
+    state: string;
+    lease_token: string | null;
+    lease_until: Date | null;
+    lease_valid: boolean;
+  }>(
+    `SELECT state, lease_token, lease_until, lease_until > now() AS lease_valid
+     FROM "job"
+     WHERE id = $1
+     FOR UPDATE`,
+    [job.id],
+  );
+  const current = result.rows[0];
+  if (
+    current?.state !== "running" ||
+    current.lease_token !== job.leaseToken ||
+    !current.lease_until ||
+    !current.lease_valid
+  ) {
+    throw new JobLeaseLostError();
+  }
+}
 
 async function assertMembership(
   client: PoolClient,
