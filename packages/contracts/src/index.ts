@@ -203,6 +203,16 @@ export const statementSchema = z.object({
   version: versionSchema,
 });
 
+export const statementListQuerySchema = z.object({
+  cardId: domainIdSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+export const closeStatementSchema = z.object({
+  /** Closing is a command, but the body is kept explicit for future audit metadata. */
+  confirm: z.literal(true).default(true),
+});
+
 export const payStatementSchema = z.object({
   amount: positiveMoneySchema.optional(),
   occurredOn: civilDateSchema.optional(),

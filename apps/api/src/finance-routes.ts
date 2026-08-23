@@ -1,4 +1,5 @@
 import {
+  closeStatementSchema,
   createCategorySchema,
   createCreditCardSchema,
   createInstallmentPlanSchema,
@@ -7,6 +8,7 @@ import {
   domainIdSchema,
   paginationQuerySchema,
   payStatementSchema,
+  statementListQuerySchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
 import {
@@ -56,6 +58,24 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     if (!transaction) throw notFoundError();
     setVersionHeaders(context, transaction.version);
     return context.json(transaction);
+  });
+
+  router.get("/workspaces/:workspaceId/categories", async (context) => {
+    const query = parseQuery(context, paginationQuerySchema);
+    const items = await service.listCategories(scopeOf(context), query.limit);
+    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+  });
+
+  router.get("/workspaces/:workspaceId/cards", async (context) => {
+    const query = parseQuery(context, paginationQuerySchema);
+    const items = await service.listCards(scopeOf(context), query.limit);
+    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+  });
+
+  router.get("/workspaces/:workspaceId/statements", async (context) => {
+    const query = parseQuery(context, statementListQuerySchema);
+    const items = await service.listStatements(scopeOf(context), query.cardId, query.limit);
+    return context.json({ items, page: { nextCursor: null, hasMore: false } });
   });
 
   router.post("/workspaces/:workspaceId/transactions/:id/post", async (context) => {
@@ -146,6 +166,20 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       requiredIdempotencyKey(context),
     );
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+  });
+
+  router.post("/workspaces/:workspaceId/statements/:statementId/close", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const expectedVersion = requireIfMatch(context);
+    await parseJsonBody(context, closeStatementSchema);
+    const statement = await service.closeStatement(
+      scopeOf(context),
+      statementId,
+      requiredIdempotencyKey(context),
+      expectedVersion,
+    );
+    setVersionHeaders(context, statement.version);
+    return context.json(statement);
   });
 }
 
