@@ -82,6 +82,18 @@ troca somente para espaços autorizados e conversão de sessão expirada em esta
 Os cenários que exigem RLS, locks de membership, trigger de owner, expiração de convite e purge
 devem rodar no PostgreSQL descartável do CI junto da migration `0003_identity_workspaces.sql`.
 
+## AUTH-006
+
+`apps/api/test/identity-routes.test.ts` cobre o boundary de perfil/preferências, incluindo `If-Match`,
+ETag, papel sem permissão e workspace estrangeiro. `apps/web/src/lib/settings.test.ts` verifica o
+adapter HTTP, envio de ETag e mapeamento seguro de conflito/offline; a tela `app/settings` mantém os
+formulários com drafts durante erro e expõe os estados de carregamento, permissão, conflito e sem
+conexão. A migration `0004_profile_preferences.sql` tem companion down e o teste PostgreSQL de
+schema verifica a política RLS de `user_preference` e que o rollback não deixa a tabela. Quando
+`DATABASE_URL_TEST` estiver disponível, a integração de identidade também comprova defaults `pt-BR`,
+ocultação de valores, auditoria sem valores sensíveis, versões e bloqueio server-side da moeda após
+um movimento financeiro.
+
 ## Identidade
 
 Os testes de AUTH-001 executam o handler Better Auth 1.6.22 contra o adapter de memória e um

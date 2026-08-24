@@ -4,6 +4,8 @@ import {
   deactivateWorkspaceSchema,
   onboardingSchema,
   updateMembershipRoleSchema,
+  updateUserProfileSchema,
+  updateWorkspacePreferencesSchema,
   type WorkspaceRole,
 } from "@casei/contracts";
 import {
@@ -63,6 +65,25 @@ export interface WorkspaceSummaryView {
 export interface WorkspaceSessionView {
   user: { id: string; displayName: string; email: string };
   workspaces: WorkspaceSummaryView[];
+}
+
+export interface UserProfileView {
+  userId: string;
+  displayName: string;
+  email: string;
+  emailVerified: boolean;
+  locale: "pt-BR";
+  hideValues: boolean;
+  version: number;
+}
+
+export interface WorkspacePreferencesView {
+  workspaceId: string;
+  name: string;
+  currency: string;
+  timeZone: string;
+  safetyMarginMinor: string;
+  version: number;
 }
 
 export interface InvitationView {
@@ -202,6 +223,177 @@ export class IdentityService {
         };
       },
     );
+  }
+
+  async getProfile(actor: IdentityActor): Promise<UserProfileView> {
+    return withUnitOfWork(
+      this.pool,
+      {
+        actorId: actor.userId,
+        actorEmail: actor.email ? normalizeEmail(actor.email) : undefined,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const result = await client.query<ProfileRow>(
+          `SELECT u.id, u.name, u.email, u.email_verified,
+                  COALESCE(p.locale, 'pt-BR') AS locale,
+                  COALESCE(p.hide_values, false) AS hide_values,
+                  COALESCE(p.version, 0) AS version
+             FROM "user" u
+             LEFT JOIN user_preference p ON p.user_id = u.id
+            WHERE u.id = $1`,
+          [actor.userId],
+        );
+        const row = result.rows[0];
+        if (!row) throw new IdentityNotFoundError();
+        return toUserProfile(row);
+      },
+    );
+  }
+
+  async updateProfile(
+    actor: IdentityActor,
+    input: unknown,
+    expectedVersion: number,
+    correlationId: string,
+  ): Promise<UserProfileView> {
+    const parsed = updateUserProfileSchema.parse(input);
+    return withUnitOfWork(
+      this.pool,
+      {
+        actorId: actor.userId,
+        actorEmail: actor.email ? normalizeEmail(actor.email) : undefined,
+        correlationId,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const current = await client.query<{ version: number }>(
+          `SELECT version FROM user_preference WHERE user_id = $1 FOR UPDATE`,
+          [actor.userId],
+        );
+        const currentVersion = Number(current.rows[0]?.version ?? 0);
+        if (currentVersion !== expectedVersion)
+          throw new IdentityVersionConflictError(currentVersion);
+        await client.query(`UPDATE "user" SET name = $2, updated_at = now() WHERE id = $1`, [
+          actor.userId,
+          parsed.displayName,
+        ]);
+        await client.query(
+          `INSERT INTO user_preference (user_id, locale, hide_values, version)
+           VALUES ($1, $2, $3, 1)
+           ON CONFLICT (user_id) DO UPDATE
+             SET locale = EXCLUDED.locale,
+                 hide_values = EXCLUDED.hide_values,
+                 version = user_preference.version + 1,
+                 updated_at = now()`,
+          [actor.userId, parsed.locale, parsed.hideValues],
+        );
+        await writeAudit(client, {
+          actorId: actor.userId,
+          correlationId,
+          action: "identity.profile_updated",
+          targetId: actor.userId,
+          targetType: "user",
+          reason: "profile_fields_updated",
+        });
+        const result = await client.query<ProfileRow>(
+          `SELECT u.id, u.name, u.email, u.email_verified,
+                  p.locale, p.hide_values, p.version
+             FROM "user" u
+             JOIN user_preference p ON p.user_id = u.id
+            WHERE u.id = $1`,
+          [actor.userId],
+        );
+        const row = result.rows[0];
+        if (!row) throw new IdentityNotFoundError();
+        return toUserProfile(row);
+      },
+    );
+  }
+
+  async getWorkspacePreferences(scope: IdentityScope): Promise<WorkspacePreferencesView> {
+    return this.withScoped(scope, async (client) => {
+      const result = await client.query<WorkspacePreferencesRow>(
+        `SELECT w.id, w.name, w.version, p.currency_code, p.timezone, p.safety_margin_minor
+           FROM workspace w
+           JOIN workspace_preference p ON p.workspace_id = w.id
+          WHERE w.id = $1`,
+        [scope.workspaceId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new IdentityNotFoundError();
+      return toWorkspacePreferences(row);
+    });
+  }
+
+  async updateWorkspacePreferences(
+    scope: IdentityScope,
+    input: unknown,
+    expectedVersion: number,
+  ): Promise<WorkspacePreferencesView> {
+    assertRole(scope, "owner");
+    const parsed = updateWorkspacePreferencesSchema.parse(input);
+    if (!isValidTimeZone(parsed.timeZone)) {
+      throw new IdentityConflictError("O fuso horário informado não é válido.");
+    }
+    return this.withScoped(scope, async (client) => {
+      const result = await client.query<WorkspacePreferencesRow>(
+        `SELECT w.id, w.name, w.version, p.currency_code, p.timezone, p.safety_margin_minor
+           FROM workspace w
+           JOIN workspace_preference p ON p.workspace_id = w.id
+          WHERE w.id = $1
+          FOR UPDATE OF w, p`,
+        [scope.workspaceId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new IdentityNotFoundError();
+      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
+      if (row.currency_code !== parsed.currency) {
+        const movement = await client.query<{ exists: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM ledger_event
+              WHERE workspace_id = $1 AND status = 'published'
+             UNION ALL
+             SELECT 1 FROM finance_transaction
+              WHERE workspace_id = $1 AND state IN ('posted', 'partially_settled')
+           ) AS exists`,
+          [scope.workspaceId],
+        );
+        if (movement.rows[0]?.exists) {
+          throw new IdentityConflictError(
+            "A moeda não pode ser alterada após o primeiro movimento.",
+          );
+        }
+      }
+      await client.query(
+        `UPDATE workspace
+            SET name = $2, version = version + 1, updated_at = now()
+          WHERE id = $1`,
+        [scope.workspaceId, parsed.name],
+      );
+      await client.query(
+        `UPDATE workspace_preference
+            SET currency_code = $2, timezone = $3, safety_margin_minor = $4, updated_at = now()
+          WHERE workspace_id = $1`,
+        [scope.workspaceId, parsed.currency, parsed.timeZone, BigInt(parsed.safetyMarginMinor)],
+      );
+      await writeAudit(client, {
+        actorId: scope.actor.userId,
+        workspaceId: scope.workspaceId,
+        correlationId: scope.correlationId,
+        action: "workspace.preferences_updated",
+        targetId: scope.workspaceId,
+        reason: "workspace_preference_fields_updated",
+      });
+      return toWorkspacePreferences({
+        ...row,
+        name: parsed.name,
+        currency_code: parsed.currency,
+        timezone: parsed.timeZone,
+        safety_margin_minor: BigInt(parsed.safetyMarginMinor),
+        version: row.version + 1,
+      });
+    });
   }
 
   async resolveScope(
@@ -1223,6 +1415,25 @@ interface WorkspaceSummaryRow {
   version: number;
 }
 
+interface ProfileRow {
+  id: string;
+  name: string;
+  email: string;
+  email_verified: boolean;
+  locale: "pt-BR";
+  hide_values: boolean;
+  version: number;
+}
+
+interface WorkspacePreferencesRow {
+  id: string;
+  name: string;
+  version: number;
+  currency_code: string;
+  timezone: string;
+  safety_margin_minor: bigint;
+}
+
 interface InvitationRow {
   id: string;
   workspace_id: string;
@@ -1260,6 +1471,29 @@ function toWorkspaceSummary(row: WorkspaceSummaryRow): WorkspaceSummaryView {
     locale: "pt-BR",
     timeZone: row.timezone,
     status: row.status as WorkspaceSummaryView["status"],
+    version: row.version,
+  };
+}
+
+function toUserProfile(row: ProfileRow): UserProfileView {
+  return {
+    userId: row.id,
+    displayName: row.name,
+    email: row.email,
+    emailVerified: row.email_verified,
+    locale: row.locale,
+    hideValues: row.hide_values,
+    version: row.version,
+  };
+}
+
+function toWorkspacePreferences(row: WorkspacePreferencesRow): WorkspacePreferencesView {
+  return {
+    workspaceId: row.id,
+    name: row.name,
+    currency: row.currency_code,
+    timeZone: row.timezone,
+    safetyMarginMinor: row.safety_margin_minor.toString(),
     version: row.version,
   };
 }
@@ -1350,22 +1584,24 @@ async function writeAudit(
   client: PoolClient,
   input: {
     actorId: string;
-    workspaceId: string;
+    workspaceId?: string;
     correlationId: string;
     action: string;
     targetId?: string;
+    targetType?: "workspace" | "user";
     reason?: string;
   },
 ): Promise<void> {
   await client.query(
     `INSERT INTO audit_event
       (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason, retention_until)
-     VALUES ('identity', $1, $2, $3, 'workspace', $4, 'api', $5, 'success', $6, now() + interval '365 days')`,
+     VALUES ('identity', $1, $2, $3, $4, $5, 'api', $6, 'success', $7, now() + interval '365 days')`,
     [
       input.action,
       input.actorId,
       input.workspaceId,
-      input.targetId ?? input.workspaceId,
+      input.targetType ?? (input.workspaceId ? "workspace" : "user"),
+      input.targetId ?? input.workspaceId ?? input.actorId,
       input.correlationId || "01ARZ3NDEKTSV4RRFFQ69G5FAV",
       input.reason ?? null,
     ],

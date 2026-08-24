@@ -80,6 +80,90 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       expect(scope?.role).toBe("owner");
       if (!scope) throw new Error("owner scope was not resolved");
 
+      const initialProfile = await service.getProfile(owner);
+      expect(initialProfile).toMatchObject({
+        userId: ownerId,
+        displayName: "Owner",
+        locale: "pt-BR",
+        hideValues: false,
+        version: 0,
+      });
+      const updatedProfile = await service.updateProfile(
+        owner,
+        { displayName: "Owner Casei", locale: "pt-BR", hideValues: true },
+        initialProfile.version,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      );
+      expect(updatedProfile).toMatchObject({
+        displayName: "Owner Casei",
+        hideValues: true,
+        version: 1,
+      });
+      await expect(
+        service.updateProfile(
+          owner,
+          { displayName: "Conflito", locale: "pt-BR", hideValues: false },
+          initialProfile.version,
+          "01ARZ3NDEKTSV4RRQ69G5FAW",
+        ),
+      ).rejects.toMatchObject({ name: "IdentityVersionConflictError" });
+
+      const initialPreferences = await service.getWorkspacePreferences(scope);
+      expect(initialPreferences).toMatchObject({
+        workspaceId,
+        name: "Casa lifecycle",
+        currency: "BRL",
+        timeZone: "America/Fortaleza",
+        safetyMarginMinor: "0",
+        version: 0,
+      });
+      const updatedPreferences = await service.updateWorkspacePreferences(
+        scope,
+        {
+          name: "Casa lifecycle",
+          currency: "USD",
+          timeZone: "America/Sao_Paulo",
+          safetyMarginMinor: "1200",
+        },
+        initialPreferences.version,
+      );
+      expect(updatedPreferences).toMatchObject({
+        currency: "USD",
+        timeZone: "America/Sao_Paulo",
+        safetyMarginMinor: "1200",
+        version: 1,
+      });
+      const noMovementPreferences = await service.updateWorkspacePreferences(
+        scope,
+        {
+          name: "Casa lifecycle",
+          currency: "EUR",
+          timeZone: "America/Sao_Paulo",
+          safetyMarginMinor: "1200",
+        },
+        updatedPreferences.version,
+      );
+      expect(noMovementPreferences.currency).toBe("EUR");
+      await pool.query(
+        `INSERT INTO finance_transaction
+          (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, description)
+         VALUES ($1, 'expense', 'posted', 'wallet', 100, 100, 'EUR', '2030-01-01', 'teste')`,
+        [workspaceId],
+      );
+      const movementPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          movementPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
+
       const invitation = await service.createInvitation(
         scope,
         { email: `invite-${suffix}@example.test`, role: "viewer" },
@@ -235,7 +319,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           workspaceName: "Casa lifecycle",
           reason: "teste de ciclo de vida",
         },
-        0,
+        2,
       );
       expect(first.recoveryUntil).toBe("2030-01-31T00:00:00.000Z");
       await expect(
@@ -247,7 +331,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
             reason: "retry após perda de resposta",
           },
           "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-          0,
+          2,
         ),
       ).resolves.toEqual(first);
       await expect(
@@ -325,7 +409,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           workspaceName: "Casa lifecycle",
           reason: "teste do cutoff",
         },
-        2,
+        4,
       );
       await expect(
         pool.query<{ reason: string }>(

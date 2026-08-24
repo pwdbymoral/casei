@@ -49,7 +49,9 @@ Papéis do MVP:
 
 ## Perfil e preferências
 
-Usuário edita nome, locale, preferência de ocultar valores e senha. E-mail exige reverificação. Preferências do espaço — moeda, fuso, nome e margem de segurança — são editáveis pelo owner, com prévia das consequências. Moeda não pode mudar após movimentos financeiros no MVP; exige novo espaço ou migração futura específica.
+Usuário edita nome, locale e preferência de ocultar valores. O locale suportado no MVP é `pt-BR`; valores não suportados são rejeitados para não produzir mensagens ou formatação parcialmente localizada. Senha usa o endpoint nativo `change-password` do Better Auth e nunca é persistida ou logada pela API de domínio. E-mail usa `change-email`, inicia reverificação e só passa a valer após o callback/fluxo de verificação do Better Auth; `send-verification-email` permite iniciar/repetir a reverificação sem revelar tokens.
+
+Preferências do espaço — moeda, fuso IANA, nome e margem de segurança — são editáveis pelo owner, com prévia das consequências. A leitura e a atualização do espaço são escopadas pelo membership server-side e exigem `If-Match`; conflitos retornam `412` com a versão atual. Moeda não pode mudar após o primeiro movimento financeiro publicado; antes disso, a alteração é auditada e validada no servidor. Auditoria de perfil/preferências guarda somente campos aprovados (nome/locale/flags e antes/depois redigidos), nunca senha, token, e-mail completo ou conteúdo financeiro.
 
 ## Administração da plataforma
 
@@ -111,6 +113,6 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 - [ ] Owner transfere propriedade antes de sair; último owner/admin não pode ser removido.
 - [ ] Owner desativa/exclui o espaço com confirmação, idempotência, bloqueio de novas mutações, sessão de outros espaços preservada, recuperação por entitlement até 30 dias e retenção/purga auditáveis.
 - [x] Relógio controlado comprova cutoff de 30 dias, purge retryable de objetos/exports no dia 30, expiração de backups no dia 35 e reaplicação de tombstone em restore; a integração também exerce o reaper de tombstones/auditoria no dia 365.
-- [ ] Perfil e preferências permitem editar nome/locale/ocultação de valores, iniciar reverificação de e-mail e senha e, para owner, editar nome/fuso/margem de segurança do espaço com prévia, `If-Match` e bloqueio de mudança de moeda após movimentos.
+- [x] Perfil e preferências permitem editar nome/locale/ocultação de valores, iniciar reverificação de e-mail e senha e, para owner, editar nome/fuso/margem de segurança do espaço com prévia, `If-Match` e bloqueio de mudança de moeda após movimentos.
 - [ ] Console administrativo elimina operações rotineiras via terminal e não expõe conteúdo do espaço.
 - [ ] Suspensão, revogação, promoção e jobs administrativos exigem motivo, proteção reforçada e auditoria.

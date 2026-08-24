@@ -4,6 +4,8 @@ export const workspaceRoleSchema = z.enum(["owner", "member", "viewer"]);
 
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 
+export const versionSchema = z.number().int().nonnegative();
+
 /** Domain identifiers are PostgreSQL UUIDv7 values in lowercase canonical form. */
 export const domainIdSchema = z
   .string()
@@ -44,6 +46,48 @@ export const workspaceSessionSchema = z.object({
   workspaces: z.array(workspaceSummarySchema),
 });
 export type WorkspaceSessionContract = z.infer<typeof workspaceSessionSchema>;
+
+export const localeSchema = z.literal("pt-BR");
+export const userProfileSchema = z.object({
+  userId: userIdSchema,
+  displayName: z.string().min(1).max(200),
+  email: z.string().email(),
+  emailVerified: z.boolean(),
+  locale: localeSchema,
+  hideValues: z.boolean(),
+  version: versionSchema,
+});
+export type UserProfileContract = z.infer<typeof userProfileSchema>;
+
+export const updateUserProfileSchema = z.object({
+  displayName: z.string().trim().min(2).max(200),
+  locale: localeSchema,
+  hideValues: z.boolean(),
+});
+export type UpdateUserProfileInput = z.infer<typeof updateUserProfileSchema>;
+
+const safetyMarginMinorSchema = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$/)
+  .refine((value) => BigInt(value) <= 999999999999999n, "margem fora do limite suportado");
+
+export const workspacePreferencesSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  name: z.string().min(1).max(200),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  timeZone: z.string().min(1).max(64),
+  safetyMarginMinor: safetyMarginMinorSchema,
+  version: versionSchema,
+});
+export type WorkspacePreferencesContract = z.infer<typeof workspacePreferencesSchema>;
+
+export const updateWorkspacePreferencesSchema = z.object({
+  name: z.string().trim().min(2).max(200),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  timeZone: z.string().trim().min(1).max(64),
+  safetyMarginMinor: safetyMarginMinorSchema,
+});
+export type UpdateWorkspacePreferencesInput = z.infer<typeof updateWorkspacePreferencesSchema>;
 
 export const onboardingSchema = z.object({
   displayName: z.string().trim().min(2).max(200),
@@ -107,8 +151,6 @@ export const correlationIdSchema = z
   .regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "correlation ID must be an uppercase ULID");
 
 export type CorrelationId = z.infer<typeof correlationIdSchema>;
-
-export const versionSchema = z.number().int().nonnegative();
 
 export const paginationQuerySchema = z.object({
   cursor: z.string().min(1).optional(),
