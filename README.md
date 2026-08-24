@@ -32,6 +32,29 @@ pnpm dev
 
 O PWA fica em `http://localhost:3000` e a API em `http://localhost:3001`.
 
+### Origem da API do PWA
+
+O PWA usa `NEXT_PUBLIC_CASEI_API_ORIGIN` como origem única da API. Ela é pública e é
+incorporada pelo Next.js no bundle durante `next build`; alterá-la somente no runtime
+do container não altera o JavaScript já entregue ao navegador. Configure-a antes do
+build, por exemplo:
+
+```bash
+NEXT_PUBLIC_CASEI_API_ORIGIN=http://localhost:3001 pnpm --filter web build
+```
+
+Para a imagem OCI, passe o mesmo valor como argumento de build:
+
+```bash
+docker build \
+  --build-arg NEXT_PUBLIC_CASEI_API_ORIGIN=https://api.example.com \
+  -f Dockerfile.web \
+  -t casei-web .
+```
+
+`CASEI_UI_FIXTURES=1` é reservado para fixtures explícitas em desenvolvimento/testes;
+sem essa flag o PWA não fabrica uma sessão ou dados financeiros.
+
 ## Qualidade
 
 ```bash
