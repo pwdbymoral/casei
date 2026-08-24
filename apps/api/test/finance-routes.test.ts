@@ -183,6 +183,90 @@ describe("finance HTTP composition", () => {
     });
   });
 
+  it("passes effective settlement input and If-Match to the transaction command", async () => {
+    let received: { input: unknown; expectedVersion: number | undefined } | undefined;
+    const fakeService = {
+      postTransaction: async (
+        _scope: unknown,
+        _id: string,
+        _key: string,
+        expectedVersion: number | undefined,
+        input: unknown,
+      ) => {
+        received = { input, expectedVersion };
+        return {
+          id: transactionId,
+          workspaceId,
+          kind: "expense",
+          state: "partially_settled",
+          amount: { currency: "BRL", minor: "1000" },
+          settledAmount: { currency: "BRL", minor: "250" },
+          occurredOn: "2028-02-29",
+          dueOn: "2028-03-01",
+          postedOn: "2028-02-29T12:00:00.000Z",
+          description: "Conta",
+          categoryId: null,
+          cardId: null,
+          statementId: null,
+          version: 1,
+        };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions/${transactionId}/post`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "finance-partial-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({
+          amount: { currency: "BRL", minor: "250" },
+          occurredOn: "2028-02-29",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(received).toEqual({
+      input: {
+        amount: { currency: "BRL", minor: "250" },
+        occurredOn: "2028-02-29",
+      },
+      expectedVersion: 0,
+    });
+    expect(response.headers.get("ETag")).toBe('"v1"');
+
+    const noBodyResponse = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions/${transactionId}/post`,
+      {
+        method: "POST",
+        headers: {
+          "idempotency-key": "finance-partial-route-002",
+          "if-match": '"v1"',
+        },
+      },
+    );
+    expect(noBodyResponse.status).toBe(200);
+    expect(received?.input).toEqual({});
+  });
+
   it("lists cards and statements and closes an open statement with a version", async () => {
     const fakeService = {
       listCards: async () => [

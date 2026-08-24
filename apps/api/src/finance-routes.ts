@@ -9,6 +9,7 @@ import {
   paginationQuerySchema,
   payStatementSchema,
   reopenStatementSchema,
+  settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
 } from "@casei/contracts";
@@ -28,7 +29,7 @@ import {
   notFoundError,
   validationError,
 } from "./http/index.js";
-import { parseJsonBody, parseQuery } from "./http/parsing.js";
+import { parseJsonBody, parseOptionalJsonBody, parseQuery } from "./http/parsing.js";
 import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiEnv } from "./http/types.js";
 
@@ -86,6 +87,23 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     return context.json(transaction);
   });
 
+  router.get("/workspaces/:workspaceId/transactions/:id/audit", async (context) => {
+    const transactionId = parseDomainId(context.req.param("id"));
+    const query = parseQuery(context, paginationQuerySchema);
+    const page = await service.listTransactionAudit(scopeOf(context), transactionId, query);
+    return context.json({
+      items: page.items,
+      page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+    });
+  });
+
+  router.get("/workspaces/:workspaceId/transactions/:id/audit/:auditId", async (context) => {
+    const transactionId = parseDomainId(context.req.param("id"));
+    const auditId = parseDomainId(context.req.param("auditId"));
+    const event = await service.getTransactionAudit(scopeOf(context), transactionId, auditId);
+    return context.json(event);
+  });
+
   router.get("/workspaces/:workspaceId/categories", async (context) => {
     const query = parseQuery(context, paginationQuerySchema);
     const items = await service.listCategories(scopeOf(context), query.limit);
@@ -117,11 +135,13 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   router.post("/workspaces/:workspaceId/transactions/:id/post", async (context) => {
     const id = parseDomainId(context.req.param("id"));
     const expectedVersion = requireIfMatch(context);
+    const input = await parseOptionalJsonBody(context, settleTransactionSchema);
     const transaction = await service.postTransaction(
       scopeOf(context),
       id,
       requiredIdempotencyKey(context),
       expectedVersion,
+      input,
     );
     setVersionHeaders(context, transaction.version);
     return context.json(transaction);

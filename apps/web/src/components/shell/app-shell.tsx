@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { clearAllStockOfflineSnapshots } from "@/lib/stock";
 import { cn } from "@/lib/utils";
 import {
   clearWorkspaceClientState,
@@ -142,6 +143,7 @@ function WorkspaceSelect({
     setError(null);
     try {
       const nextSession = await adapter.switchWorkspace(workspaceId);
+      clearAllStockOfflineSnapshots();
       onChanged(nextSession);
       // The active space is a cache boundary; restart at Hoje in its scope.
       router.replace("/app");
@@ -235,6 +237,7 @@ export function AppShell({
       setStatus(loaded.workspaces.length > 0 ? "success" : "empty");
     } catch (cause) {
       if (cause instanceof WorkspaceSessionError && cause.code === "permission_denied") {
+        clearAllStockOfflineSnapshots();
         clearWorkspaceClientState();
         setSession(null);
         setScopeRevoked(true);
@@ -264,6 +267,7 @@ export function AppShell({
 
   useEffect(() => {
     if (forcedStatus !== "permission") return;
+    clearAllStockOfflineSnapshots();
     clearWorkspaceClientState();
     setSession(null);
     setScopeRevoked(true);
@@ -290,6 +294,7 @@ export function AppShell({
     try {
       if (onLogout) await onLogout();
       else await adapter.signOut?.();
+      clearAllStockOfflineSnapshots();
       clearWorkspaceClientState();
       setSession(null);
       router.replace("/");

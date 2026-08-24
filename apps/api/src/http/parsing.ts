@@ -26,6 +26,19 @@ export async function parseJsonBody<TSchema extends z.ZodType>(
   return parsed.data;
 }
 
+/** Parses a JSON body when present; an omitted body is the schema's empty object. */
+export async function parseOptionalJsonBody<TSchema extends z.ZodType>(
+  context: Context<ApiEnv>,
+  schema: TSchema,
+): Promise<z.output<TSchema>> {
+  if (!context.req.header("content-type")) {
+    const parsed = schema.safeParse({});
+    if (!parsed.success) throw validationError(parsed.error);
+    return parsed.data;
+  }
+  return parseJsonBody(context, schema);
+}
+
 export function parseQuery<TSchema extends z.ZodType>(
   context: Context<ApiEnv>,
   schema: TSchema,
