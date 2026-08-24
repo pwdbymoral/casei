@@ -759,6 +759,13 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
+        // Memberships are the first lock in every multi-membership identity
+        // mutation. Acquire this actor row before the invitation's joined
+        // workspace lock so acceptance cannot deadlock with deactivation.
+        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
+          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+          [workspaceId, actor.userId],
+        );
         const result = await client.query<
           InvitationRow & {
             workspace_name: string;
@@ -808,10 +815,6 @@ export class IdentityService {
         if (invite.workspace_status !== "active")
           throw new IdentityConflictError("O espaço não está disponível.");
         await this.deleteInvitationEmailArtifacts(client, workspaceId, invitationId);
-        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
-          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-          [workspaceId, actor.userId],
-        );
         if (current.rows[0]?.status === "active") {
           if (current.rows[0].role !== invite.role) {
             await client.query(

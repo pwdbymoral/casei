@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { IdentityPermissionError, IdentityService } from "../src/identity-service.js";
 
@@ -60,6 +61,77 @@ function poolFor(options: { actorRole?: "owner" | "member" } = {}) {
 
 function forUpdateStatements(statements: string[]) {
   return statements.filter((statement) => statement.includes("FOR UPDATE"));
+}
+
+function invitationPool() {
+  const statements: string[] = [];
+  const workspaceId = scope.workspaceId;
+  const invitationId = "0190f3c8-2a10-7abc-8def-1234567890ae";
+  const token = `${workspaceId}.${invitationId}.secret`;
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const client = {
+    async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM membership")) {
+        return {
+          rows: [
+            {
+              user_id: "user-invitee",
+              role: "member",
+              status: "revoked",
+              version: 2,
+            },
+          ] as T[],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM workspace WHERE")) {
+        return {
+          rows: [{ name: "Casa", status: "active", version: 3 }] as T[],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM workspace_preference")) {
+        return {
+          rows: [{ timezone: "America/Fortaleza", currency_code: "BRL" }] as T[],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM workspace_invitation")) {
+        return {
+          rows: [
+            {
+              id: invitationId,
+              workspace_id: workspaceId,
+              email: "invitee@example.test",
+              token_hash: tokenHash,
+              role: "member",
+              status: "pending",
+              expires_at: new Date("2030-01-01T00:00:00.000Z"),
+              accepted_by: null,
+              workspace_name: "Casa",
+              workspace_status: "active",
+              workspace_version: 3,
+              timezone: "America/Fortaleza",
+              currency_code: "BRL",
+            },
+          ] as T[],
+          rowCount: 1,
+        };
+      }
+      return { rows: [] as T[], rowCount: 0 };
+    },
+    release() {},
+  };
+  return {
+    token,
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+  };
 }
 
 describe("IdentityService workspace lock ordering", () => {
@@ -160,5 +232,24 @@ describe("IdentityService workspace lock ordering", () => {
     expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(
       false,
     );
+  });
+
+  it("locks the invitee membership, workspace, then invitation when accepting", async () => {
+    const harness = invitationPool();
+    const service = new IdentityService(harness.pool as never, {
+      now: () => new Date("2029-01-01T00:00:00.000Z"),
+    });
+
+    await expect(
+      service.acceptInvitation(
+        { userId: "user-invitee", email: "invitee@example.test", recentAuthentication: true },
+        harness.token,
+        scope.correlationId,
+      ),
+    ).resolves.toMatchObject({ id: scope.workspaceId, role: "member" });
+
+    const locks = forUpdateStatements(harness.statements);
+    expect(locks[0]).toMatch(/FROM membership/);
+    expect(locks[1]).toMatch(/FROM workspace_invitation/);
   });
 });

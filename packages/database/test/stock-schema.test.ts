@@ -31,6 +31,7 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
   assert.match(sql, /ENABLE ROW LEVEL SECURITY/);
   assert.match(sql, /FORCE ROW LEVEL SECURITY/);
   assert.match(sql, /stock_movement_immutable_guard/);
+  assert.match(sql, /stock_movement_product_scope_fk[\s\S]*ON DELETE CASCADE/);
   assert.match(sql, /REVOKE INSERT, UPDATE, DELETE ON stock_product FROM casei_app/);
   assert.match(sql, /REVOKE INSERT, UPDATE, DELETE ON stock_movement FROM casei_app/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON stock_product/);
@@ -40,6 +41,7 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
   assert.match(shopping, /ADD COLUMN "shopping_auto" boolean/);
   assert.match(shopping, /shopping_item_active_name_unique/);
   assert.match(shopping, /shopping_item_source_product_check/);
+  assert.match(shopping, /shopping_item_product_scope_fk[\s\S]*ON DELETE CASCADE/);
   assert.match(shopping, /CONSTRAINT "shopping_item_event_item_scope_fk"[\s\S]*ON DELETE CASCADE/);
   assert.match(shopping, /shopping_item_event_immutable_guard/);
   assert.match(shopping, /FORCE ROW LEVEL SECURITY/);

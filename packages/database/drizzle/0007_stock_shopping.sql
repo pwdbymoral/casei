@@ -21,7 +21,7 @@ CREATE TABLE "shopping_item" (
   "updated_at" timestamptz DEFAULT now() NOT NULL,
   CONSTRAINT "shopping_item_workspace_id_id_unique" UNIQUE ("workspace_id", "id"),
   CONSTRAINT "shopping_item_product_scope_fk"
-    FOREIGN KEY ("workspace_id", "product_id") REFERENCES "stock_product"("workspace_id", "id") ON DELETE RESTRICT,
+    FOREIGN KEY ("workspace_id", "product_id") REFERENCES "stock_product"("workspace_id", "id") ON DELETE CASCADE,
   CONSTRAINT "shopping_item_name_check" CHECK (length(trim("name")) > 0),
   CONSTRAINT "shopping_item_source_check" CHECK ("source" in ('automatic', 'free')),
   CONSTRAINT "shopping_item_unit_check" CHECK ("unit" in ('unit', 'package', 'box', 'kg', 'g', 'L', 'ml', 'other')),

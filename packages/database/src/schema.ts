@@ -310,7 +310,7 @@ export const shoppingItem = pgTable(
       columns: [table.workspaceId, table.productId],
       foreignColumns: [stockProduct.workspaceId, stockProduct.id],
       name: "shopping_item_product_scope_fk",
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     check("shopping_item_name_check", sql`length(trim(${table.name})) > 0`),
     check("shopping_item_source_check", sql`${table.source} in ('automatic', 'free')`),
     check(
@@ -398,7 +398,7 @@ export const stockMovement = pgTable(
       columns: [table.workspaceId, table.productId],
       foreignColumns: [stockProduct.workspaceId, stockProduct.id],
       name: "stock_movement_product_scope_fk",
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     check(
       "stock_movement_kind_check",
       sql`${table.kind} in ('entry', 'consume', 'correction', 'discard')`,
