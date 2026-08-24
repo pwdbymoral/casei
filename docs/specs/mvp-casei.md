@@ -69,7 +69,7 @@ Busca, período, filtros relevantes, aba e entidade selecionada devem ser repres
 
 ## Requisitos e invariantes transversais
 
-- Valores monetários são persistidos em unidades inteiras da menor denominação; o MVP usa uma moeda configurada por espaço e inicia com BRL.
+- Valores monetários são persistidos em unidades inteiras da menor denominação; o MVP usa uma moeda configurada por espaço e inicia com BRL. A moeda pode ser alterada somente enquanto o espaço não tiver movimentos, compromissos ou cartões cadastrados; depois disso permanece imutável.
 - Datas civis usam o fuso IANA do espaço; instantes de auditoria usam UTC. O padrão inicial é inferido no onboarding e confirmado pelo proprietário.
 - Mutação protegida valida sessão, permissão e `workspaceId` no servidor. Identificadores fornecidos pelo cliente nunca definem autorização sozinhos.
 - Operações de criação críticas aceitam chave de idempotência; retry não cria transação, parcela, pagamento, convite ou movimentação duplicada.

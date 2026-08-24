@@ -212,6 +212,25 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       );
       expect(noMovementPreferences.currency).toBe("EUR");
       await pool.query(
+        `INSERT INTO credit_card
+          (workspace_id, name, closing_day, due_day, currency_code)
+         VALUES ($1, 'Cartão de teste', 10, 20, 'EUR')`,
+        [workspaceId],
+      );
+      const cardPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          cardPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
+      await pool.query(
         `INSERT INTO finance_transaction
           (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, description)
          VALUES ($1, 'expense', 'planned', 'wallet', 100, 0, 'EUR', '2030-01-01', 'compromisso')`,

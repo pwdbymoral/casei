@@ -143,7 +143,6 @@ function retryPool() {
     statements,
   };
 }
-
 describe("IdentityService workspace lock ordering", () => {
   it("locks transfer memberships in sorted user order before workspace", async () => {
     const harness = poolFor();
