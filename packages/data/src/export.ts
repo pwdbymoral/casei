@@ -71,7 +71,6 @@ export interface VersionedCsvExportOptions {
   readonly maxChunkBytes?: number;
   readonly maxCellBytes?: number;
   readonly maxProtectedCells?: number;
-  readonly protectFormulas?: boolean;
 }
 
 export interface ExportManifestColumn {
@@ -133,7 +132,6 @@ interface ExportConfig {
   readonly maxChunkBytes: number;
   readonly maxCellBytes: number;
   readonly maxProtectedCells: number;
-  readonly protectFormulas: boolean;
 }
 
 const RESERVED_COLUMNS = new Set(["casei_schema_version", "casei_id"]);
@@ -318,7 +316,6 @@ function validateConfig(options: VersionedCsvExportOptions): ExportConfig {
       DEFAULT_CSV_EXPORT_LIMITS.maxProtectedCells,
       "file_too_large",
     ),
-    protectFormulas: options.protectFormulas ?? true,
   };
 }
 
@@ -411,9 +408,22 @@ export function createVersionedCsvExport(options: VersionedCsvExportOptions): Ve
   let totalBytes = 0;
   let sourceDone = false;
   let settled = false;
+  let iteratorClosed = false;
+
+  const closeIterator = (): void => {
+    if (iteratorClosed || iterator === undefined) return;
+    iteratorClosed = true;
+    try {
+      iterator.return?.();
+    } catch {
+      // Preserve the original stream/manifest failure. Cleanup is best effort,
+      // but is always attempted before the failure is exposed to the caller.
+    }
+  };
 
   const rejectOnce = (error: CsvExportError): void => {
     if (settled) return;
+    closeIterator();
     settled = true;
     rejectManifest(error);
   };
@@ -506,13 +516,7 @@ export function createVersionedCsvExport(options: VersionedCsvExportOptions): Ve
       for (const [index, value] of cells.entries()) {
         const column = config.allColumns[index];
         if (column === undefined) continue;
-        const protectedCell = config.protectFormulas
-          ? protectCsvFormula(value)
-          : {
-              value,
-              logicalValue: value,
-              formulaProtected: false,
-            };
+        const protectedCell = protectCsvFormula(value);
         const cellBytes = encoder.encode(protectedCell.value).byteLength;
         if (cellBytes > config.maxCellBytes) {
           throw new CsvExportError("file_too_large", "Uma célula excede o limite configurado.", {

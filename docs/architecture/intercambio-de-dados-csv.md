@@ -77,5 +77,8 @@ das células protegidas.
 
 O núcleo rejeita linhas sem `casei_id`, campos não declarados, valores que não
 sejam strings/nulos, excesso de linhas/bytes/células e cancelamento do stream.
+`createVersionedCsvExport` aplica essa proteção sempre; não há opt-out na API
+pública, para que nenhum consumidor produza uma planilha executável por
+configuração acidental.
 Jobs, autorização no momento do download, proxy autenticado, ZIP completo e
 armazenamento temporário permanecem fora do pacote.

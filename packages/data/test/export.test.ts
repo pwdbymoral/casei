@@ -165,6 +165,24 @@ describe("formula injection e manifesto", () => {
       },
     ]);
   });
+
+  it("não permite desativar a proteção de fórmulas no export versionado", async () => {
+    const exported = createVersionedCsvExport({
+      ...baseOptions(),
+      rows: [
+        {
+          casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+          description: '=HYPERLINK("https://evil")',
+          amount_minor: "1",
+        },
+      ],
+      protectFormulas: false,
+    } as unknown as Parameters<typeof createVersionedCsvExport>[0]);
+
+    const csv = await consumeExport(exported);
+
+    expect(csv).toContain(`"'=HYPERLINK(""https://evil"")"`);
+  });
 });
 
 describe("limites e falhas seguras da exportação", () => {
@@ -238,6 +256,78 @@ describe("limites e falhas seguras da exportação", () => {
     await reader.read();
     await reader.cancel("cliente desconectou");
     await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+  });
+
+  it("fecha o iterador da fonte quando o consumidor cancela", async () => {
+    let returnCalls = 0;
+    let nextCalls = 0;
+    const exported = createVersionedCsvExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          let index = 0;
+          return {
+            next() {
+              nextCalls += 1;
+              index += 1;
+              return {
+                done: false,
+                value: {
+                  casei_id: `0190f93c-4b1e-7abc-8def-0123456789a${index}`,
+                  description: "linha",
+                  amount_minor: "1",
+                },
+              };
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    const reader = exported.stream.getReader();
+    for (let index = 0; index < 16 && nextCalls === 0; index += 1) await reader.read();
+    await reader.cancel("cliente desconectou");
+
+    expect(returnCalls).toBe(1);
+    await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+  });
+
+  it("fecha o iterador da fonte quando a leitura falha", async () => {
+    let returnCalls = 0;
+    let nextCalls = 0;
+    const exported = createVersionedCsvExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              nextCalls += 1;
+              if (nextCalls === 1) {
+                return {
+                  done: false,
+                  value: {
+                    casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+                    description: "linha",
+                    amount_minor: "1",
+                  },
+                };
+              }
+              throw new Error("cursor indisponível");
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+
+    await expect(consumeExport(exported)).rejects.toMatchObject({ code: "source_failed" });
+    expect(returnCalls).toBe(1);
   });
 
   it("rejeita uma linha sem casei_id para preservar reimportação estável", async () => {
