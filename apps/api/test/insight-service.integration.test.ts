@@ -237,18 +237,32 @@ async function insertLedgerEvent(
   entries: readonly [accountId: string, amount: number][],
   transactionId?: string,
 ) {
-  const event = await pool.query<{ id: string }>(
-    `INSERT INTO ledger_event (workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at)
-     VALUES ($1, $2, $3, 'BRL', 'published', $4, now()) RETURNING id`,
-    [workspaceId, transactionId ?? null, eventType, occurredOn],
-  );
-  const eventId = event.rows[0]?.id;
-  if (!eventId) throw new Error("ledger event was not created");
-  for (const [accountId, amount] of entries) {
-    await pool.query(
-      `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor)
-       VALUES ($1, $2, $3, 'BRL', $4)`,
-      [workspaceId, eventId, accountId, amount],
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const event = await client.query<{ id: string }>(
+      `INSERT INTO ledger_event (workspace_id, transaction_id, event_type, currency_code, status, occurred_on)
+       VALUES ($1, $2, $3, 'BRL', 'draft', $4) RETURNING id`,
+      [workspaceId, transactionId ?? null, eventType, occurredOn],
     );
+    const eventId = event.rows[0]?.id;
+    if (!eventId) throw new Error("ledger event was not created");
+    for (const [accountId, amount] of entries) {
+      await client.query(
+        `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor)
+         VALUES ($1, $2, $3, 'BRL', $4)`,
+        [workspaceId, eventId, accountId, amount],
+      );
+    }
+    await client.query(
+      `UPDATE ledger_event SET status = 'published', published_at = now() WHERE id = $1`,
+      [eventId],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
 }
