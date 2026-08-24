@@ -1,4 +1,5 @@
 import {
+  categoryTransitionSchema,
   closeStatementSchema,
   createCategorySchema,
   createCreditCardSchema,
@@ -20,6 +21,7 @@ import {
   settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
+  updateCategorySchema,
   updateCreditCardSchema,
   updateGoalSchema,
 } from "@casei/contracts";
@@ -323,6 +325,45 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     );
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
   });
+
+  router.patch("/workspaces/:workspaceId/categories/:categoryId", async (context) => {
+    const categoryId = parseDomainId(context.req.param("categoryId"));
+    const input = await parseJsonBody(context, updateCategorySchema);
+    const result = await service.updateCategory(
+      scopeOf(context),
+      categoryId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.category.version);
+    return context.json(result.category);
+  });
+
+  for (const action of ["archive", "restore"] as const) {
+    router.post(`/workspaces/:workspaceId/categories/:categoryId/${action}`, async (context) => {
+      const categoryId = parseDomainId(context.req.param("categoryId"));
+      await parseJsonBody(context, categoryTransitionSchema);
+      const result =
+        action === "archive"
+          ? await service.archiveCategory(
+              scopeOf(context),
+              categoryId,
+              requiredIdempotencyKey(context),
+              requireIfMatch(context),
+            )
+          : await service.restoreCategory(
+              scopeOf(context),
+              categoryId,
+              requiredIdempotencyKey(context),
+              requireIfMatch(context),
+            );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      setVersionHeaders(context, result.category.version);
+      return context.json(result.category);
+    });
+  }
 
   router.post("/workspaces/:workspaceId/cards", async (context) => {
     const input = await parseJsonBody(context, createCreditCardSchema);
