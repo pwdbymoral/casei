@@ -60,6 +60,9 @@ estado comprado. Se um item livre já existente tiver o mesmo nome de um produto
 `low`/`missing`, o comando do produto o reconcilia em uma única linha automática, preservando ID,
 histórico e versão; enquanto o produto não for candidato, o item livre continua visível. Eventos
 somente são removidos por cascade quando o workspace inteiro é purgado após a janela de recuperação.
+Quando um produto é editado, uma linha automática ativa acompanha seu nome normalizado, unidade,
+rótulo e versão. Se o novo nome colidir com um item livre ativo, a edição retorna conflito
+recuperável antes de alterar o produto, pois o MVP não possui merge silencioso de linhas.
 
 ## Busca e uso no mercado
 
@@ -74,6 +77,9 @@ somente são removidos por cascade quando o workspace inteiro é purgado após a
 - Duplicatas encontradas após concorrência retornam conflito recuperável.
 - Arquivar categoria não arquiva produtos.
 - Produto na lista continua acessível se for arquivado, com orientação para remover ou restaurar.
+- Renomear um produto não pode criar duas entradas ativas para a mesma solicitação de compra:
+  se o novo nome já estiver em um item livre ativo, a alteração é rejeitada com conflito
+  recuperável; o usuário deve concluir/remover o item livre antes de renomear o produto.
 
 ## Critérios de aceitação
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { StockPermissionError, StockService } from "../src/stock-service.js";
+import { StockConflictError, StockPermissionError, StockService } from "../src/stock-service.js";
 
 function poolFor(options: {
   role: "owner" | "member" | "viewer";
@@ -191,7 +191,10 @@ function shoppingScenarioPool() {
           rowCount: 1,
         };
       }
-      if (sql.includes("UPDATE shopping_item i") && sql.includes("SET version = p.version")) {
+      if (
+        sql.includes("UPDATE shopping_item i") &&
+        (sql.includes("SET version = p.version") || sql.includes("SET name = p.name"))
+      ) {
         if (item && values[2] === productId && item.purchased === false) {
           item = { ...item, version: productVersion, last_changed_by: scope.actorId };
         }
@@ -331,6 +334,130 @@ function freeCollisionPool() {
   };
 }
 
+function productRenameCollisionPool() {
+  const statements: string[] = [];
+  const currentProduct = {
+    id: productId,
+    workspace_id: scope.workspaceId,
+    name: "Arroz",
+    unit: "unit" as const,
+    unit_label: null,
+    quantity_milli: "0",
+    minimum_milli: "10",
+    marked_missing: false,
+    shopping_auto: true,
+    category: null,
+    location: null,
+    note: null,
+    archived: false,
+    version: 0,
+  };
+  const client = {
+    async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM membership")) {
+        return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM workspace")) {
+        return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
+        return { rows: [currentProduct as T], rowCount: 1 };
+      }
+      if (sql.includes("FROM shopping_item") && sql.includes("source = 'free'")) {
+        return { rows: [{ id: materializedItemId }] as T[], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  return {
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+  };
+}
+
+function productRenameSyncPool() {
+  const statements: string[] = [];
+  const currentProduct = {
+    id: productId,
+    workspace_id: scope.workspaceId,
+    name: "Arroz",
+    unit: "unit" as const,
+    unit_label: null,
+    quantity_milli: "0",
+    minimum_milli: "10",
+    marked_missing: false,
+    shopping_auto: true,
+    category: null,
+    location: null,
+    note: "base",
+    archived: false,
+    version: 0,
+  };
+  const updatedProduct = { ...currentProduct, name: "Arroz integral", version: 1 };
+  let item = {
+    id: materializedItemId,
+    workspace_id: scope.workspaceId,
+    product_id: productId,
+    name: "Arroz",
+    source: "automatic" as const,
+    quantity_milli: null,
+    effective_quantity_milli: "10",
+    unit: "unit" as const,
+    unit_label: null,
+    note: null,
+    purchased: false,
+    purchased_at: null,
+    last_changed_by: scope.actorId,
+    version: 0,
+  };
+  const client = {
+    async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM membership")) {
+        return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM workspace")) {
+        return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
+        return { rows: [currentProduct as T], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE stock_product")) {
+        return { rows: [updatedProduct as T], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE shopping_item i") && sql.includes("SET product_id = p.id")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("UPDATE shopping_item i") && sql.includes("SET name = p.name")) {
+        item = { ...item, name: updatedProduct.name, version: updatedProduct.version };
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO shopping_item")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH visible_items")) {
+        return { rows: [item as T], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  return {
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+  };
+}
+
 describe("StockService membership revalidation", () => {
   it("locks and checks the current membership even for a read unit of work", async () => {
     const harness = poolFor({ role: "viewer" });
@@ -378,6 +505,37 @@ describe("StockService membership revalidation", () => {
     expect(
       harness.statements.filter((sql) => /INSERT INTO shopping_item_event/i.test(sql)),
     ).toEqual([]);
+  });
+
+  it("rejects a product rename that would collide with an active free item", async () => {
+    const harness = productRenameCollisionPool();
+    const service = new StockService(harness.pool as never);
+
+    await expect(
+      service.updateProduct(scope, productId, { name: "Arroz livre", unit: "unit" }, 0),
+    ).rejects.toBeInstanceOf(StockConflictError);
+    expect(harness.statements.some((sql) => /UPDATE stock_product/i.test(sql))).toBe(false);
+  });
+
+  it("keeps an active automatic row aligned with the edited product", async () => {
+    const harness = productRenameSyncPool();
+    const service = new StockService(harness.pool as never);
+
+    await service.updateProduct(scope, productId, { name: "Arroz integral", unit: "unit" }, 0);
+    const items = await service.listShoppingItems(scope);
+
+    expect(items[0]).toMatchObject({
+      id: materializedItemId,
+      name: "Arroz integral",
+      productId,
+      source: "automatic",
+      version: 1,
+    });
+    expect(
+      harness.statements.some((sql) =>
+        /SET name = p\.name, name_normalized = p\.name_normalized/i.test(sql),
+      ),
+    ).toBe(true);
   });
 
   it("derives, purchases, suppresses, and releases an automatic item across reads and movement", async () => {

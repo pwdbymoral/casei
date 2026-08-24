@@ -313,6 +313,24 @@ export class StockService {
       async ({ client }) => {
         const current = await lockProduct(client, scope, productId);
         assertExpectedVersion(current.version, expectedVersion);
+        if (normalizeProductName(current.name).key !== normalized.key) {
+          const freeCollision = await client.query<{ id: string }>(
+            `SELECT id
+               FROM shopping_item
+              WHERE workspace_id = $1
+                AND name_normalized = $2
+                AND purchased = false
+                AND source = 'free'
+              LIMIT 1
+              FOR UPDATE`,
+            [scope.workspaceId, normalized.key],
+          );
+          if (freeCollision.rowCount) {
+            throw new StockConflictError(
+              "O novo nome já está em um item livre da lista; conclua ou remova esse item antes de renomear o produto.",
+            );
+          }
+        }
         if (current.unit !== values.unit) {
           const movement = await client.query<{ id: string }>(
             "SELECT id FROM stock_movement WHERE workspace_id = $1 AND product_id = $2 LIMIT 1",
@@ -1042,7 +1060,9 @@ async function syncAutomaticShoppingItems(
   );
   await client.query(
     `UPDATE shopping_item i
-        SET version = p.version, last_changed_by = $2, updated_at = now()
+        SET name = p.name, name_normalized = p.name_normalized,
+            unit = p.unit, unit_label = p.unit_label,
+            version = p.version, last_changed_by = $2, updated_at = now()
        FROM stock_product p
       WHERE i.workspace_id = $1 AND i.product_id = p.id AND p.workspace_id = $1
         AND i.product_id = $3 AND i.source = 'automatic' AND i.purchased = false
