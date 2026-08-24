@@ -10,8 +10,11 @@ import {
   ReceiptTextIcon,
   RefreshCwIcon,
   RotateCcwIcon,
+  SearchIcon,
+  XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MoneyInput } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
@@ -32,32 +35,32 @@ import { Input } from "@/components/ui/input";
 import {
   type CreditCard,
   canWriteFinance,
+  clearTransactionQueryParams,
+  createQuickCaptureTransactionInput,
   createRequestGuard,
+  createWorkspaceGenerationGuard,
   type FinanceAdapter,
   FinanceAdapterError,
   financeAdapterForEnvironment,
+  hasTransactionQueryFilters,
+  mergeTransactionPage,
   type Statement,
   type StatementItem,
+  shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
+  transactionAmountPrefix,
+  transactionKindLabel,
+  transactionQueryFromSearchParams,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
 
-function today(): string {
-  const date = new Date();
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
 function transactionLabel(transaction: Transaction): string {
   if (transaction.description.trim()) return transaction.description;
-  return transaction.kind === "income" ? "Receita sem descrição" : "Despesa sem descrição";
-}
-
-function transactionKindLabel(transaction: Transaction): string {
-  if (transaction.kind === "income") return "Receita";
-  if (transaction.cardId) return "Compra no cartão";
-  return "Despesa";
+  if (transaction.kind === "income") return "Receita sem descrição";
+  if (transaction.kind === "expense") return "Despesa sem descrição";
+  return transaction.kind === "transfer" ? "Transferência sem descrição" : "Ajuste sem descrição";
 }
 
 function statementLabel(statement: Statement): string {
@@ -73,6 +76,7 @@ type FinanceDashboardProps = {
   fixtureMode?: boolean;
   workspaceId: string;
   role: WorkspaceRole;
+  currency: string;
 };
 
 function FinanceDashboard({
@@ -80,11 +84,18 @@ function FinanceDashboard({
   fixtureMode = false,
   workspaceId,
   role,
+  currency,
 }: FinanceDashboardProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [adapter] = useState<FinanceAdapter>(
     () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [dataWorkspaceId, setDataWorkspaceId] = useState(workspaceId);
+  const [transactionsNextCursor, setTransactionsNextCursor] = useState<string | null>(null);
+  const [transactionsHasMore, setTransactionsHasMore] = useState(false);
+  const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null);
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
@@ -113,43 +124,160 @@ function FinanceDashboard({
     statement: Statement;
   } | null>(null);
   const [statementItemsRequest] = useState(createRequestGuard);
+  const [timelineRequest] = useState(createRequestGuard);
+  const [workspaceRequests] = useState(() => createWorkspaceGenerationGuard(workspaceId));
+  const [timelineSearch, setTimelineSearch] = useState("");
+  const [timelineFrom, setTimelineFrom] = useState("");
+  const [timelineTo, setTimelineTo] = useState("");
+  const [timelineState, setTimelineState] = useState<"" | Transaction["state"]>("");
+  const [timelineKind, setTimelineKind] = useState<"" | Transaction["kind"]>("");
+  const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
+  const [undoing, setUndoing] = useState(false);
+  const transactionCommandKey = useRef<string | null>(null);
+  const transactionReverseCommandKey = useRef<string | null>(null);
+  const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
 
-  const load = useCallback(async () => {
+  const timelineQuery = useMemo(
+    () => transactionQueryFromSearchParams(new URLSearchParams(searchParams.toString())),
+    [searchParams],
+  );
+
+  const hasTimelineFilters = hasTransactionQueryFilters(timelineQuery);
+
+  useEffect(() => {
+    setTimelineSearch(timelineQuery.search ?? "");
+    setTimelineFrom(timelineQuery.from ?? "");
+    setTimelineTo(timelineQuery.to ?? "");
+    setTimelineState(timelineQuery.state ?? "");
+    setTimelineKind(timelineQuery.kind ?? "");
+  }, [timelineQuery]);
+
+  useEffect(() => {
+    if (!undoableTransaction) return;
+    const timeout = window.setTimeout(() => setUndoableTransaction(null), 10_000);
+    return () => window.clearTimeout(timeout);
+  }, [undoableTransaction]);
+
+  useEffect(() => {
+    workspaceRequests.switchWorkspace(workspaceId);
+    timelineRequest.invalidate();
+    statementItemsRequest.invalidate();
+    // Clear every workspace-scoped value before the next workspace can render. The
+    // generation guard prevents late responses from repopulating this empty state.
+    setDataWorkspaceId(workspaceId);
+    setTransactions([]);
+    setTransactionsNextCursor(null);
+    setTransactionsHasMore(false);
+    setCards([]);
+    setStatements([]);
     setStatus("loading");
     setError(null);
+    setNotice(null);
+    setViewingTransaction(null);
     setViewingStatement(null);
     setStatementItems([]);
     setStatementItemsNextCursor(null);
     setStatementItemsHasMore(false);
-    try {
-      const [nextTransactions, nextCards, nextStatements] = await Promise.all([
-        adapter.listTransactions(workspaceId),
-        adapter.listCards(workspaceId),
-        adapter.listStatements(workspaceId),
-      ]);
-      setTransactions(nextTransactions);
-      setCards(nextCards);
-      setStatements(nextStatements);
-      setStatus("success");
-    } catch (cause) {
-      setStatus("error");
-      setError(cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.");
-    }
-  }, [adapter, workspaceId]);
+    setLoadingStatementItems(false);
+    setLoadingMoreStatementItems(false);
+    transactionCommandKey.current = null;
+    transactionReverseCommandKey.current = null;
+    setSaving(false);
+    setUndoing(false);
+    setSavingCard(false);
+    setBusyStatementId(null);
+    setPendingStatementAction(null);
+    setUndoableTransaction(null);
+  }, [statementItemsRequest, timelineRequest, workspaceId, workspaceRequests]);
+
+  // Effects run after a render. Until the switch effect above has cleared the
+  // old snapshot, keep it out of the new workspace's visible tree.
+  const workspaceDataReady = dataWorkspaceId === workspaceId;
+  const visibleTransactions = workspaceDataReady ? transactions : [];
+  const visibleCards = workspaceDataReady ? cards : [];
+  const visibleStatements = workspaceDataReady ? statements : [];
+  const visibleError = workspaceDataReady ? error : null;
+  const visibleNotice = workspaceDataReady ? notice : null;
+  const visibleStatus = workspaceDataReady ? status : "loading";
+  const visibleViewingTransaction = workspaceDataReady ? viewingTransaction : null;
+  const visibleViewingStatement = workspaceDataReady ? viewingStatement : null;
+  const visiblePendingStatementAction = workspaceDataReady ? pendingStatementAction : null;
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (transactionCommandWorkspace.current === workspaceId) return;
+    transactionCommandWorkspace.current = workspaceId;
+    transactionCommandKey.current = null;
+  }, [workspaceId]);
+
+  function updateTimelineQuery(values: {
+    search?: string;
+    from?: string;
+    to?: string;
+    state?: string;
+    kind?: string;
+    cursor?: string | null;
+  }) {
+    const params = new URLSearchParams(searchParams.toString());
+    for (const [key, value] of Object.entries(values)) {
+      if (value) params.set(key, value);
+      else params.delete(key);
+    }
+    if (!("cursor" in values)) params.delete("cursor");
+    const query = params.toString();
+    router.replace(`/app/finances${query ? `?${query}` : ""}`, { scroll: false });
+  }
+
+  const load = useCallback(
+    async (append = false) => {
+      const request = timelineRequest.begin();
+      const workspaceRequest = workspaceRequests.begin(workspaceId);
+      setStatus("loading");
+      setError(null);
+      setViewingStatement(null);
+      setStatementItems([]);
+      setStatementItemsNextCursor(null);
+      setStatementItemsHasMore(false);
+      try {
+        const [nextTransactions, nextCards, nextStatements] = await Promise.all([
+          adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
+          adapter.listCards(workspaceId),
+          adapter.listStatements(workspaceId),
+        ]);
+        if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
+          return;
+        setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
+        setTransactionsNextCursor(nextTransactions.nextCursor);
+        setTransactionsHasMore(nextTransactions.hasMore);
+        setCards(nextCards);
+        setStatements(nextStatements);
+        setStatus("success");
+      } catch (cause) {
+        if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
+          return;
+        setStatus("error");
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.",
+        );
+      }
+    },
+    [adapter, timelineQuery, timelineRequest, workspaceId, workspaceRequests],
+  );
+
+  useEffect(() => {
+    void load(Boolean(timelineQuery.cursor));
+  }, [load, timelineQuery.cursor]);
 
   const walletTotal = useMemo(
     () =>
-      transactions.reduce((total, transaction) => {
+      visibleTransactions.reduce((total, transaction) => {
         if (transaction.state !== "posted" || transaction.cardId) return total;
         const value = BigInt(transaction.amount.minor);
-        return total + (transaction.kind === "income" ? value : -value);
+        if (transaction.kind === "income") return total + value;
+        if (transaction.kind === "expense") return total - value;
+        return total;
       }, BigInt(0)),
-    [transactions],
+    [visibleTransactions],
   );
 
   async function handleTransactionSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -161,26 +289,87 @@ function FinanceDashboard({
     setSaving(true);
     setError(null);
     setNotice(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey = transactionCommandKey.current ?? `web-${crypto.randomUUID()}`;
+    transactionCommandKey.current = commandKey;
     try {
-      const created = await adapter.createTransaction(workspaceId, {
-        kind: transactionType,
-        amount: { currency: "BRL", minor: amount },
-        occurredOn: today(),
-        state: planned ? "planned" : "posted",
-        description,
-        cardId: transactionCardId || null,
-      });
-      setTransactions((current) => [created, ...current]);
+      const created = await adapter.createTransaction(
+        workspaceId,
+        createQuickCaptureTransactionInput({
+          kind: transactionType,
+          amountMinor: amount,
+          currency,
+          planned,
+          description,
+          cardId: transactionCardId,
+        }),
+        commandKey,
+      );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      transactionCommandKey.current = null;
       setAmount("0");
       setDescription("");
       setTransactionCardId("");
       setPlanned(false);
+      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
+      else await load(false);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice(planned ? "Compromisso salvo." : "Lançamento salvo.");
+      setUndoableTransaction(planned ? null : created);
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (!shouldRetryIdempotentCommand(cause)) transactionCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível salvar o lançamento.");
     } finally {
-      setSaving(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSaving(false);
     }
+  }
+
+  async function undoTransaction() {
+    if (!undoableTransaction || undoing) return;
+    setUndoing(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey = transactionReverseCommandKey.current ?? `web-reverse-${crypto.randomUUID()}`;
+    transactionReverseCommandKey.current = commandKey;
+    try {
+      await adapter.reverseTransaction(workspaceId, undoableTransaction, commandKey);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      transactionReverseCommandKey.current = null;
+      setUndoableTransaction(null);
+      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
+      else await load(false);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setNotice("Lançamento desfeito.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (!shouldRetryIdempotentCommand(cause)) transactionReverseCommandKey.current = null;
+      setError(cause instanceof Error ? cause.message : "Não foi possível desfazer o lançamento.");
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setUndoing(false);
+    }
+  }
+
+  function applyTimelineFilters(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    updateTimelineQuery({
+      search: timelineSearch.trim(),
+      from: timelineFrom,
+      to: timelineTo,
+      state: timelineState,
+      kind: timelineKind,
+    });
+  }
+
+  function clearTimelineFilters() {
+    setTimelineSearch("");
+    setTimelineFrom("");
+    setTimelineTo("");
+    setTimelineState("");
+    setTimelineKind("");
+    const params = clearTransactionQueryParams(new URLSearchParams(searchParams.toString()));
+    const query = params.toString();
+    router.replace(`/app/finances${query ? `?${query}` : ""}`, { scroll: false });
   }
 
   async function handleCardSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -188,20 +377,23 @@ function FinanceDashboard({
     if (savingCard || !cardName.trim()) return;
     setSavingCard(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const card = await adapter.createCard(workspaceId, {
         name: cardName.trim(),
         closingDay: Number(closingDay),
         dueDay: Number(dueDay),
       });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setCards((current) => [...current, card]);
       setCardName("");
       setShowCardForm(false);
       setNotice("Cartão cadastrado.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível cadastrar o cartão.");
     } finally {
-      setSavingCard(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCard(false);
     }
   }
 
@@ -209,11 +401,13 @@ function FinanceDashboard({
     if (busyStatementId) return;
     setBusyStatementId(statement.id);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const updated =
         type === "close"
           ? await adapter.closeStatement(workspaceId, statement)
           : await adapter.reopenStatement(workspaceId, statement);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setStatements((current) =>
         current.map((value) => (value.id === updated.id ? updated : value)),
       );
@@ -225,28 +419,32 @@ function FinanceDashboard({
       );
     } catch (cause) {
       if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setPendingStatementAction(null);
         await load();
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setNotice(
           "A fatura mudou enquanto você revisava. Recarregamos os dados; revise antes de tentar novamente.",
         );
         return;
       }
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(
         cause instanceof Error
           ? cause.message
           : `Não foi possível ${type === "close" ? "fechar" : "reabrir"} a fatura.`,
       );
     } finally {
-      setBusyStatementId(null);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
     }
   }
 
-  const viewingStatementId = viewingStatement?.id;
+  const viewingStatementId = visibleViewingStatement?.id;
 
   const loadStatementItems = useCallback(
     async (statementId: string, cursor: string | undefined, append: boolean) => {
       const request = statementItemsRequest.begin();
+      const workspaceRequest = workspaceRequests.begin(workspaceId);
       if (append) {
         setLoadingMoreStatementItems(true);
       } else {
@@ -261,18 +459,29 @@ function FinanceDashboard({
           cursor,
           limit: 50,
         });
-        if (!statementItemsRequest.isCurrent(request)) return;
+        if (
+          !statementItemsRequest.isCurrent(request) ||
+          !workspaceRequests.isCurrent(workspaceRequest)
+        )
+          return;
         setStatementItems((current) => (append ? [...current, ...page.items] : page.items));
         setStatementItemsNextCursor(page.nextCursor);
         setStatementItemsHasMore(page.hasMore);
       } catch (cause) {
-        if (!statementItemsRequest.isCurrent(request)) return;
+        if (
+          !statementItemsRequest.isCurrent(request) ||
+          !workspaceRequests.isCurrent(workspaceRequest)
+        )
+          return;
         setError(
           cause instanceof Error ? cause.message : "Não foi possível carregar a composição.",
         );
         if (!append) setViewingStatement(null);
       } finally {
-        if (statementItemsRequest.isCurrent(request)) {
+        if (
+          statementItemsRequest.isCurrent(request) &&
+          workspaceRequests.isCurrent(workspaceRequest)
+        ) {
           if (append) {
             setLoadingMoreStatementItems(false);
           } else {
@@ -281,7 +490,7 @@ function FinanceDashboard({
         }
       }
     },
-    [adapter, statementItemsRequest, workspaceId],
+    [adapter, statementItemsRequest, workspaceId, workspaceRequests],
   );
 
   useEffect(() => {
@@ -302,14 +511,18 @@ function FinanceDashboard({
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
     setBusyStatementId(statement.id);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       await adapter.payStatement(workspaceId, statement);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       await load();
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice("Pagamento registrado na carteira.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível pagar a fatura.");
     } finally {
-      setBusyStatementId(null);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
     }
   }
 
@@ -323,24 +536,41 @@ function FinanceDashboard({
             Registre o essencial agora. Faturas, parcelas e compromissos ficam no mesmo lugar.
           </p>
         </div>
-        <Button variant="outline" onClick={() => void load()} disabled={status === "loading"}>
+        <Button
+          variant="outline"
+          onClick={() => void load()}
+          disabled={visibleStatus === "loading"}
+        >
           <RefreshCwIcon aria-hidden="true" /> Atualizar
         </Button>
       </header>
 
-      {notice ? (
+      {visibleNotice ? (
         <Alert role="status">
           <CheckIcon aria-hidden="true" />
-          <AlertTitle>{notice}</AlertTitle>
+          <AlertTitle>{visibleNotice}</AlertTitle>
           <AlertDescription>
-            Você pode continuar registrando ou revisar a linha do tempo abaixo.
+            <span className="flex flex-wrap items-center gap-3">
+              <span>Você pode continuar registrando ou revisar a linha do tempo abaixo.</span>
+              {undoableTransaction ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void undoTransaction()}
+                  disabled={undoing || !writeAccess}
+                >
+                  {undoing ? "Desfazendo…" : "Desfazer"}
+                </Button>
+              ) : null}
+            </span>
           </AlertDescription>
         </Alert>
       ) : null}
-      {error ? (
+      {visibleError ? (
         <Alert variant="destructive" role="alert">
           <AlertTitle>Não foi possível concluir</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{visibleError}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -348,14 +578,14 @@ function FinanceDashboard({
         <Card className="bg-primary text-primary-foreground">
           <CardHeader>
             <CardDescription className="text-primary-foreground/70">
-              Saldo registrado
+              Saldo dos lançamentos carregados
             </CardDescription>
             <CardTitle className="text-3xl font-semibold tracking-tight">
-              {formatMoneyMinor(walletTotal.toString())}
+              {formatMoneyMinor(walletTotal.toString(), currency)}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-primary-foreground/80">
-            Somente lançamentos realizados na carteira.
+            A linha do tempo é paginada; aplique filtros ou carregue mais para revisar os dados.
           </CardContent>
         </Card>
         <Card>
@@ -371,7 +601,7 @@ function FinanceDashboard({
           <CardHeader>
             <CardDescription>Cartões ativos</CardDescription>
             <CardTitle className="text-3xl font-semibold">
-              {cards.filter((card) => !card.archived).length}
+              {visibleCards.filter((card) => !card.archived).length}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
@@ -402,9 +632,11 @@ function FinanceDashboard({
                   id="transaction-kind"
                   className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm"
                   value={transactionType}
-                  onChange={(event) =>
-                    setTransactionType(event.target.value as "expense" | "income")
-                  }
+                  onChange={(event) => {
+                    const nextType = event.target.value as "expense" | "income";
+                    setTransactionType(nextType);
+                    if (nextType === "income") setTransactionCardId("");
+                  }}
                 >
                   <option value="expense">Despesa</option>
                   <option value="income">Receita</option>
@@ -420,7 +652,7 @@ function FinanceDashboard({
                   onChange={(event) => setTransactionCardId(event.target.value)}
                 >
                   <option value="">Carteira</option>
-                  {cards
+                  {visibleCards
                     .filter((card) => !card.archived)
                     .map((card) => (
                       <option key={card.id} value={card.id}>
@@ -429,18 +661,25 @@ function FinanceDashboard({
                     ))}
                 </select>
               </Field>
-              <MoneyInput value={amount} onChange={setAmount} label="Valor" />
-              <Field>
-                <FieldLabel htmlFor="transaction-description">Descrição (opcional)</FieldLabel>
-                <Input
-                  id="transaction-description"
-                  value={description}
-                  onChange={(event) => setDescription(event.target.value)}
-                  placeholder="Ex.: mercado"
-                  maxLength={500}
-                />
-                <FieldDescription>Você pode detalhar depois.</FieldDescription>
-              </Field>
+              <MoneyInput value={amount} onChange={setAmount} label="Valor" currency={currency} />
+              <details className="rounded-lg border border-dashed px-3 py-2 md:col-span-2">
+                <summary className="cursor-pointer text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                  Mais detalhes
+                </summary>
+                <div className="pt-3">
+                  <Field>
+                    <FieldLabel htmlFor="transaction-description">Descrição (opcional)</FieldLabel>
+                    <Input
+                      id="transaction-description"
+                      value={description}
+                      onChange={(event) => setDescription(event.target.value)}
+                      placeholder="Ex.: mercado"
+                      maxLength={500}
+                    />
+                    <FieldDescription>Você pode detalhar depois.</FieldDescription>
+                  </Field>
+                </div>
+              </details>
               <div className="flex flex-col gap-2">
                 <label className="flex min-h-8 items-center gap-2 text-sm">
                   <input
@@ -468,44 +707,163 @@ function FinanceDashboard({
         <Card>
           <CardHeader>
             <CardTitle>Linha do tempo</CardTitle>
-            <CardDescription>Entradas, saídas e compromissos do espaço.</CardDescription>
+            <CardDescription>
+              Entradas, saídas e compromissos do espaço. Filtros ficam salvos neste endereço.
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            {status === "loading" ? (
+            <form
+              className="mb-5 grid gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-2 lg:grid-cols-3"
+              onSubmit={applyTimelineFilters}
+              aria-label="Filtrar linha do tempo"
+            >
+              <Field className="sm:col-span-2 lg:col-span-3">
+                <FieldLabel htmlFor="timeline-search">Buscar por descrição</FieldLabel>
+                <div className="relative">
+                  <SearchIcon
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                  />
+                  <Input
+                    id="timeline-search"
+                    value={timelineSearch}
+                    onChange={(event) => setTimelineSearch(event.target.value)}
+                    placeholder="Ex.: mercado"
+                    className="pl-9"
+                    maxLength={100}
+                  />
+                </div>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-from">De</FieldLabel>
+                <Input
+                  id="timeline-from"
+                  type="date"
+                  value={timelineFrom}
+                  onChange={(event) => setTimelineFrom(event.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-to">Até</FieldLabel>
+                <Input
+                  id="timeline-to"
+                  type="date"
+                  value={timelineTo}
+                  onChange={(event) => setTimelineTo(event.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-state">Estado</FieldLabel>
+                <select
+                  id="timeline-state"
+                  className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={timelineState}
+                  onChange={(event) =>
+                    setTimelineState(event.target.value as "" | Transaction["state"])
+                  }
+                >
+                  <option value="">Todos</option>
+                  <option value="posted">Realizadas</option>
+                  <option value="planned">Planejadas</option>
+                  <option value="partially_settled">Parciais</option>
+                  <option value="canceled">Canceladas</option>
+                </select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-kind">Tipo</FieldLabel>
+                <select
+                  id="timeline-kind"
+                  className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={timelineKind}
+                  onChange={(event) =>
+                    setTimelineKind(event.target.value as "" | Transaction["kind"])
+                  }
+                >
+                  <option value="">Todos</option>
+                  <option value="expense">Despesas</option>
+                  <option value="income">Receitas</option>
+                  <option value="transfer">Transferências</option>
+                  <option value="adjustment">Ajustes</option>
+                </select>
+              </Field>
+              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
+                <Button type="submit" size="sm">
+                  <SearchIcon aria-hidden="true" /> Aplicar filtros
+                </Button>
+                {hasTimelineFilters ? (
+                  <Button type="button" size="sm" variant="ghost" onClick={clearTimelineFilters}>
+                    <XIcon aria-hidden="true" /> Limpar
+                  </Button>
+                ) : null}
+              </div>
+            </form>
+            {visibleStatus === "loading" ? (
               <p role="status" className="text-sm text-muted-foreground">
                 Carregando lançamentos…
               </p>
-            ) : transactions.length === 0 ? (
+            ) : visibleTransactions.length === 0 ? (
               <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                Nenhum lançamento ainda. Comece pelo valor acima.
+                {hasTimelineFilters
+                  ? "Nenhum lançamento corresponde aos filtros. Tente limpar ou ampliar o período."
+                  : "Nenhum lançamento ainda. Comece pelo valor acima."}
               </p>
             ) : (
-              <ul className="divide-y">
-                {transactions.map((transaction) => (
-                  <li
-                    key={transaction.id}
-                    className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{transactionLabel(transaction)}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {transactionKindLabel(transaction)} · {transaction.occurredOn} ·{" "}
-                        {transaction.state === "planned" ? "Planejada" : "Realizada"}
-                      </p>
-                    </div>
-                    <span
-                      className={
-                        transaction.kind === "income"
-                          ? "font-semibold text-emerald-700"
-                          : "font-semibold text-foreground"
-                      }
+              <>
+                <ul className="divide-y">
+                  {visibleTransactions.map((transaction) => (
+                    <li
+                      key={transaction.id}
+                      className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
                     >
-                      {transaction.kind === "income" ? "+" : "−"}
-                      {formatMoneyMinor(transaction.amount.minor)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{transactionLabel(transaction)}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {transactionKindLabel(transaction)} · {transaction.occurredOn} ·{" "}
+                          {transaction.state === "planned"
+                            ? "Planejada"
+                            : transaction.state === "canceled"
+                              ? "Cancelada"
+                              : transaction.state === "partially_settled"
+                                ? "Parcial"
+                                : "Realizada"}
+                        </p>
+                      </div>
+                      <span
+                        className={
+                          transaction.state === "canceled"
+                            ? "font-semibold text-muted-foreground line-through"
+                            : transaction.kind === "income"
+                              ? "font-semibold text-emerald-700"
+                              : "font-semibold text-foreground"
+                        }
+                      >
+                        {transactionAmountPrefix(transaction.kind)}
+                        {formatMoneyMinor(transaction.amount.minor, transaction.amount.currency)}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setViewingTransaction(transaction)}
+                        aria-label={`Ver detalhes de ${transactionLabel(transaction)}`}
+                      >
+                        Detalhes
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+                {transactionsHasMore ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-4"
+                    onClick={() => updateTimelineQuery({ cursor: transactionsNextCursor })}
+                    disabled={!transactionsNextCursor}
+                  >
+                    Carregar mais lançamentos
+                  </Button>
+                ) : null}
+              </>
             )}
           </CardContent>
         </Card>
@@ -578,10 +936,10 @@ function FinanceDashboard({
                 </Button>
               </form>
             ) : null}
-            {cards.length === 0 ? (
+            {visibleCards.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nenhum cartão cadastrado.</p>
             ) : null}
-            {cards.map((card) => (
+            {visibleCards.map((card) => (
               <div key={card.id} className="rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-medium">{card.name}</p>
@@ -589,7 +947,7 @@ function FinanceDashboard({
                     Fecha {card.closingDay} · vence {card.dueDay}
                   </span>
                 </div>
-                {statements
+                {visibleStatements
                   .filter((statement) => statement.cardId === card.id)
                   .map((statement) => (
                     <div
@@ -604,7 +962,10 @@ function FinanceDashboard({
                       </div>
                       <div className="text-right">
                         <p className="font-semibold">
-                          {formatMoneyMinor(statement.openAmount.minor)}
+                          {formatMoneyMinor(
+                            statement.openAmount.minor,
+                            statement.openAmount.currency,
+                          )}
                         </p>
                         <div className="mt-1 flex gap-2">
                           <Button
@@ -693,7 +1054,70 @@ function FinanceDashboard({
       </Card>
 
       <Dialog
-        open={viewingStatement !== null}
+        open={visibleViewingTransaction !== null}
+        onOpenChange={(open) => {
+          if (!open) setViewingTransaction(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Detalhes do lançamento</DialogTitle>
+            <DialogDescription>
+              Revise a origem, o estado e a versão antes de corrigir este registro.
+            </DialogDescription>
+          </DialogHeader>
+          {visibleViewingTransaction ? (
+            <dl className="grid gap-3 rounded-lg bg-muted/50 p-4 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-muted-foreground">Descrição</dt>
+                <dd className="mt-1 font-medium">{transactionLabel(visibleViewingTransaction)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Tipo</dt>
+                <dd className="mt-1 font-medium">
+                  {transactionKindLabel(visibleViewingTransaction)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Valor</dt>
+                <dd className="mt-1 font-medium">
+                  {transactionAmountPrefix(visibleViewingTransaction.kind)}
+                  {formatMoneyMinor(
+                    visibleViewingTransaction.amount.minor,
+                    visibleViewingTransaction.amount.currency,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Estado</dt>
+                <dd className="mt-1 font-medium">
+                  {visibleViewingTransaction.state === "posted"
+                    ? "Realizada"
+                    : visibleViewingTransaction.state === "planned"
+                      ? "Planejada"
+                      : visibleViewingTransaction.state === "partially_settled"
+                        ? "Parcial"
+                        : "Cancelada"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Data do fato</dt>
+                <dd className="mt-1 font-medium">{visibleViewingTransaction.occurredOn}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Versão auditável</dt>
+                <dd className="mt-1 font-medium">v{visibleViewingTransaction.version}</dd>
+              </div>
+            </dl>
+          ) : null}
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={visibleViewingStatement !== null}
         onOpenChange={(open) => {
           if (!open) setViewingStatement(null);
         }}
@@ -705,25 +1129,34 @@ function FinanceDashboard({
               Compras aumentam o total. Pagamentos reduzem apenas o valor em aberto.
             </DialogDescription>
           </DialogHeader>
-          {viewingStatement ? (
+          {visibleViewingStatement ? (
             <div className="flex flex-col gap-4">
               <dl className="grid grid-cols-3 gap-3 rounded-lg bg-muted/50 p-3 text-sm">
                 <div>
                   <dt className="text-muted-foreground">Total</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.total.minor)}
+                    {formatMoneyMinor(
+                      visibleViewingStatement.total.minor,
+                      visibleViewingStatement.total.currency,
+                    )}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Pago</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.paid.minor)}
+                    {formatMoneyMinor(
+                      visibleViewingStatement.paid.minor,
+                      visibleViewingStatement.paid.currency,
+                    )}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Em aberto</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.openAmount.minor)}
+                    {formatMoneyMinor(
+                      visibleViewingStatement.openAmount.minor,
+                      visibleViewingStatement.openAmount.currency,
+                    )}
                   </dd>
                 </div>
               </dl>
@@ -763,7 +1196,7 @@ function FinanceDashboard({
                           }
                         >
                           {statementItemAmountPrefix(item)}
-                          {formatMoneyMinor(item.amount.minor)}
+                          {formatMoneyMinor(item.amount.minor, item.amount.currency)}
                         </span>
                       </li>
                     );
@@ -794,7 +1227,7 @@ function FinanceDashboard({
       </Dialog>
 
       <Dialog
-        open={pendingStatementAction !== null}
+        open={visiblePendingStatementAction !== null}
         onOpenChange={(open) => {
           if (!open && busyStatementId === null) setPendingStatementAction(null);
         }}
@@ -802,18 +1235,26 @@ function FinanceDashboard({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {pendingStatementAction?.type === "reopen" ? "Reabrir fatura?" : "Fechar fatura?"}
+              {visiblePendingStatementAction?.type === "reopen"
+                ? "Reabrir fatura?"
+                : "Fechar fatura?"}
             </DialogTitle>
             <DialogDescription>
-              {pendingStatementAction?.type === "reopen"
+              {visiblePendingStatementAction?.type === "reopen"
                 ? "Esta fatura voltará a aceitar lançamentos. A reabertura é bloqueada quando já existem pagamentos."
                 : "O período e o total ficam congelados. Novas compras serão direcionadas para o próximo ciclo."}
             </DialogDescription>
           </DialogHeader>
-          {pendingStatementAction ? (
+          {visiblePendingStatementAction ? (
             <p className="rounded-lg bg-muted/50 p-3 text-sm">
-              Fatura com vencimento em {pendingStatementAction.statement.dueOn} · valor em aberto{" "}
-              <strong>{formatMoneyMinor(pendingStatementAction.statement.openAmount.minor)}</strong>
+              Fatura com vencimento em {visiblePendingStatementAction.statement.dueOn} · valor em
+              aberto{" "}
+              <strong>
+                {formatMoneyMinor(
+                  visiblePendingStatementAction.statement.openAmount.minor,
+                  visiblePendingStatementAction.statement.openAmount.currency,
+                )}
+              </strong>
             </p>
           ) : null}
           <DialogFooter>
@@ -823,17 +1264,17 @@ function FinanceDashboard({
             <Button
               disabled={busyStatementId !== null}
               onClick={() => {
-                if (pendingStatementAction) {
+                if (visiblePendingStatementAction) {
                   void runStatementAction(
-                    pendingStatementAction.type,
-                    pendingStatementAction.statement,
+                    visiblePendingStatementAction.type,
+                    visiblePendingStatementAction.statement,
                   );
                 }
               }}
             >
               {busyStatementId
                 ? "Salvando…"
-                : pendingStatementAction?.type === "reopen"
+                : visiblePendingStatementAction?.type === "reopen"
                   ? "Reabrir fatura"
                   : "Fechar fatura"}
             </Button>
@@ -845,6 +1286,13 @@ function FinanceDashboard({
 }
 
 export default function FinancesPage() {
-  const { workspaceId, role, fixtureMode } = useAuthenticatedWorkspace();
-  return <FinanceDashboard workspaceId={workspaceId} role={role} fixtureMode={fixtureMode} />;
+  const { workspaceId, role, fixtureMode, currency } = useAuthenticatedWorkspace();
+  return (
+    <FinanceDashboard
+      workspaceId={workspaceId}
+      role={role}
+      fixtureMode={fixtureMode}
+      currency={currency}
+    />
+  );
 }

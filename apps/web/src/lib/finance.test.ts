@@ -2,11 +2,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   canWriteFinance,
+  clearTransactionQueryParams,
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
+  createQuickCaptureTransactionInput,
   createRequestGuard,
+  createWorkspaceGenerationGuard,
+  FinanceAdapterError,
   financeAdapterForEnvironment,
+  hasTransactionQueryFilters,
+  mergeTransactionPage,
+  shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
+  type Transaction,
+  transactionAmountPrefix,
+  transactionCardIdForKind,
+  transactionKindLabel,
+  transactionQueryFromSearchParams,
   unauthenticatedFinanceAdapter,
 } from "./finance";
 
@@ -61,6 +73,7 @@ describe("finance adapter", () => {
         kind: "expense",
         amount: { currency: "BRL", minor: "1200" },
       });
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("occurredOn");
       return new Response(
         JSON.stringify({
           id: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a299",
@@ -91,15 +104,272 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("reuses the logical idempotency key after a network failure", async () => {
+    let attempts = 0;
+    const keys: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempts += 1;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (attempts === 1) throw new TypeError("network interrupted");
+      return Response.json(
+        {
+          id: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a299",
+          workspaceId: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201",
+          kind: "expense",
+          state: "posted",
+          amount: { currency: "USD", minor: "1200" },
+          settledAmount: { currency: "USD", minor: "1200" },
+          occurredOn: "2026-08-23",
+          dueOn: null,
+          postedOn: "2026-08-23T12:00:00.000Z",
+          description: "Coffee",
+          categoryId: null,
+          cardId: null,
+          statementId: null,
+          version: 0,
+        },
+        { status: 201 },
+      );
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const input = { kind: "expense" as const, amount: { currency: "USD", minor: "1200" } };
+
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-001"),
+    ).rejects.toThrow("network interrupted");
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-001"),
+    ).resolves.toMatchObject({
+      amount: { currency: "USD" },
+    });
+    expect(keys).toEqual(["logical-command-001", "logical-command-001"]);
+  });
+
+  it("keeps the same key available for a server-error retry", async () => {
+    let attempts = 0;
+    const keys: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempts += 1;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (attempts === 1)
+        return Response.json({ error: { message: "temporarily unavailable" } }, { status: 503 });
+      return Response.json({ id: "transaction-after-retry" }, { status: 201 });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const input = { kind: "expense" as const, amount: { currency: "BRL", minor: "100" } };
+
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-002"),
+    ).rejects.toMatchObject({
+      status: 503,
+    });
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-002"),
+    ).resolves.toMatchObject({
+      id: "transaction-after-retry",
+    });
+    expect(keys).toEqual(["logical-command-002", "logical-command-002"]);
+  });
+
+  it("sends an explicit idempotency key when reversing a transaction", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("reverse-command-001");
+      return Response.json({ id: "transaction-reversed", state: "canceled" });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const transaction = { id: "transaction-1", version: 2 } as Transaction;
+
+    await expect(
+      adapter.reverseTransaction("workspace", transaction, "reverse-command-001"),
+    ).resolves.toMatchObject({ id: "transaction-reversed", state: "canceled" });
+  });
+
+  it("serializes timeline filters and cursor in the API request", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      expect(input).toBe(
+        "/v1/workspaces/workspace/transactions?cursor=cursor-1&limit=25&search=mercado&from=2026-08-01&to=2026-08-31&state=posted&kind=expense&cardId=card-1",
+      );
+      return Response.json({ items: [], page: { nextCursor: null, hasMore: false } });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+
+    await expect(
+      adapter.listTransactions("workspace", {
+        cursor: "cursor-1",
+        limit: 25,
+        search: "mercado",
+        from: "2026-08-01",
+        to: "2026-08-31",
+        state: "posted",
+        kind: "expense",
+        cardId: "card-1",
+      }),
+    ).resolves.toEqual({ items: [], nextCursor: null, hasMore: false });
+  });
+
+  it("keeps timeline filters in URL parameters and appends the next page", () => {
+    const query = transactionQueryFromSearchParams(
+      new URLSearchParams(
+        "search=mercado&from=2026-08-01&state=posted&cursor=cursor-2&cardId=card-1",
+      ),
+    );
+    expect(query).toEqual({
+      search: "mercado",
+      from: "2026-08-01",
+      state: "posted",
+      cursor: "cursor-2",
+      cardId: "card-1",
+    });
+    expect(hasTransactionQueryFilters({ cardId: "card-1" })).toBe(true);
+
+    const first = { id: "first" } as never;
+    const second = { id: "second" } as never;
+    expect(
+      mergeTransactionPage([first], { items: [second], nextCursor: null, hasMore: false }, true),
+    ).toEqual([first, second]);
+    expect(
+      mergeTransactionPage([first], { items: [second], nextCursor: null, hasMore: false }, false),
+    ).toEqual([second]);
+    expect(shouldRetryIdempotentCommand(new TypeError("network"))).toBe(true);
+    expect(shouldRetryIdempotentCommand(new FinanceAdapterError("server", 500))).toBe(true);
+    expect(shouldRetryIdempotentCommand(new FinanceAdapterError("invalid", 422))).toBe(false);
+  });
+
+  it("clears every timeline filter, including a card filter, without touching other URL state", () => {
+    const params = clearTransactionQueryParams(
+      new URLSearchParams("tab=timeline&search=mercado&cardId=card-1&cursor=cursor-2"),
+    );
+
+    expect(params.toString()).toBe("tab=timeline");
+    expect(params.has("cardId")).toBe(false);
+  });
+
   it("keeps fixture writes in the same adapter for quick capture", async () => {
     const adapter = createFixtureFinanceAdapter();
     const before = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
-    await adapter.createTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", {
+    const created = await adapter.createTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", {
       kind: "expense",
       amount: { currency: "BRL", minor: "2500" },
     });
     const after = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
-    expect(after).toHaveLength(before.length + 1);
+    expect(after.items).toHaveLength(before.items.length + 1);
+    await expect(
+      adapter.reverseTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", created),
+    ).resolves.toMatchObject({ id: created.id, state: "canceled" });
+  });
+
+  it("reuses an explicit reverse key and updates the fixture invoice totals", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const cardId = "019b5d9e-3c12-7a10-8d47-7b5b5dd7a210";
+    const created = await adapter.createTransaction(
+      workspaceId,
+      {
+        kind: "expense",
+        amount: { currency: "BRL", minor: "2500" },
+        cardId,
+      },
+      "fixture-card-purchase",
+    );
+    await expect(adapter.listStatements(workspaceId, cardId)).resolves.toMatchObject([
+      { total: { minor: "2500" }, openAmount: { minor: "2500" } },
+    ]);
+
+    const reversed = await adapter.reverseTransaction(workspaceId, created, "fixture-reverse-1");
+    const replay = await adapter.reverseTransaction(workspaceId, created, "fixture-reverse-1");
+    expect(replay).toEqual(reversed);
+    expect(reversed.state).toBe("canceled");
+    await expect(adapter.listStatements(workspaceId, cardId)).resolves.toMatchObject([
+      { total: { minor: "0" }, openAmount: { minor: "0" } },
+    ]);
+  });
+
+  it("keeps the new workspace empty when an old response arrives after a failed load", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    let resolveOldResponse!: (items: string[]) => void;
+    const oldResponse = new Promise<string[]>((resolve) => {
+      resolveOldResponse = resolve;
+    });
+    const oldRequest = guard.begin("workspace-a");
+    const visibleItems: string[] = [];
+
+    guard.switchWorkspace("workspace-b");
+    const newRequest = guard.begin("workspace-b");
+    try {
+      throw new Error("new workspace unavailable");
+    } catch {
+      if (guard.isCurrent(newRequest)) visibleItems.length = 0;
+    }
+    resolveOldResponse(["old-workspace-item"]);
+    const oldItems = await oldResponse;
+    if (guard.isCurrent(oldRequest)) visibleItems.push(...oldItems);
+
+    expect(visibleItems).toEqual([]);
+    expect(guard.isCurrent(oldRequest)).toBe(false);
+  });
+
+  it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";
+    const secondWorkspace = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const input = createQuickCaptureTransactionInput({
+      kind: "income",
+      amountMinor: "1200",
+      currency: "USD",
+      planned: false,
+      description: "Freela",
+      cardId: "",
+    });
+
+    const created = await adapter.createTransaction(firstWorkspace, input, "fixture-command-1");
+    const replay = await adapter.createTransaction(firstWorkspace, input, "fixture-command-1");
+    expect(replay).toEqual(created);
+    await expect(
+      adapter.createTransaction(
+        firstWorkspace,
+        { ...input, amount: { ...input.amount, minor: "1300" } },
+        "fixture-command-1",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(adapter.listTransactions(firstWorkspace)).resolves.toMatchObject({
+      items: [expect.objectContaining({ workspaceId: firstWorkspace })],
+    });
+    await expect(adapter.listTransactions(secondWorkspace)).resolves.toMatchObject({
+      items: [],
+    });
+  });
+
+  it("builds USD capture input and never carries a card into income", () => {
+    expect(
+      createQuickCaptureTransactionInput({
+        kind: "income",
+        amountMinor: "1200",
+        currency: "USD",
+        planned: false,
+        description: "Freela",
+        cardId: "card-1",
+      }),
+    ).toEqual({
+      kind: "income",
+      amount: { currency: "USD", minor: "1200" },
+      state: "posted",
+      description: "Freela",
+      cardId: null,
+    });
+    expect(transactionCardIdForKind("income", "card-1")).toBeNull();
+    expect(transactionCardIdForKind("expense", "card-1")).toBe("card-1");
+  });
+
+  it("labels every timeline kind and uses a non-expense sign for transfers and adjustments", () => {
+    expect(transactionKindLabel({ kind: "income", cardId: null })).toBe("Receita");
+    expect(transactionKindLabel({ kind: "expense", cardId: null })).toBe("Despesa");
+    expect(transactionKindLabel({ kind: "expense", cardId: "card-1" })).toBe("Compra no cartão");
+    expect(transactionKindLabel({ kind: "transfer", cardId: null })).toBe("Transferência");
+    expect(transactionKindLabel({ kind: "adjustment", cardId: null })).toBe("Ajuste");
+    expect(transactionAmountPrefix("income")).toBe("+");
+    expect(transactionAmountPrefix("expense")).toBe("−");
+    expect(transactionAmountPrefix("transfer")).toBe("↔");
+    expect(transactionAmountPrefix("adjustment")).toBe("±");
   });
 
   it("keeps statement pagination metadata and loads a second page over fifty items", async () => {
@@ -227,6 +497,41 @@ describe("finance adapter", () => {
     expect(guard.isCurrent(second)).toBe(true);
     guard.invalidate();
     expect(guard.isCurrent(second)).toBe(false);
+  });
+
+  it("does not accept a stale timeline response after a newer request starts", async () => {
+    const guard = createRequestGuard();
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    const firstResponse = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondResponse = new Promise<void>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const firstRequest = guard.begin();
+    const firstAccepted = firstResponse.then(() => guard.isCurrent(firstRequest));
+    const secondRequest = guard.begin();
+    const secondAccepted = secondResponse.then(() => guard.isCurrent(secondRequest));
+
+    resolveFirst();
+    await expect(firstAccepted).resolves.toBe(false);
+    resolveSecond();
+    await expect(secondAccepted).resolves.toBe(true);
+  });
+
+  it("rejects a deferred create result after the workspace changes", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    let resolveCreate!: () => void;
+    const create = new Promise<void>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const request = guard.begin("workspace-a");
+
+    guard.switchWorkspace("workspace-b");
+    resolveCreate();
+
+    await expect(create.then(() => guard.isCurrent(request))).resolves.toBe(false);
   });
 
   it("does not give canceled composition items a misleading financial sign", () => {

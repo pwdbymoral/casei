@@ -8,6 +8,7 @@ export type WorkspaceSummary = {
   role: WorkspaceRole;
   locale: "pt-BR";
   timeZone: string;
+  currency: string;
   status: "active" | "deletion_pending" | "deactivated";
   version: number;
 };
@@ -137,15 +138,26 @@ async function workspaceRequest(): Promise<WorkspaceSession> {
   if (!response.ok)
     throw new WorkspaceSessionError("offline", "Não foi possível carregar seus espaços.");
   const body = (await response.json()) as Omit<WorkspaceSession, "activeWorkspaceId">;
-  return withStoredWorkspace({
-    ...body,
-    workspaces: body.workspaces.map((workspace) => ({
+  return withStoredWorkspace(normalizeWorkspaceSession(body));
+}
+
+export function normalizeWorkspaceSession(
+  body: Omit<WorkspaceSession, "activeWorkspaceId">,
+): WorkspaceSession {
+  const workspaces = body.workspaces.map((workspace) => {
+    if (!/^[A-Z]{3}$/.test(workspace.currency)) {
+      throw new WorkspaceSessionError(
+        "offline",
+        "A moeda do espaço não foi carregada. Atualize a sessão antes de registrar valores.",
+      );
+    }
+    return {
       ...workspace,
       status: workspace.status ?? "active",
       version: workspace.version ?? 0,
-    })),
-    activeWorkspaceId: null,
+    };
   });
+  return { ...body, workspaces, activeWorkspaceId: null };
 }
 
 /** Real browser adapter. It never fabricates a workspace when the API denies the session. */
@@ -321,6 +333,7 @@ const fixtureSession: WorkspaceSession = {
       role: "owner",
       locale: "pt-BR",
       timeZone: "America/Fortaleza",
+      currency: "BRL",
       status: "active",
       version: 0,
     },
@@ -330,6 +343,7 @@ const fixtureSession: WorkspaceSession = {
       role: "member",
       locale: "pt-BR",
       timeZone: "America/Sao_Paulo",
+      currency: "USD",
       status: "active",
       version: 0,
     },

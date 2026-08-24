@@ -68,6 +68,110 @@ export type StatementItemsQuery = {
   limit?: number;
 };
 
+export type TransactionPage = {
+  items: Transaction[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type TransactionQuery = {
+  cursor?: string | null;
+  limit?: number;
+  search?: string;
+  from?: string;
+  to?: string;
+  state?: Transaction["state"];
+  kind?: Transaction["kind"];
+  cardId?: string;
+};
+
+/** Keeps timeline URL parsing and pagination deterministic outside the page component. */
+export function transactionQueryFromSearchParams(params: URLSearchParams): TransactionQuery {
+  const value = (key: string) => params.get(key) || undefined;
+  return {
+    cursor: value("cursor"),
+    search: value("search"),
+    from: value("from"),
+    to: value("to"),
+    state: value("state") as Transaction["state"] | undefined,
+    kind: value("kind") as Transaction["kind"] | undefined,
+    cardId: value("cardId"),
+  };
+}
+
+/** Removes timeline filters and pagination while preserving unrelated URL state. */
+export function clearTransactionQueryParams(params: URLSearchParams): URLSearchParams {
+  const next = new URLSearchParams(params);
+  for (const key of ["search", "from", "to", "state", "kind", "cardId", "cursor"]) {
+    next.delete(key);
+  }
+  return next;
+}
+
+export function createQuickCaptureTransactionInput(input: {
+  kind: "income" | "expense";
+  amountMinor: string;
+  currency: string;
+  planned: boolean;
+  description: string;
+  cardId: string;
+}): CreateTransactionInput {
+  return {
+    kind: input.kind,
+    amount: { currency: input.currency, minor: input.amountMinor },
+    state: input.planned ? "planned" : "posted",
+    description: input.description,
+    cardId: transactionCardIdForKind(input.kind, input.cardId),
+  };
+}
+
+export function transactionCardIdForKind(
+  kind: "income" | "expense",
+  cardId: string,
+): string | null {
+  return kind === "expense" ? cardId || null : null;
+}
+
+export function transactionKindLabel(transaction: Pick<Transaction, "kind" | "cardId">): string {
+  if (transaction.kind === "income") return "Receita";
+  if (transaction.kind === "expense") {
+    return transaction.cardId ? "Compra no cartão" : "Despesa";
+  }
+  return transaction.kind === "transfer" ? "Transferência" : "Ajuste";
+}
+
+export function transactionAmountPrefix(kind: Transaction["kind"]): string {
+  if (kind === "income") return "+";
+  if (kind === "expense") return "−";
+  return kind === "transfer" ? "↔" : "±";
+}
+
+/** Network/5xx failures leave a logical command safe to retry with its same key. */
+export function shouldRetryIdempotentCommand(error: unknown): boolean {
+  if (!(error instanceof FinanceAdapterError)) return true;
+  return (
+    error.status === undefined ||
+    error.status === 408 ||
+    error.status === 425 ||
+    error.status === 429 ||
+    error.status >= 500
+  );
+}
+
+export function hasTransactionQueryFilters(query: TransactionQuery): boolean {
+  return Boolean(
+    query.search || query.from || query.to || query.state || query.kind || query.cardId,
+  );
+}
+
+export function mergeTransactionPage(
+  current: Transaction[],
+  page: TransactionPage,
+  append: boolean,
+): Transaction[] {
+  return append ? [...current, ...page.items] : page.items;
+}
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -89,8 +193,17 @@ export type CreateTransactionInput = {
 };
 
 export type FinanceAdapter = {
-  listTransactions(workspaceId: string): Promise<Transaction[]>;
-  createTransaction(workspaceId: string, input: CreateTransactionInput): Promise<Transaction>;
+  listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
+  createTransaction(
+    workspaceId: string,
+    input: CreateTransactionInput,
+    idempotencyKey?: string,
+  ): Promise<Transaction>;
+  reverseTransaction(
+    workspaceId: string,
+    transaction: Transaction,
+    idempotencyKey?: string,
+  ): Promise<Transaction>;
   listCategories(workspaceId: string): Promise<Category[]>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
   createCard(
@@ -165,6 +278,7 @@ const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> 
 export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   listTransactions: unavailableFinanceOperation,
   createTransaction: unavailableFinanceOperation,
+  reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
   listCards: unavailableFinanceOperation,
   createCard: unavailableFinanceOperation,
@@ -221,12 +335,38 @@ export function createHttpFinanceAdapter(
   const list = async <T>(path: string) => (await listPage<T>(path)).items;
 
   return {
-    listTransactions: (workspaceId) => list<Transaction>(`/workspaces/${workspaceId}/transactions`),
-    createTransaction: async (workspaceId, input) =>
+    listTransactions: (workspaceId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      if (query.search) params.set("search", query.search);
+      if (query.from) params.set("from", query.from);
+      if (query.to) params.set("to", query.to);
+      if (query.state) params.set("state", query.state);
+      if (query.kind) params.set("kind", query.kind);
+      if (query.cardId) params.set("cardId", query.cardId);
+      const search = params.toString();
+      return listPage<Transaction>(
+        `/workspaces/${workspaceId}/transactions${search ? `?${search}` : ""}`,
+      ).then((response) => ({
+        items: response.items,
+        nextCursor: response.page.nextCursor,
+        hasMore: response.page.hasMore,
+      }));
+    },
+    createTransaction: async (workspaceId, input, commandKey) =>
       call<Transaction>(`/workspaces/${workspaceId}/transactions`, {
         method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
+        headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
+      }),
+    reverseTransaction: (workspaceId, transaction, commandKey) =>
+      call<Transaction>(`/workspaces/${workspaceId}/transactions/${transaction.id}/reverse`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": commandKey ?? idempotencyKey(),
+          "If-Match": `"v${transaction.version}"`,
+        },
       }),
     listCategories: (workspaceId) => list<Category>(`/workspaces/${workspaceId}/categories`),
     listCards: (workspaceId) => list<CreditCard>(`/workspaces/${workspaceId}/cards`),
@@ -309,41 +449,128 @@ function fixtureId(seed: number): string {
 
 /** Local-only data makes the shell usable before AUTH-002 supplies a session API. */
 export function createFixtureFinanceAdapter(): FinanceAdapter {
-  const transactions: Transaction[] = [];
-  const cards: CreditCard[] = [
-    {
-      id: fixtureCardId,
-      workspaceId: fixtureWorkspaceId,
-      name: "Cartão principal",
-      closingDay: 10,
-      dueDay: 17,
-      holder: "Marina",
-      lastFour: "4242",
-      limit: { currency: "BRL", minor: "500000" },
-      archived: false,
-      version: 0,
-    },
-  ];
-  const statements: Statement[] = [
-    {
-      id: fixtureStatementId,
-      workspaceId: fixtureWorkspaceId,
-      cardId: fixtureCardId,
-      periodStart: "2026-08-11",
-      closingOn: "2026-09-10",
-      dueOn: "2026-09-17",
-      state: "open",
-      total: { currency: "BRL", minor: "0" },
-      paid: { currency: "BRL", minor: "0" },
-      openAmount: { currency: "BRL", minor: "0" },
-      version: 0,
-    },
-  ];
+  type FixtureWorkspaceState = {
+    currency: string | null;
+    transactions: Transaction[];
+    cards: CreditCard[];
+    statements: Statement[];
+    transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
+    reverseCommands: Map<
+      string,
+      { transactionId: string; fingerprint: string; transaction: Transaction }
+    >;
+  };
+  const createWorkspaceState = (
+    workspaceId: string,
+    currency: string | null,
+    withCard = false,
+  ): FixtureWorkspaceState => {
+    const cards: CreditCard[] = withCard
+      ? [
+          {
+            id: fixtureCardId,
+            workspaceId,
+            name: "Cartão principal",
+            closingDay: 10,
+            dueDay: 17,
+            holder: "Marina",
+            lastFour: "4242",
+            limit: { currency: currency ?? "USD", minor: "500000" },
+            archived: false,
+            version: 0,
+          },
+        ]
+      : [];
+    const statements: Statement[] = withCard
+      ? [
+          {
+            id: fixtureStatementId,
+            workspaceId,
+            cardId: fixtureCardId,
+            periodStart: "2026-08-11",
+            closingOn: "2026-09-10",
+            dueOn: "2026-09-17",
+            state: "open",
+            total: { currency: currency ?? "USD", minor: "0" },
+            paid: { currency: currency ?? "USD", minor: "0" },
+            openAmount: { currency: currency ?? "USD", minor: "0" },
+            version: 0,
+          },
+        ]
+      : [];
+    return {
+      currency,
+      transactions: [],
+      cards,
+      statements,
+      transactionCommands: new Map(),
+      reverseCommands: new Map(),
+    };
+  };
+  const workspaceStates = new Map<string, FixtureWorkspaceState>([
+    [fixtureWorkspaceId, createWorkspaceState(fixtureWorkspaceId, "BRL", true)],
+    [
+      "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202",
+      createWorkspaceState("019b5d9e-3c12-7a02-8d47-7b5b5dd7a202", "USD"),
+    ],
+  ]);
+  const stateFor = (workspaceId: string): FixtureWorkspaceState => {
+    const existing = workspaceStates.get(workspaceId);
+    if (existing) return existing;
+    const created = createWorkspaceState(workspaceId, null);
+    workspaceStates.set(workspaceId, created);
+    return created;
+  };
   return {
-    listTransactions: async () => [...transactions],
-    createTransaction: async (workspaceId, input) => {
+    listTransactions: async (workspaceId, query = {}) => {
+      const state = stateFor(workspaceId);
+      const filtered = state.transactions.filter((transaction) => {
+        if (
+          query.search &&
+          !transaction.description.toLowerCase().includes(query.search.toLowerCase())
+        )
+          return false;
+        if (query.from && transaction.occurredOn < query.from) return false;
+        if (query.to && transaction.occurredOn > query.to) return false;
+        if (query.state && transaction.state !== query.state) return false;
+        if (query.kind && transaction.kind !== query.kind) return false;
+        if (query.cardId && transaction.cardId !== query.cardId) return false;
+        return true;
+      });
+      const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+      const offset = query.cursor?.startsWith("fixture:")
+        ? Number.parseInt(query.cursor.slice("fixture:".length), 10)
+        : 0;
+      const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+      const items = filtered.slice(start, start + limit);
+      const hasMore = start + limit < filtered.length;
+      return {
+        items,
+        nextCursor: hasMore ? `fixture:${start + limit}` : null,
+        hasMore,
+      };
+    },
+    createTransaction: async (workspaceId, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const fingerprint = JSON.stringify(input);
+      if (commandKey) {
+        const previous = state.transactionCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro lançamento.", 409);
+          }
+          return previous.transaction;
+        }
+      }
+      if (!state.currency) state.currency = input.amount.currency;
+      if (state.currency !== input.amount.currency) {
+        throw new FinanceAdapterError("A moeda não corresponde à moeda do espaço.", 422);
+      }
+      if (input.cardId && !state.cards.some((card) => card.id === input.cardId)) {
+        throw new FinanceAdapterError("Cartão não encontrado neste espaço.", 404);
+      }
       const value: Transaction = {
-        id: fixtureId(transactions.length + 1),
+        id: fixtureId(state.transactions.length + 1),
         workspaceId,
         kind: input.kind,
         state: input.state ?? "posted",
@@ -359,9 +586,9 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         statementId: null,
         version: 0,
       };
-      transactions.unshift(value);
+      state.transactions.unshift(value);
       if (input.cardId) {
-        const statement = statements.find(
+        const statement = state.statements.find(
           (item) => item.cardId === input.cardId && item.state === "open",
         );
         if (statement) {
@@ -374,13 +601,54 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           value.statementId = statement.id;
         }
       }
+      if (commandKey)
+        state.transactionCommands.set(commandKey, { fingerprint, transaction: value });
+      return value;
+    },
+    reverseTransaction: async (workspaceId, transaction, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.transactions.find((value) => value.id === transaction.id);
+      if (!current) throw new FinanceAdapterError("Lançamento não encontrado.", 404);
+      const fingerprint = `${transaction.id}:v${transaction.version}`;
+      if (commandKey) {
+        const previous = state.reverseCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outra reversão.", 409);
+          }
+          return previous.transaction;
+        }
+      }
+      if (current.state === "canceled") return current;
+      const value = { ...current, state: "canceled" as const, version: current.version + 1 };
+      state.transactions[state.transactions.indexOf(current)] = value;
+      if (value.statementId && value.kind === "expense") {
+        const statement = state.statements.find((item) => item.id === value.statementId);
+        if (statement) {
+          const total = BigInt(statement.total.minor) - BigInt(value.amount.minor);
+          const openAmount = total - BigInt(statement.paid.minor);
+          statement.total = { ...statement.total, minor: total.toString() };
+          statement.openAmount = {
+            ...statement.openAmount,
+            minor: (openAmount > BigInt(0) ? openAmount : BigInt(0)).toString(),
+          };
+        }
+      }
+      if (commandKey) {
+        state.reverseCommands.set(commandKey, {
+          transactionId: value.id,
+          fingerprint,
+          transaction: value,
+        });
+      }
       return value;
     },
     listCategories: async () => [],
-    listCards: async () => [...cards],
+    listCards: async (workspaceId) => [...stateFor(workspaceId).cards],
     createCard: async (workspaceId, input) => {
+      const state = stateFor(workspaceId);
       const card: CreditCard = {
-        id: fixtureId(cards.length + 10),
+        id: fixtureId(state.cards.length + 10),
         workspaceId,
         name: input.name,
         closingDay: input.closingDay,
@@ -391,13 +659,16 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         archived: false,
         version: 0,
       };
-      cards.push(card);
+      state.cards.push(card);
       return card;
     },
-    listStatements: async (_workspaceId, cardId) =>
-      statements.filter((statement) => !cardId || statement.cardId === cardId),
-    listStatementItems: async (_workspaceId, statementId, query = {}) => {
-      const allItems = transactions
+    listStatements: async (workspaceId, cardId) =>
+      stateFor(workspaceId).statements.filter(
+        (statement) => !cardId || statement.cardId === cardId,
+      ),
+    listStatementItems: async (workspaceId, statementId, query = {}) => {
+      const state = stateFor(workspaceId);
+      const allItems = state.transactions
         .filter((transaction) => transaction.statementId === statementId)
         .map((transaction) => ({
           id: transaction.id,
@@ -422,13 +693,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         hasMore,
       };
     },
-    closeStatement: async (_workspaceId, statement) => {
+    closeStatement: async (workspaceId, statement) => {
+      const state = stateFor(workspaceId);
       const value = { ...statement, state: "closed" as const, version: statement.version + 1 };
-      const index = statements.findIndex(({ id }) => id === statement.id);
-      if (index >= 0) statements[index] = value;
+      const index = state.statements.findIndex(({ id }) => id === statement.id);
+      if (index >= 0) state.statements[index] = value;
       return value;
     },
-    reopenStatement: async (_workspaceId, statement) => {
+    reopenStatement: async (workspaceId, statement) => {
+      const state = stateFor(workspaceId);
       if (statement.state !== "closed" || BigInt(statement.paid.minor) > BigInt(0)) {
         throw new FinanceAdapterError(
           "Apenas faturas fechadas e sem pagamentos podem ser reabertas.",
@@ -436,17 +709,18 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         );
       }
       const value = { ...statement, state: "open" as const, version: statement.version + 1 };
-      const index = statements.findIndex(({ id }) => id === statement.id);
-      if (index >= 0) statements[index] = value;
+      const index = state.statements.findIndex(({ id }) => id === statement.id);
+      if (index >= 0) state.statements[index] = value;
       return value;
     },
-    payStatement: async (_workspaceId, statement, amount) => {
+    payStatement: async (workspaceId, statement, amount) => {
+      const state = stateFor(workspaceId);
       const paid = amount ?? statement.openAmount;
       const nextPaid = BigInt(statement.paid.minor) + BigInt(paid.minor);
       const nextOpen = BigInt(statement.total.minor) - nextPaid;
-      const index = statements.findIndex(({ id }) => id === statement.id);
+      const index = state.statements.findIndex(({ id }) => id === statement.id);
       if (index >= 0) {
-        statements[index] = {
+        state.statements[index] = {
           ...statement,
           paid: { ...paid, minor: nextPaid.toString() },
           openAmount: { ...paid, minor: nextOpen.toString() },
@@ -498,6 +772,24 @@ export function createRequestGuard() {
     },
     isCurrent(request: number): boolean {
       return request === latestRequest;
+    },
+  };
+}
+
+export function createWorkspaceGenerationGuard(initialWorkspaceId: string) {
+  let currentWorkspaceId = initialWorkspaceId;
+  let generation = 0;
+  return {
+    switchWorkspace(workspaceId: string): void {
+      if (workspaceId === currentWorkspaceId) return;
+      currentWorkspaceId = workspaceId;
+      generation += 1;
+    },
+    begin(workspaceId: string): { workspaceId: string; generation: number } {
+      return { workspaceId, generation };
+    },
+    isCurrent(request: { workspaceId: string; generation: number }): boolean {
+      return request.workspaceId === currentWorkspaceId && request.generation === generation;
     },
   };
 }
