@@ -4,6 +4,8 @@ import {
   calculateSafeToSpend,
   calculateStatementDates,
   canonicalCardPaymentPostings,
+  canonicalLoanPaymentPostings,
+  canonicalLoanPrincipalPostings,
   canonicalTransactionPostings,
   distributeInstallments,
   generateRecurrenceDates,
@@ -15,6 +17,44 @@ import { parseLocalDate } from "../src/time.js";
 const brl = (minor: bigint) => Money.fromTrusted(minor, "BRL" as never);
 
 describe("financial domain", () => {
+  it("publishes loan principal and repayment without income or expense accounts", () => {
+    const principal = canonicalLoanPrincipalPostings({
+      direction: "lent",
+      amount: brl(1_000n),
+      accounts: { wallet: "wallet", loan: "receivable" },
+    });
+    expect(principal.map((entry) => [entry.accountId, entry.amount.minor])).toEqual([
+      ["wallet", -1_000n],
+      ["receivable", 1_000n],
+    ]);
+    const received = canonicalLoanPaymentPostings({
+      direction: "lent",
+      amount: brl(250n),
+      accounts: { wallet: "wallet", loan: "receivable" },
+    });
+    expect(received.map((entry) => [entry.accountId, entry.amount.minor])).toEqual([
+      ["wallet", 250n],
+      ["receivable", -250n],
+    ]);
+    assertBalancedLedgerEvent(principal);
+    assertBalancedLedgerEvent(received);
+  });
+
+  it("reverses cash direction for a borrowed loan", () => {
+    const principal = canonicalLoanPrincipalPostings({
+      direction: "borrowed",
+      amount: brl(1_000n),
+      accounts: { wallet: "wallet", loan: "payable" },
+    });
+    const payment = canonicalLoanPaymentPostings({
+      direction: "borrowed",
+      amount: brl(300n),
+      accounts: { wallet: "wallet", loan: "payable" },
+    });
+    expect(principal.map((entry) => entry.amount.minor)).toEqual([1_000n, -1_000n]);
+    expect(payment.map((entry) => entry.amount.minor)).toEqual([-300n, 300n]);
+  });
+
   it("requires balanced, non-zero, same-currency ledger postings", () => {
     expect(() =>
       assertBalancedLedgerEvent([

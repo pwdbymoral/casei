@@ -3,9 +3,11 @@ import {
   createCategorySchema,
   createCreditCardSchema,
   createInstallmentPlanSchema,
+  createLoanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  loanPaymentSchema,
   settleTransactionSchema,
   type TransactionListQuery,
 } from "@casei/contracts";
@@ -15,6 +17,8 @@ import {
   assertBalancedLedgerEvent,
   calculateStatementDates,
   canonicalCardPaymentPostings,
+  canonicalLoanPaymentPostings,
+  canonicalLoanPrincipalPostings,
   canonicalTransactionPostings,
   distributeInstallments,
   generateRecurrenceDates,
@@ -53,6 +57,32 @@ export interface TransactionView {
   cardId: string | null;
   statementId: string | null;
   version: number;
+}
+
+export interface LoanView {
+  id: string;
+  workspaceId: string;
+  direction: "lent" | "borrowed";
+  counterparty: string;
+  principal: { currency: string; minor: string };
+  paid: { currency: string; minor: string };
+  remaining: { currency: string; minor: string };
+  occurredOn: string;
+  dueOn: string | null;
+  status: "open" | "settled";
+  version: number;
+}
+
+export interface LoanPaymentView {
+  id: string;
+  loanId: string;
+  amount: { currency: string; minor: string };
+  occurredOn: string;
+}
+
+export interface LoanPaymentResponse {
+  loan: LoanView;
+  payment: LoanPaymentView;
 }
 
 export interface CategoryView {
@@ -217,6 +247,21 @@ interface TransactionRow {
   version: number;
 }
 
+interface LoanRow {
+  id: string;
+  workspace_id: string;
+  direction: "lent" | "borrowed";
+  counterparty: string;
+  principal_minor: string | bigint;
+  paid_minor: string | bigint;
+  currency_code: string;
+  occurred_on: string;
+  due_on: string | null;
+  principal_event_id: string;
+  status: "open" | "settled";
+  version: number;
+}
+
 interface FinanceAuditRow {
   id: string;
   transaction_id: string;
@@ -247,6 +292,239 @@ export class FinanceService {
       throw new Error("CASEI_CURSOR_SECRET is required in production");
     }
     this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
+  }
+
+  async createLoan(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; loan: LoanView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = createLoanSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/loans`,
+        key: idempotencyKey,
+        request: parsed,
+        execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (parsed.principal.currency !== currency) {
+            throw new FinanceConflictError("A moeda do empréstimo difere da carteira.");
+          }
+          const occurredOn =
+            parsed.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
+          if (parsed.dueOn && parsed.dueOn < occurredOn) {
+            throw new FinanceConflictError(
+              "O vencimento não pode ser anterior à data do empréstimo.",
+            );
+          }
+          const ids = await client.query<{ loan_id: string; event_id: string }>(
+            `SELECT uuidv7() AS loan_id, uuidv7() AS event_id`,
+          );
+          const loanId = ids.rows[0]?.loan_id;
+          const eventId = ids.rows[0]?.event_id;
+          if (!loanId || !eventId) throw new Error("loan identifiers were not generated");
+          await client.query(
+            `INSERT INTO loan_contract
+              (id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+               currency_code, occurred_on, due_on, principal_event_id, status, version)
+             VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'open', 0)`,
+            [
+              loanId,
+              scope.workspaceId,
+              parsed.direction,
+              parsed.counterparty,
+              BigInt(parsed.principal.minor),
+              currency,
+              occurredOn,
+              parsed.dueOn ?? null,
+              eventId,
+            ],
+          );
+          const wallet = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "wallet",
+            "Carteira",
+            currency,
+          );
+          const loanAccount = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            loanAccountKind(parsed.direction),
+            loanAccountName(loanId),
+            currency,
+          );
+          const postings = canonicalLoanPrincipalPostings({
+            direction: parsed.direction,
+            amount: Money.fromTrusted(BigInt(parsed.principal.minor), currency as never),
+            accounts: { wallet, loan: loanAccount },
+          });
+          await this.publishLoanEvent(
+            client,
+            scope,
+            eventId,
+            loanEventType(parsed.direction, "principal"),
+            currency,
+            postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
+            occurredOn,
+          );
+          const row = await this.getLoanRow(client, scope.workspaceId, loanId);
+          if (!row) throw new Error("loan contract was not created");
+          const loan = toLoanView(row);
+          await this.recordLoanAudit(client, scope, loanId, "loan.created", null, loan);
+          return { statusCode: 201, response: loan as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      loan: result.response as unknown as LoanView,
+    };
+  }
+
+  async getLoan(scope: FinanceScope, id: string): Promise<LoanView | null> {
+    return this.withScopedClient(scope, async (client) => {
+      const row = await this.getLoanRow(client, scope.workspaceId, id);
+      return row ? toLoanView(row) : null;
+    });
+  }
+
+  async listLoans(scope: FinanceScope, limit = 50): Promise<LoanView[]> {
+    return this.withScopedClient(scope, async (client) => {
+      const boundedLimit = Math.min(Math.max(limit, 1), 100);
+      const result = await client.query<LoanRow>(
+        `SELECT id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+                currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+                principal_event_id, status, version
+           FROM loan_contract
+          WHERE workspace_id = $1
+          ORDER BY status ASC, due_on ASC NULLS LAST, occurred_on DESC, id DESC
+          LIMIT $2`,
+        [scope.workspaceId, boundedLimit],
+      );
+      return result.rows.map(toLoanView);
+    });
+  }
+
+  async payLoan(
+    scope: FinanceScope,
+    loanId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+    input: unknown,
+  ): Promise<{ replayed: boolean; response: LoanPaymentResponse }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = loanPaymentSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/loans/${loanId}/payments`,
+        key: idempotencyKey,
+        request: { loanId, expectedVersion, parsed },
+        execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          const current = await client.query<LoanRow>(
+            `SELECT id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+                    currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+                    principal_event_id, status, version
+               FROM loan_contract
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, loanId],
+          );
+          const row = current.rows[0];
+          if (!row) throw new FinanceNotFoundError();
+          if (row.version !== expectedVersion) throw new VersionConflictError(row.version);
+          if (row.status !== "open") {
+            throw new FinanceConflictError("O empréstimo já está liquidado.");
+          }
+          if (row.currency_code !== currency || parsed.amount.currency !== row.currency_code) {
+            throw new FinanceConflictError("A moeda do pagamento difere do empréstimo.");
+          }
+          const principal = BigInt(row.principal_minor);
+          const paid = BigInt(row.paid_minor);
+          const amount = BigInt(parsed.amount.minor);
+          const remaining = principal - paid;
+          if (amount > remaining) {
+            throw new FinanceConflictError("O pagamento excede o saldo do empréstimo.");
+          }
+          const occurredOn =
+            parsed.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
+          if (occurredOn < row.occurred_on) {
+            throw new FinanceConflictError(
+              "A data do pagamento não pode ser anterior à data do empréstimo.",
+            );
+          }
+          const ids = await client.query<{ payment_id: string; event_id: string }>(
+            `SELECT uuidv7() AS payment_id, uuidv7() AS event_id`,
+          );
+          const paymentId = ids.rows[0]?.payment_id;
+          const eventId = ids.rows[0]?.event_id;
+          if (!paymentId || !eventId)
+            throw new Error("loan payment identifiers were not generated");
+          const wallet = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "wallet",
+            "Carteira",
+            currency,
+          );
+          const loanAccount = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            loanAccountKind(row.direction),
+            loanAccountName(row.id),
+            currency,
+          );
+          const postings = canonicalLoanPaymentPostings({
+            direction: row.direction,
+            amount: Money.fromTrusted(amount, currency as never),
+            accounts: { wallet, loan: loanAccount },
+          });
+          await this.publishLoanEvent(
+            client,
+            scope,
+            eventId,
+            loanEventType(row.direction, "payment"),
+            currency,
+            postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
+            occurredOn,
+          );
+          await client.query(
+            `INSERT INTO loan_payment
+              (id, workspace_id, loan_id, amount_minor, currency_code, occurred_on, ledger_event_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [paymentId, scope.workspaceId, loanId, amount, currency, occurredOn, eventId],
+          );
+          const nextPaid = paid + amount;
+          const updated = await client.query<LoanRow>(
+            `UPDATE loan_contract
+                SET paid_minor = $3, status = CASE WHEN $3 = principal_minor THEN 'settled' ELSE 'open' END,
+                    version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $4
+              RETURNING id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+                        currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+                        principal_event_id, status, version`,
+            [scope.workspaceId, loanId, nextPaid, expectedVersion],
+          );
+          const next = updated.rows[0];
+          if (!next) throw new VersionConflictError();
+          const loan = toLoanView(next);
+          const payment: LoanPaymentView = {
+            id: paymentId,
+            loanId,
+            amount: { currency, minor: amount.toString() },
+            occurredOn,
+          };
+          await this.recordLoanAudit(client, scope, loanId, "loan.payment", toLoanView(row), loan);
+          return { statusCode: 200, response: { loan, payment } as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as LoanPaymentResponse,
+    };
   }
 
   async createTransaction(
@@ -1559,6 +1837,79 @@ export class FinanceService {
     return id;
   }
 
+  private async getLoanRow(
+    client: PgPoolClient,
+    workspaceId: string,
+    loanId: string,
+  ): Promise<LoanRow | null> {
+    const result = await client.query<LoanRow>(
+      `SELECT id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+              currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+              principal_event_id, status, version
+         FROM loan_contract
+        WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, loanId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  private async publishLoanEvent(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    eventId: string,
+    eventType: string,
+    currency: string,
+    entries: readonly { accountId: string; amount: bigint }[],
+    occurredOn: string,
+  ): Promise<void> {
+    const postings = entries.map((entry) => ({
+      accountId: entry.accountId,
+      amount: Money.fromTrusted(entry.amount, currency as never),
+    }));
+    assertBalancedLedgerEvent(postings);
+    await client.query(
+      `INSERT INTO ledger_event
+        (id, workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at)
+       VALUES ($1, $2, NULL, $3, $4, 'published', $5, now())`,
+      [eventId, scope.workspaceId, eventType, currency, occurredOn],
+    );
+    for (const entry of entries) {
+      await client.query(
+        `INSERT INTO ledger_entry
+          (workspace_id, event_id, account_id, currency_code, amount_minor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [scope.workspaceId, eventId, entry.accountId, currency, entry.amount],
+      );
+    }
+  }
+
+  private async recordLoanAudit(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    loanId: string,
+    action: string,
+    before: unknown,
+    after: unknown,
+  ): Promise<void> {
+    const redactedBefore = redactFinanceAuditSnapshot(before);
+    const redactedAfter = redactFinanceAuditSnapshot(after);
+    await client.query(
+      `INSERT INTO audit_event
+        (category, action, actor_id, workspace_id, target_type, target_id,
+         origin, correlation_id, result, before_redacted, after_redacted)
+       VALUES ('finance', $1, $2, $3, 'loan_contract', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
+      [
+        action,
+        scope.actorId,
+        scope.workspaceId,
+        loanId,
+        scope.correlationId,
+        redactedBefore ? JSON.stringify(redactedBefore) : null,
+        redactedAfter ? JSON.stringify(redactedAfter) : null,
+      ],
+    );
+  }
+
   private async recordStatementAudit(
     client: PgPoolClient,
     scope: FinanceScope,
@@ -1828,6 +2179,39 @@ function toTransactionView(row: TransactionRow): TransactionView {
   };
 }
 
+function toLoanView(row: LoanRow): LoanView {
+  const principal = BigInt(row.principal_minor);
+  const paid = BigInt(row.paid_minor);
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    direction: row.direction,
+    counterparty: row.counterparty,
+    principal: { currency: row.currency_code, minor: principal.toString() },
+    paid: { currency: row.currency_code, minor: paid.toString() },
+    remaining: { currency: row.currency_code, minor: (principal - paid).toString() },
+    occurredOn: row.occurred_on,
+    dueOn: row.due_on,
+    status: row.status,
+    version: row.version,
+  };
+}
+
+function loanAccountKind(direction: "lent" | "borrowed"): "loan_receivable" | "loan_payable" {
+  return direction === "lent" ? "loan_receivable" : "loan_payable";
+}
+
+function loanAccountName(loanId: string): string {
+  return `Empréstimo ${loanId}`;
+}
+
+function loanEventType(direction: "lent" | "borrowed", action: "principal" | "payment"): string {
+  if (direction === "lent") {
+    return action === "principal" ? "loan.principal.lent.v1" : "loan.payment.received.v1";
+  }
+  return action === "principal" ? "loan.principal.borrowed.v1" : "loan.payment.made.v1";
+}
+
 /**
  * Audit snapshots are deliberately smaller than a transaction view. Keep the
  * allowlist and value checks in one place so both writes and reads enforce the
@@ -1839,6 +2223,13 @@ export function redactFinanceAuditSnapshot(value: unknown): Record<string, unkno
   const snapshot: Record<string, unknown> = {};
   if (typeof source.kind === "string") snapshot.kind = source.kind;
   if (typeof source.state === "string") snapshot.state = source.state;
+  if (typeof source.direction === "string") snapshot.direction = source.direction;
+  if (typeof source.status === "string") snapshot.status = source.status;
+  if (typeof source.counterparty === "string") snapshot.counterparty = source.counterparty;
+  for (const key of ["occurredOn", "dueOn"] as const) {
+    if (source[key] === null || typeof source[key] === "string")
+      snapshot[key] = source[key] ?? null;
+  }
   for (const key of ["categoryId", "cardId", "statementId"] as const) {
     if (source[key] === null || typeof source[key] === "string")
       snapshot[key] = source[key] ?? null;

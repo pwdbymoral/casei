@@ -706,6 +706,93 @@ export const financeTransaction = pgTable(
   ],
 );
 
+export const loanContract = pgTable(
+  "loan_contract",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    direction: text("direction").notNull(),
+    counterparty: text("counterparty").notNull(),
+    principalMinor: bigint("principal_minor", { mode: "bigint" }).notNull(),
+    paidMinor: bigint("paid_minor", { mode: "bigint" }).notNull().default(sql`0`),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    dueOn: date("due_on"),
+    principalEventId: uuid("principal_event_id").notNull(),
+    status: text("status").notNull().default("open"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("loan_contract_workspace_id_id_unique").on(table.workspaceId, table.id),
+    index("loan_contract_workspace_status_due_idx").on(
+      table.workspaceId,
+      table.status,
+      table.dueOn,
+      table.occurredOn,
+      table.id,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.principalEventId, table.currencyCode],
+      foreignColumns: [ledgerEvent.workspaceId, ledgerEvent.id, ledgerEvent.currencyCode],
+      name: "loan_contract_principal_event_fk",
+    }).onDelete("restrict"),
+    check("loan_contract_direction_check", sql`${table.direction} in ('lent', 'borrowed')`),
+    check(
+      "loan_contract_counterparty_check",
+      sql`length(trim(${table.counterparty})) between 1 and 200`,
+    ),
+    check(
+      "loan_contract_principal_check",
+      sql`${table.principalMinor} > 0 and ${table.paidMinor} >= 0 and ${table.paidMinor} <= ${table.principalMinor}`,
+    ),
+    check("loan_contract_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    check(
+      "loan_contract_date_order_check",
+      sql`${table.dueOn} is null or ${table.dueOn} >= ${table.occurredOn}`,
+    ),
+    check("loan_contract_status_check", sql`${table.status} in ('open', 'settled')`),
+    check(
+      "loan_contract_status_amount_check",
+      sql`(${table.status} = 'open' and ${table.paidMinor} < ${table.principalMinor}) or (${table.status} = 'settled' and ${table.paidMinor} = ${table.principalMinor})`,
+    ),
+    check("loan_contract_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
+export const loanPayment = pgTable(
+  "loan_payment",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id").notNull(),
+    loanId: uuid("loan_id").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    ledgerEventId: uuid("ledger_event_id").notNull(),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("loan_payment_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("loan_payment_event_unique").on(table.workspaceId, table.ledgerEventId),
+    foreignKey({
+      columns: [table.workspaceId, table.loanId],
+      foreignColumns: [loanContract.workspaceId, loanContract.id],
+      name: "loan_payment_loan_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.ledgerEventId, table.currencyCode],
+      foreignColumns: [ledgerEvent.workspaceId, ledgerEvent.id, ledgerEvent.currencyCode],
+      name: "loan_payment_event_fk",
+    }).onDelete("restrict"),
+    check("loan_payment_amount_check", sql`${table.amountMinor} > 0`),
+    check("loan_payment_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+  ],
+);
+
 export const goal = pgTable(
   "goal",
   {
@@ -984,6 +1071,8 @@ export const schema = {
   ledgerEvent,
   ledgerEntry,
   financeTransaction,
+  loanContract,
+  loanPayment,
   goal,
   goalReservationMovement,
   recurrenceRule,
