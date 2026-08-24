@@ -538,12 +538,7 @@ export class StockService {
               ON p.workspace_id = i.workspace_id AND p.id = i.product_id
            WHERE i.workspace_id = $1
              AND ($3::boolean OR i.purchased = false)
-             AND (i.purchased OR ((i.source = 'free' AND NOT EXISTS (
-                    SELECT 1 FROM stock_product duplicate
-                     WHERE duplicate.workspace_id = i.workspace_id
-                       AND duplicate.name_normalized = i.name_normalized
-                       AND duplicate.archived = false
-                  )) OR (i.source = 'automatic' AND p.id IS NOT NULL
+             AND (i.purchased OR ((i.source = 'free') OR (i.source = 'automatic' AND p.id IS NOT NULL
                   AND p.shopping_auto = true
                   AND (p.marked_missing OR p.quantity_milli = 0
                        OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
@@ -906,6 +901,27 @@ async function syncAutomaticShoppingItems(
   scope: StockScope,
   productId: string,
 ): Promise<void> {
+  // A free item can predate a product with the same normalized name. When the
+  // product is actually a shopping candidate, convert that row in place so
+  // its history and idempotency identity survive without a disappearing or
+  // duplicate projection. If the product is not low/missing, the free item
+  // remains visible as an explicit user request.
+  await client.query(
+    `UPDATE shopping_item i
+        SET product_id = p.id, source = 'automatic', name = p.name,
+            name_normalized = p.name_normalized, quantity_milli = NULL,
+            unit = p.unit, unit_label = p.unit_label, version = p.version,
+            last_changed_by = $2, updated_at = now()
+       FROM stock_product p
+      WHERE i.workspace_id = $1 AND i.source = 'free' AND i.purchased = false
+        AND i.name_normalized = p.name_normalized AND p.workspace_id = $1
+        AND p.id = $3 AND p.archived = false AND p.shopping_auto = true
+        AND (p.marked_missing OR p.quantity_milli = 0
+             OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
+                 AND p.quantity_milli <= p.minimum_milli))
+      RETURNING i.id`,
+    [scope.workspaceId, scope.actorId, productId],
+  );
   await client.query(
     `UPDATE shopping_item i
         SET version = p.version, last_changed_by = $2, updated_at = now()

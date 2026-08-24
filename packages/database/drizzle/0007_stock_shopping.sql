@@ -46,7 +46,7 @@ CREATE TABLE "shopping_item_event" (
   "payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "occurred_at" timestamptz DEFAULT now() NOT NULL,
   CONSTRAINT "shopping_item_event_item_scope_fk"
-    FOREIGN KEY ("workspace_id", "item_id") REFERENCES "shopping_item"("workspace_id", "id") ON DELETE RESTRICT,
+    FOREIGN KEY ("workspace_id", "item_id") REFERENCES "shopping_item"("workspace_id", "id") ON DELETE CASCADE,
   CONSTRAINT "shopping_item_event_kind_check" CHECK ("kind" in ('created', 'purchased'))
 );
 CREATE INDEX "shopping_item_event_item_occurred_idx"

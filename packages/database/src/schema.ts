@@ -364,7 +364,7 @@ export const shoppingItemEvent = pgTable(
       columns: [table.workspaceId, table.itemId],
       foreignColumns: [shoppingItem.workspaceId, shoppingItem.id],
       name: "shopping_item_event_item_scope_fk",
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     check("shopping_item_event_kind_check", sql`${table.kind} in ('created', 'purchased')`),
     index("shopping_item_event_item_occurred_idx").on(
       table.workspaceId,

@@ -197,6 +197,9 @@ function shoppingScenarioPool() {
         }
         return { rows: [], rowCount: 0 };
       }
+      if (sql.includes("UPDATE shopping_item i") && sql.includes("SET product_id = p.id")) {
+        return { rows: [], rowCount: 0 };
+      }
       if (sql.includes("UPDATE stock_product")) {
         productQuantity = BigInt(values[2] as string | bigint);
         productVersion += 1;
@@ -218,6 +221,101 @@ function shoppingScenarioPool() {
           return { rows: [], rowCount: 0 };
         }
         return { rows: [derivedItem() as T], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  return {
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+  };
+}
+
+function freeCollisionPool() {
+  const statements: string[] = [];
+  const product = {
+    id: productId,
+    workspace_id: scope.workspaceId,
+    name: "Arroz",
+    unit: "unit",
+    unit_label: null,
+    quantity_milli: "0",
+    minimum_milli: "10",
+    marked_missing: false,
+    shopping_auto: true,
+    category: null,
+    location: null,
+    note: null,
+    archived: false,
+    version: 0,
+  };
+  let item: Record<string, unknown> = {
+    id: materializedItemId,
+    workspace_id: scope.workspaceId,
+    product_id: null,
+    name: "Arroz",
+    source: "free",
+    quantity_milli: "1",
+    effective_quantity_milli: "1",
+    unit: "unit",
+    unit_label: null,
+    note: "livre",
+    purchased: false,
+    purchased_at: null,
+    last_changed_by: scope.actorId,
+    version: 0,
+  };
+
+  const client = {
+    async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM membership")) {
+        return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM workspace")) {
+        return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes('INSERT INTO "idempotency_key"')) {
+        return { rows: [{ id: "idempotency-1" }] as T[], rowCount: 1 };
+      }
+      if (
+        sql.includes('DELETE FROM "idempotency_key"') ||
+        sql.includes('UPDATE "idempotency_key"')
+      ) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO stock_product")) {
+        return { rows: [product] as T[], rowCount: 1 };
+      }
+      if (
+        sql.includes("UPDATE shopping_item i") &&
+        sql.includes("FROM stock_product p") &&
+        sql.includes("i.source = 'free'")
+      ) {
+        item = {
+          ...item,
+          product_id: product.id,
+          source: "automatic",
+          quantity_milli: null,
+          effective_quantity_milli: "10",
+          unit: product.unit,
+          version: product.version,
+        };
+        return { rows: [{ id: item.id }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO shopping_item") && sql.includes("SELECT p.workspace_id")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO shopping_item_event")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH visible_items")) {
+        return { rows: [item] as T[], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     },
@@ -260,6 +358,25 @@ describe("StockService membership revalidation", () => {
     await expect(service.listShoppingItems({ ...scope, role: "viewer" })).resolves.toEqual([]);
     expect(harness.statements.some((sql) => /INSERT INTO shopping_item/i.test(sql))).toBe(false);
     expect(harness.statements.some((sql) => /shopping_item_event/i.test(sql))).toBe(false);
+  });
+
+  it("reconciles a free item with a homonymous product into one automatic item", async () => {
+    const harness = freeCollisionPool();
+    const service = new StockService(harness.pool as never);
+
+    await service.createProduct(scope, { name: "Arroz" }, "shopping-free-collision-001");
+    const items = await service.listShoppingItems(scope);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: materializedItemId,
+      productId,
+      source: "automatic",
+      quantity: "0.01",
+    });
+    expect(
+      harness.statements.filter((sql) => /INSERT INTO shopping_item_event/i.test(sql)),
+    ).toEqual([]);
   });
 
   it("derives, purchases, suppresses, and releases an automatic item across reads and movement", async () => {
