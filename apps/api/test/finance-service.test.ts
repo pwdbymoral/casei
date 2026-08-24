@@ -100,6 +100,55 @@ describe("finance command guards", () => {
     ]);
   });
 
+  it("blocks a cycle-rule change when an open statement already has a purchase", async () => {
+    const current = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      name: "Principal",
+      closing_day: 10,
+      due_day: 17,
+      holder: null,
+      last_four: null,
+      limit_minor: null,
+      currency_code: "BRL",
+      archived: false,
+      version: 0,
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM credit_card") && sql.includes("FOR UPDATE")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("FROM credit_statement") && sql.includes("t.statement_id = s.id")) {
+          return { rows: [{ blocked: true }] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+
+    await expect(
+      service.updateCard(
+        {
+          workspaceId: current.workspace_id,
+          actorId: "user-1",
+          correlationId: "correlation-1",
+          role: "member",
+        },
+        current.id,
+        { closingDay: 31 },
+        "card-update-cycle-guard-001",
+        current.version,
+      ),
+    ).rejects.toThrow("fatura aberta");
+    expect(client.query.mock.calls.some(([sql]) => sql.startsWith("UPDATE credit_card"))).toBe(
+      false,
+    );
+    expect(client.query.mock.calls.some(([sql]) => sql === "ROLLBACK")).toBe(true);
+  });
+
   it("blocks card archive while a statement has an open balance", async () => {
     const current = {
       id: "0190f3c8-2a10-7abc-8def-1234567890ad",

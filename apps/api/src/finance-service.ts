@@ -1069,6 +1069,38 @@ export class FinanceService {
           if (current.version !== expectedVersion) {
             throw new VersionConflictError(current.version);
           }
+          const changesClosingCycle =
+            parsed.closingDay !== undefined && parsed.closingDay !== current.closing_day;
+          const changesDueCycle = parsed.dueDay !== undefined && parsed.dueDay !== current.due_day;
+          if (changesClosingCycle || changesDueCycle) {
+            // Existing purchases retain the cycle dates that were persisted when
+            // they were created. Changing the card rule while such a cycle is
+            // open would make the next purchase recalculate against a different
+            // rule and can create overlapping open invoices. Keep the operation
+            // explicit: the user must close/resolve the cycle before changing
+            // the rule.
+            const blocking = await client.query<{ blocked: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1
+                   FROM credit_statement s
+                  WHERE s.workspace_id = $1 AND s.card_id = $2 AND s.state = 'open'
+                    AND EXISTS (
+                      SELECT 1
+                        FROM finance_transaction t
+                       WHERE t.workspace_id = s.workspace_id
+                         AND t.statement_id = s.id
+                         AND t.kind = 'expense'
+                         AND t.state <> 'canceled'
+                    )
+               ) AS blocked`,
+              [scope.workspaceId, cardId],
+            );
+            if (blocking.rows[0]?.blocked) {
+              throw new FinanceConflictError(
+                "Feche ou resolva a fatura aberta antes de alterar o ciclo do cartão.",
+              );
+            }
+          }
           if (parsed.limit && parsed.limit.currency !== current.currency_code) {
             throw new FinanceConflictError("O limite do cartão deve usar a moeda do espaço.");
           }

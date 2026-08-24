@@ -100,5 +100,8 @@ describe("finance contracts", () => {
     });
     expect(() => updateCreditCardSchema.parse({})).toThrow();
     expect(() => updateCreditCardSchema.parse({ lastFour: "123" })).toThrow();
+    expect(() => updateCreditCardSchema.parse({ limit: { currency: "BRL", minor: "-1" } })).toThrow(
+      "greater than or equal to zero",
+    );
   });
 });
