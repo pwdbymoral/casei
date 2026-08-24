@@ -234,6 +234,57 @@ export const auditEvent = pgTable(
   ],
 );
 
+export const financeTransaction = pgTable(
+  "finance_transaction",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    state: text("state").notNull().default("planned"),
+    instrument: text("instrument").notNull().default("wallet"),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    settledMinor: bigint("settled_minor", { mode: "bigint" }).notNull().default(sql`0`),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    dueOn: date("due_on"),
+    postedOn: instant("posted_on"),
+    cashSettledOn: instant("cash_settled_on"),
+    description: text("description").notNull().default(""),
+    categoryId: uuid("category_id"),
+    cardId: uuid("card_id"),
+    statementId: uuid("statement_id"),
+    goalId: uuid("goal_id"),
+    recurrenceId: uuid("recurrence_id"),
+    installmentPlanId: uuid("installment_plan_id"),
+    installmentNumber: integer("installment_number"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    check(
+      "finance_transaction_kind_check",
+      sql`${table.kind} in ('income', 'expense', 'transfer', 'adjustment')`,
+    ),
+    check(
+      "finance_transaction_state_check",
+      sql`${table.state} in ('planned', 'partially_settled', 'posted', 'canceled')`,
+    ),
+    check("finance_transaction_instrument_check", sql`${table.instrument} in ('wallet', 'card')`),
+    check(
+      "finance_transaction_amount_check",
+      sql`${table.amountMinor} > 0 and ${table.settledMinor} >= 0 and ${table.settledMinor} <= ${table.amountMinor}`,
+    ),
+    check("finance_transaction_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    uniqueIndex("finance_transaction_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("finance_transaction_recurrence_date_unique")
+      .on(table.workspaceId, table.recurrenceId, table.occurredOn)
+      .where(sql`${table.recurrenceId} is not null`),
+  ],
+);
+
 export const stockProduct = pgTable(
   "stock_product",
   {
@@ -312,6 +363,11 @@ export const shoppingItem = pgTable(
       foreignColumns: [stockProduct.workspaceId, stockProduct.id],
       name: "shopping_item_product_scope_fk",
     }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.expenseTransactionId],
+      foreignColumns: [financeTransaction.workspaceId, financeTransaction.id],
+      name: "shopping_item_expense_transaction_scope_fk",
+    }).onDelete("restrict"),
     check("shopping_item_name_check", sql`length(trim(${table.name})) > 0`),
     check("shopping_item_source_check", sql`${table.source} in ('automatic', 'free')`),
     check(
@@ -656,57 +712,6 @@ export const ledgerEntry = pgTable(
     check("ledger_entry_amount_nonzero_check", sql`${table.amountMinor} <> 0`),
     check("ledger_entry_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
     uniqueIndex("ledger_entry_event_account_unique").on(table.eventId, table.accountId),
-  ],
-);
-
-export const financeTransaction = pgTable(
-  "finance_transaction",
-  {
-    id: uuid("id").primaryKey().default(sql`uuidv7()`),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspace.id, { onDelete: "cascade" }),
-    kind: text("kind").notNull(),
-    state: text("state").notNull().default("planned"),
-    instrument: text("instrument").notNull().default("wallet"),
-    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
-    settledMinor: bigint("settled_minor", { mode: "bigint" }).notNull().default(sql`0`),
-    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
-    occurredOn: date("occurred_on").notNull(),
-    dueOn: date("due_on"),
-    postedOn: instant("posted_on"),
-    cashSettledOn: instant("cash_settled_on"),
-    description: text("description").notNull().default(""),
-    categoryId: uuid("category_id"),
-    cardId: uuid("card_id"),
-    statementId: uuid("statement_id"),
-    goalId: uuid("goal_id"),
-    recurrenceId: uuid("recurrence_id"),
-    installmentPlanId: uuid("installment_plan_id"),
-    installmentNumber: integer("installment_number"),
-    version: integer("version").notNull().default(0),
-    createdAt: instant("created_at").defaultNow().notNull(),
-    updatedAt: instant("updated_at").defaultNow().notNull(),
-  },
-  (table) => [
-    check(
-      "finance_transaction_kind_check",
-      sql`${table.kind} in ('income', 'expense', 'transfer', 'adjustment')`,
-    ),
-    check(
-      "finance_transaction_state_check",
-      sql`${table.state} in ('planned', 'partially_settled', 'posted', 'canceled')`,
-    ),
-    check("finance_transaction_instrument_check", sql`${table.instrument} in ('wallet', 'card')`),
-    check(
-      "finance_transaction_amount_check",
-      sql`${table.amountMinor} > 0 and ${table.settledMinor} >= 0 and ${table.settledMinor} <= ${table.amountMinor}`,
-    ),
-    check("finance_transaction_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
-    uniqueIndex("finance_transaction_workspace_id_id_unique").on(table.workspaceId, table.id),
-    uniqueIndex("finance_transaction_recurrence_date_unique")
-      .on(table.workspaceId, table.recurrenceId, table.occurredOn)
-      .where(sql`${table.recurrenceId} is not null`),
   ],
 );
 

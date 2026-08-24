@@ -39,6 +39,10 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
     fileURLToPath(new URL("../drizzle/0014_stock_purchase_finance_link.down.sql", import.meta.url)),
     "utf8",
   );
+  const drizzleSchema = await readFile(
+    fileURLToPath(new URL("../src/schema.ts", import.meta.url)),
+    "utf8",
+  );
   assert.match(sql, /CREATE TABLE "stock_product"/);
   assert.match(sql, /stock_product_active_name_unique/);
   assert.match(sql, /WHERE "archived" = false/);
@@ -75,6 +79,10 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
   );
   assert.match(purchaseFinanceLink, /shopping_item_expense_transaction_idx/);
   assert.match(purchaseFinanceLinkDown, /DROP COLUMN IF EXISTS "expense_transaction_id"/);
+  assert.match(
+    drizzleSchema,
+    /foreignKey\(\{\s*columns: \[table\.workspaceId, table\.expenseTransactionId\],\s*foreignColumns: \[financeTransaction\.workspaceId, financeTransaction\.id\],\s*name: "shopping_item_expense_transaction_scope_fk",\s*\}\)\.onDelete\("restrict"\)/,
+  );
 });
 
 const adminUrl = process.env.DATABASE_URL_TEST;
