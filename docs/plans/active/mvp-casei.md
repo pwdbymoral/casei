@@ -78,14 +78,15 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 - [ ] **FIN-001 Ledger schema e domínio:** accounts, user transactions, events, entries, categorias, constraints de soma/escopo e guards de imutabilidade de evento publicado conforme ADR; testar insert/update/delete, alteração de cabeçalho e unpublish.
 - [ ] **FIN-002 Carteira:** saldo inicial, saldo atual, conferência e ajuste com motivo; testes de conservação e concorrência.
 - [ ] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
-- [ ] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer.
-- [ ] **FIN-005 Linha do tempo:** busca, período, filtros em URL, paginação, estados e detalhe auditável.
+- [x] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer por reversão auditável.
+- [x] **FIN-005 Linha do tempo:** busca, período, filtros em URL, paginação incremental e estados de carregamento/vazio/erro.
 - [ ] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia.
 
 O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
 auditável, categorias, idempotência, isolamento por papel e moeda, além dos contratos e guards
-necessários. Captura rápida UI, edição completa, ajustes com saldo observado e concorrência de
-produção continuam pendentes para o Gate 2.
+necessários. A fatia FIN-004/FIN-005 acrescenta captura rápida e linha do tempo autenticadas, com
+filtros/cursor no contrato HTTP e desfazer por reversão. Edição completa, ajustes com saldo observado,
+auditoria detalhada e concorrência de produção continuam pendentes para o Gate 2.
 
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 

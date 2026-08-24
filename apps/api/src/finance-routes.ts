@@ -10,6 +10,7 @@ import {
   payStatementSchema,
   reopenStatementSchema,
   statementListQuerySchema,
+  transactionListQuerySchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
 import {
@@ -20,7 +21,13 @@ import {
   type FinanceService,
   VersionConflictError,
 } from "./finance-service.js";
-import { ApiHttpError, errorResponse, notFoundError, validationError } from "./http/index.js";
+import {
+  ApiHttpError,
+  errorResponse,
+  InvalidCursorError,
+  notFoundError,
+  validationError,
+} from "./http/index.js";
 import { parseJsonBody, parseQuery } from "./http/parsing.js";
 import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiEnv } from "./http/types.js";
@@ -63,9 +70,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   });
 
   router.get("/workspaces/:workspaceId/transactions", async (context) => {
-    const query = parseQuery(context, paginationQuerySchema);
-    const items = await service.listTransactions(scopeOf(context), query.limit);
-    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+    const query = parseQuery(context, transactionListQuerySchema);
+    const page = await service.listTransactions(scopeOf(context), query);
+    return context.json({
+      items: page.items,
+      page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+    });
   });
 
   router.get("/workspaces/:workspaceId/transactions/:id", async (context) => {
@@ -258,5 +268,9 @@ export function financeErrorToHttp(error: unknown): unknown {
     return new ApiHttpError(412, "version_conflict", { currentVersion: error.currentVersion });
   if (error instanceof FinanceConflictError)
     return new ApiHttpError(409, "validation_failed", { message: error.message });
+  if (error instanceof InvalidCursorError)
+    return new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { cursor: ["O cursor da lista não é válido."] },
+    });
   return error;
 }

@@ -161,6 +161,8 @@ const civilDateSchema = z
     return day <= lastDay;
   }, "date must be a real civil date");
 
+export { civilDateSchema };
+
 const minorAmountSchema = z
   .string()
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
@@ -222,6 +224,22 @@ export const createTransactionSchema = z.object({
 });
 
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
+
+export const transactionListQuerySchema = paginationQuerySchema
+  .extend({
+    search: z.string().trim().max(100).optional(),
+    from: civilDateSchema.optional(),
+    to: civilDateSchema.optional(),
+    state: transactionStateSchema.optional(),
+    kind: transactionKindSchema.optional(),
+    cardId: domainIdSchema.optional(),
+  })
+  .refine(
+    (query) => !query.from || !query.to || query.from <= query.to,
+    "from must not be after to",
+  );
+
+export type TransactionListQuery = z.infer<typeof transactionListQuerySchema>;
 
 export const categoryKindSchema = z.enum(["income", "expense", "both"]);
 export const categorySchema = z.object({

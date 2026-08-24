@@ -1,6 +1,6 @@
 # Plano: núcleo financeiro vertical
 
-- Status: fatia implementada; hardening aplicado; composição autenticada e revisão de integração em andamento
+- Status: fatia FIN-004/FIN-005 implementada; hardening aplicado; revisão agêntica em andamento
 - Specs: [finanças](../../specs/financas.md), [cartões](../../specs/cartoes-de-credito.md), [metas e planejamento](../../specs/metas-e-planejamento.md)
 - Arquitetura: [modelo de domínio](../../architecture/modelo-de-dominio-mvp.md) e [ADR do ledger](../../architecture/decisions/0004-livro-razao-financeiro.md)
 
@@ -15,12 +15,13 @@
 - [x] Rotas `/v1/workspaces/:workspaceId/{transactions,categories,cards,recurrences,installments}` e pagamento de fatura, compostas no `createApp` com o actor autenticado e o scope/membership do AUTH-004.
 - [x] Testes de domínio/contrato e integração PostgreSQL cobrindo soma zero, parcelas, meses curtos, datas civis, role real e imutabilidade de eventos publicados.
 - [x] Incremento de fatura: composição ordenada de compras e pagamentos com cursor/limite estável e `hasMore`, reabertura explícita somente para fatura fechada sem pagamentos, conflito otimista com versão atual e recarregar/revisar na interface, além de confirmação acessível.
+- [x] FIN-004/FIN-005: captura rápida autenticada com defaults, moeda do espaço, feedback e desfazer por reversão; linha do tempo com busca, período, estado/tipo, filtros persistidos na URL, cursor assinado e carregamento incremental com estados vazio/erro/carregando.
 
 ## Limitações rastreáveis
 
 Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara FIN/PLAN/CARD completos. Permanecem tarefas posteriores sem decisão de negócio nova:
 
-- `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública, busca/cursor completo, defaults de categorias e UI de captura/linha do tempo.
+- `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública e defaults de categorias.
 - `PLAN`: liquidação parcial, janela móvel materializada por job, pausa/retomada e comandos de edição por escopo; a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
 - `CARD`: movimentação entre faturas abertas, ajuste pós-fechamento, estorno/tarifas e crédito excedente ainda permanecem; listagem, fechamento, composição e reabertura sem pagamentos já possuem API e interface.
 - `GOAL/INSIGHT`: persistência de metas/reservas, projeção/read models e UI ficam em fatias próprias; as funções puras de contribuição/valor seguro não persistem dados.
@@ -32,5 +33,6 @@ Esses itens são incompletudes de implementação, não escolhas de produto. Nã
 
 - `apps/api/test/finance-routes.test.ts` exerce o `createApp` exportado com `options.identity` + `finance`, verifica o actor autenticado e o role resolvido no scope antes de acessar cartões.
 - `apps/web/src/lib/finance.test.ts` cobre origem canônica, fixtures explicitamente habilitadas, ausência de origem, roles `owner`/`member`/`viewer`, paginação e itens cancelados.
+- `apps/web/src/lib/finance.test.ts` também cobre serialização de filtros, preservação da query de timeline, concatenação de página e reversão usada pelo desfazer da captura rápida.
 - `apps/web/src/lib/workspaces.test.ts` cobre a falha fechada do adapter de sessão sem origem configurada.
-- Validações executadas nesta revisão: `pnpm test -- finance-routes.test.ts` em `apps/api`; `pnpm typecheck` em `apps/api`; `pnpm test -- finance.test.ts workspaces.test.ts` em `apps/web`; `pnpm typecheck` em `apps/web`.
+- Validações executadas nesta revisão: `pnpm lint`, `pnpm typecheck` e `pnpm test` no monorepo. A integração PostgreSQL `identity-service.integration.test.ts` permanece ignorada localmente porque `DATABASE_URL_TEST` não está configurada; CI deve executar o cenário descartável.

@@ -10,7 +10,10 @@ import {
   ReceiptTextIcon,
   RefreshCwIcon,
   RotateCcwIcon,
+  SearchIcon,
+  XIcon,
 } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { MoneyInput } from "@/components/primitives";
@@ -36,10 +39,12 @@ import {
   type FinanceAdapter,
   FinanceAdapterError,
   financeAdapterForEnvironment,
+  mergeTransactionPage,
   type Statement,
   type StatementItem,
   statementItemAmountPrefix,
   type Transaction,
+  transactionQueryFromSearchParams,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
@@ -73,6 +78,7 @@ type FinanceDashboardProps = {
   fixtureMode?: boolean;
   workspaceId: string;
   role: WorkspaceRole;
+  currency?: string;
 };
 
 function FinanceDashboard({
@@ -80,11 +86,17 @@ function FinanceDashboard({
   fixtureMode = false,
   workspaceId,
   role,
+  currency = "BRL",
 }: FinanceDashboardProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [adapter] = useState<FinanceAdapter>(
     () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [transactionsNextCursor, setTransactionsNextCursor] = useState<string | null>(null);
+  const [transactionsHasMore, setTransactionsHasMore] = useState(false);
+  const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null);
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
@@ -113,34 +125,93 @@ function FinanceDashboard({
     statement: Statement;
   } | null>(null);
   const [statementItemsRequest] = useState(createRequestGuard);
+  const [timelineSearch, setTimelineSearch] = useState("");
+  const [timelineFrom, setTimelineFrom] = useState("");
+  const [timelineTo, setTimelineTo] = useState("");
+  const [timelineState, setTimelineState] = useState<"" | Transaction["state"]>("");
+  const [timelineKind, setTimelineKind] = useState<"" | Transaction["kind"]>("");
+  const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
+  const [undoing, setUndoing] = useState(false);
   const writeAccess = canWriteFinance(role);
 
-  const load = useCallback(async () => {
-    setStatus("loading");
-    setError(null);
-    setViewingStatement(null);
-    setStatementItems([]);
-    setStatementItemsNextCursor(null);
-    setStatementItemsHasMore(false);
-    try {
-      const [nextTransactions, nextCards, nextStatements] = await Promise.all([
-        adapter.listTransactions(workspaceId),
-        adapter.listCards(workspaceId),
-        adapter.listStatements(workspaceId),
-      ]);
-      setTransactions(nextTransactions);
-      setCards(nextCards);
-      setStatements(nextStatements);
-      setStatus("success");
-    } catch (cause) {
-      setStatus("error");
-      setError(cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.");
-    }
-  }, [adapter, workspaceId]);
+  const timelineQuery = useMemo(
+    () => transactionQueryFromSearchParams(new URLSearchParams(searchParams.toString())),
+    [searchParams],
+  );
+
+  const hasTimelineFilters = Boolean(
+    timelineQuery.search ||
+      timelineQuery.from ||
+      timelineQuery.to ||
+      timelineQuery.state ||
+      timelineQuery.kind,
+  );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    setTimelineSearch(timelineQuery.search ?? "");
+    setTimelineFrom(timelineQuery.from ?? "");
+    setTimelineTo(timelineQuery.to ?? "");
+    setTimelineState(timelineQuery.state ?? "");
+    setTimelineKind(timelineQuery.kind ?? "");
+  }, [timelineQuery]);
+
+  useEffect(() => {
+    if (!undoableTransaction) return;
+    const timeout = window.setTimeout(() => setUndoableTransaction(null), 10_000);
+    return () => window.clearTimeout(timeout);
+  }, [undoableTransaction]);
+
+  function updateTimelineQuery(values: {
+    search?: string;
+    from?: string;
+    to?: string;
+    state?: string;
+    kind?: string;
+    cursor?: string | null;
+  }) {
+    const params = new URLSearchParams(searchParams.toString());
+    for (const [key, value] of Object.entries(values)) {
+      if (value) params.set(key, value);
+      else params.delete(key);
+    }
+    if (!("cursor" in values)) params.delete("cursor");
+    const query = params.toString();
+    router.replace(`/app/finances${query ? `?${query}` : ""}`, { scroll: false });
+  }
+
+  const load = useCallback(
+    async (append = false) => {
+      setStatus("loading");
+      setError(null);
+      setViewingStatement(null);
+      setStatementItems([]);
+      setStatementItemsNextCursor(null);
+      setStatementItemsHasMore(false);
+      try {
+        const [nextTransactions, nextCards, nextStatements] = await Promise.all([
+          adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
+          adapter.listCards(workspaceId),
+          adapter.listStatements(workspaceId),
+        ]);
+        setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
+        setTransactionsNextCursor(nextTransactions.nextCursor);
+        setTransactionsHasMore(nextTransactions.hasMore);
+        setCards(nextCards);
+        setStatements(nextStatements);
+        setStatus("success");
+      } catch (cause) {
+        setStatus("error");
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.",
+        );
+      }
+    },
+    [adapter, timelineQuery, workspaceId],
+  );
+
+  useEffect(() => {
+    void load(Boolean(timelineQuery.cursor));
+  }, [load, timelineQuery.cursor]);
 
   const walletTotal = useMemo(
     () =>
@@ -164,23 +235,62 @@ function FinanceDashboard({
     try {
       const created = await adapter.createTransaction(workspaceId, {
         kind: transactionType,
-        amount: { currency: "BRL", minor: amount },
+        amount: { currency, minor: amount },
         occurredOn: today(),
         state: planned ? "planned" : "posted",
         description,
         cardId: transactionCardId || null,
       });
-      setTransactions((current) => [created, ...current]);
+      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
+      else await load(false);
       setAmount("0");
       setDescription("");
       setTransactionCardId("");
       setPlanned(false);
       setNotice(planned ? "Compromisso salvo." : "Lançamento salvo.");
+      setUndoableTransaction(planned ? null : created);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Não foi possível salvar o lançamento.");
     } finally {
       setSaving(false);
     }
+  }
+
+  async function undoTransaction() {
+    if (!undoableTransaction || undoing) return;
+    setUndoing(true);
+    setError(null);
+    try {
+      await adapter.reverseTransaction(workspaceId, undoableTransaction);
+      setUndoableTransaction(null);
+      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
+      else await load(false);
+      setNotice("Lançamento desfeito.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível desfazer o lançamento.");
+    } finally {
+      setUndoing(false);
+    }
+  }
+
+  function applyTimelineFilters(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    updateTimelineQuery({
+      search: timelineSearch.trim(),
+      from: timelineFrom,
+      to: timelineTo,
+      state: timelineState,
+      kind: timelineKind,
+    });
+  }
+
+  function clearTimelineFilters() {
+    setTimelineSearch("");
+    setTimelineFrom("");
+    setTimelineTo("");
+    setTimelineState("");
+    setTimelineKind("");
+    updateTimelineQuery({ search: "", from: "", to: "", state: "", kind: "" });
   }
 
   async function handleCardSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -333,7 +443,20 @@ function FinanceDashboard({
           <CheckIcon aria-hidden="true" />
           <AlertTitle>{notice}</AlertTitle>
           <AlertDescription>
-            Você pode continuar registrando ou revisar a linha do tempo abaixo.
+            <span className="flex flex-wrap items-center gap-3">
+              <span>Você pode continuar registrando ou revisar a linha do tempo abaixo.</span>
+              {undoableTransaction ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void undoTransaction()}
+                  disabled={undoing || !writeAccess}
+                >
+                  {undoing ? "Desfazendo…" : "Desfazer"}
+                </Button>
+              ) : null}
+            </span>
           </AlertDescription>
         </Alert>
       ) : null}
@@ -348,14 +471,14 @@ function FinanceDashboard({
         <Card className="bg-primary text-primary-foreground">
           <CardHeader>
             <CardDescription className="text-primary-foreground/70">
-              Saldo registrado
+              Saldo dos lançamentos carregados
             </CardDescription>
             <CardTitle className="text-3xl font-semibold tracking-tight">
               {formatMoneyMinor(walletTotal.toString())}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-primary-foreground/80">
-            Somente lançamentos realizados na carteira.
+            A linha do tempo é paginada; aplique filtros ou carregue mais para revisar os dados.
           </CardContent>
         </Card>
         <Card>
@@ -468,44 +591,163 @@ function FinanceDashboard({
         <Card>
           <CardHeader>
             <CardTitle>Linha do tempo</CardTitle>
-            <CardDescription>Entradas, saídas e compromissos do espaço.</CardDescription>
+            <CardDescription>
+              Entradas, saídas e compromissos do espaço. Filtros ficam salvos neste endereço.
+            </CardDescription>
           </CardHeader>
           <CardContent>
+            <form
+              className="mb-5 grid gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-2 lg:grid-cols-3"
+              onSubmit={applyTimelineFilters}
+              aria-label="Filtrar linha do tempo"
+            >
+              <Field className="sm:col-span-2 lg:col-span-3">
+                <FieldLabel htmlFor="timeline-search">Buscar por descrição</FieldLabel>
+                <div className="relative">
+                  <SearchIcon
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                  />
+                  <Input
+                    id="timeline-search"
+                    value={timelineSearch}
+                    onChange={(event) => setTimelineSearch(event.target.value)}
+                    placeholder="Ex.: mercado"
+                    className="pl-9"
+                    maxLength={100}
+                  />
+                </div>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-from">De</FieldLabel>
+                <Input
+                  id="timeline-from"
+                  type="date"
+                  value={timelineFrom}
+                  onChange={(event) => setTimelineFrom(event.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-to">Até</FieldLabel>
+                <Input
+                  id="timeline-to"
+                  type="date"
+                  value={timelineTo}
+                  onChange={(event) => setTimelineTo(event.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-state">Estado</FieldLabel>
+                <select
+                  id="timeline-state"
+                  className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={timelineState}
+                  onChange={(event) =>
+                    setTimelineState(event.target.value as "" | Transaction["state"])
+                  }
+                >
+                  <option value="">Todos</option>
+                  <option value="posted">Realizadas</option>
+                  <option value="planned">Planejadas</option>
+                  <option value="partially_settled">Parciais</option>
+                  <option value="canceled">Canceladas</option>
+                </select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="timeline-kind">Tipo</FieldLabel>
+                <select
+                  id="timeline-kind"
+                  className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={timelineKind}
+                  onChange={(event) =>
+                    setTimelineKind(event.target.value as "" | Transaction["kind"])
+                  }
+                >
+                  <option value="">Todos</option>
+                  <option value="expense">Despesas</option>
+                  <option value="income">Receitas</option>
+                  <option value="transfer">Transferências</option>
+                  <option value="adjustment">Ajustes</option>
+                </select>
+              </Field>
+              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
+                <Button type="submit" size="sm">
+                  <SearchIcon aria-hidden="true" /> Aplicar filtros
+                </Button>
+                {hasTimelineFilters ? (
+                  <Button type="button" size="sm" variant="ghost" onClick={clearTimelineFilters}>
+                    <XIcon aria-hidden="true" /> Limpar
+                  </Button>
+                ) : null}
+              </div>
+            </form>
             {status === "loading" ? (
               <p role="status" className="text-sm text-muted-foreground">
                 Carregando lançamentos…
               </p>
             ) : transactions.length === 0 ? (
               <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                Nenhum lançamento ainda. Comece pelo valor acima.
+                {hasTimelineFilters
+                  ? "Nenhum lançamento corresponde aos filtros. Tente limpar ou ampliar o período."
+                  : "Nenhum lançamento ainda. Comece pelo valor acima."}
               </p>
             ) : (
-              <ul className="divide-y">
-                {transactions.map((transaction) => (
-                  <li
-                    key={transaction.id}
-                    className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{transactionLabel(transaction)}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {transactionKindLabel(transaction)} · {transaction.occurredOn} ·{" "}
-                        {transaction.state === "planned" ? "Planejada" : "Realizada"}
-                      </p>
-                    </div>
-                    <span
-                      className={
-                        transaction.kind === "income"
-                          ? "font-semibold text-emerald-700"
-                          : "font-semibold text-foreground"
-                      }
+              <>
+                <ul className="divide-y">
+                  {transactions.map((transaction) => (
+                    <li
+                      key={transaction.id}
+                      className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
                     >
-                      {transaction.kind === "income" ? "+" : "−"}
-                      {formatMoneyMinor(transaction.amount.minor)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{transactionLabel(transaction)}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {transactionKindLabel(transaction)} · {transaction.occurredOn} ·{" "}
+                          {transaction.state === "planned"
+                            ? "Planejada"
+                            : transaction.state === "canceled"
+                              ? "Cancelada"
+                              : transaction.state === "partially_settled"
+                                ? "Parcial"
+                                : "Realizada"}
+                        </p>
+                      </div>
+                      <span
+                        className={
+                          transaction.state === "canceled"
+                            ? "font-semibold text-muted-foreground line-through"
+                            : transaction.kind === "income"
+                              ? "font-semibold text-emerald-700"
+                              : "font-semibold text-foreground"
+                        }
+                      >
+                        {transaction.kind === "income" ? "+" : "−"}
+                        {formatMoneyMinor(transaction.amount.minor)}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setViewingTransaction(transaction)}
+                        aria-label={`Ver detalhes de ${transactionLabel(transaction)}`}
+                      >
+                        Detalhes
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+                {transactionsHasMore ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-4"
+                    onClick={() => updateTimelineQuery({ cursor: transactionsNextCursor })}
+                    disabled={!transactionsNextCursor}
+                  >
+                    Carregar mais lançamentos
+                  </Button>
+                ) : null}
+              </>
             )}
           </CardContent>
         </Card>
@@ -693,6 +935,64 @@ function FinanceDashboard({
       </Card>
 
       <Dialog
+        open={viewingTransaction !== null}
+        onOpenChange={(open) => {
+          if (!open) setViewingTransaction(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Detalhes do lançamento</DialogTitle>
+            <DialogDescription>
+              Revise a origem, o estado e a versão antes de corrigir este registro.
+            </DialogDescription>
+          </DialogHeader>
+          {viewingTransaction ? (
+            <dl className="grid gap-3 rounded-lg bg-muted/50 p-4 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-muted-foreground">Descrição</dt>
+                <dd className="mt-1 font-medium">{transactionLabel(viewingTransaction)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Tipo</dt>
+                <dd className="mt-1 font-medium">{transactionKindLabel(viewingTransaction)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Valor</dt>
+                <dd className="mt-1 font-medium">
+                  {viewingTransaction.kind === "income" ? "+" : "−"}
+                  {formatMoneyMinor(viewingTransaction.amount.minor)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Estado</dt>
+                <dd className="mt-1 font-medium">
+                  {viewingTransaction.state === "posted"
+                    ? "Realizada"
+                    : viewingTransaction.state === "planned"
+                      ? "Planejada"
+                      : viewingTransaction.state === "partially_settled"
+                        ? "Parcial"
+                        : "Cancelada"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Data do fato</dt>
+                <dd className="mt-1 font-medium">{viewingTransaction.occurredOn}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Versão auditável</dt>
+                <dd className="mt-1 font-medium">v{viewingTransaction.version}</dd>
+              </div>
+            </dl>
+          ) : null}
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={viewingStatement !== null}
         onOpenChange={(open) => {
           if (!open) setViewingStatement(null);
@@ -845,6 +1145,13 @@ function FinanceDashboard({
 }
 
 export default function FinancesPage() {
-  const { workspaceId, role, fixtureMode } = useAuthenticatedWorkspace();
-  return <FinanceDashboard workspaceId={workspaceId} role={role} fixtureMode={fixtureMode} />;
+  const { workspaceId, role, fixtureMode, currency } = useAuthenticatedWorkspace();
+  return (
+    <FinanceDashboard
+      workspaceId={workspaceId}
+      role={role}
+      fixtureMode={fixtureMode}
+      currency={currency}
+    />
+  );
 }

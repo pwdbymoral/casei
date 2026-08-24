@@ -1,4 +1,8 @@
-import { createTransactionSchema, payStatementSchema } from "@casei/contracts";
+import {
+  createTransactionSchema,
+  payStatementSchema,
+  transactionListQuerySchema,
+} from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 
 describe("finance contracts", () => {
@@ -17,5 +21,22 @@ describe("finance contracts", () => {
       occurredOn: "2028-02-29",
       allowCredit: false,
     });
+  });
+
+  it("parses timeline filters and rejects an inverted period", () => {
+    expect(
+      transactionListQuerySchema.parse({
+        search: "mercado",
+        from: "2026-08-01",
+        to: "2026-08-31",
+        state: "posted",
+        kind: "expense",
+        limit: "25",
+      }),
+    ).toMatchObject({ search: "mercado", from: "2026-08-01", to: "2026-08-31", limit: 25 });
+
+    expect(() =>
+      transactionListQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
+    ).toThrow();
   });
 });

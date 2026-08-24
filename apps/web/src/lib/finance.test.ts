@@ -6,7 +6,9 @@ import {
   createHttpFinanceAdapter,
   createRequestGuard,
   financeAdapterForEnvironment,
+  mergeTransactionPage,
   statementItemAmountPrefix,
+  transactionQueryFromSearchParams,
   unauthenticatedFinanceAdapter,
 } from "./finance";
 
@@ -91,15 +93,61 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("serializes timeline filters and cursor in the API request", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      expect(input).toBe(
+        "/v1/workspaces/workspace/transactions?cursor=cursor-1&limit=25&search=mercado&from=2026-08-01&to=2026-08-31&state=posted&kind=expense",
+      );
+      return Response.json({ items: [], page: { nextCursor: null, hasMore: false } });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+
+    await expect(
+      adapter.listTransactions("workspace", {
+        cursor: "cursor-1",
+        limit: 25,
+        search: "mercado",
+        from: "2026-08-01",
+        to: "2026-08-31",
+        state: "posted",
+        kind: "expense",
+      }),
+    ).resolves.toEqual({ items: [], nextCursor: null, hasMore: false });
+  });
+
+  it("keeps timeline filters in URL parameters and appends the next page", () => {
+    const query = transactionQueryFromSearchParams(
+      new URLSearchParams("search=mercado&from=2026-08-01&state=posted&cursor=cursor-2"),
+    );
+    expect(query).toEqual({
+      search: "mercado",
+      from: "2026-08-01",
+      state: "posted",
+      cursor: "cursor-2",
+    });
+
+    const first = { id: "first" } as never;
+    const second = { id: "second" } as never;
+    expect(
+      mergeTransactionPage([first], { items: [second], nextCursor: null, hasMore: false }, true),
+    ).toEqual([first, second]);
+    expect(
+      mergeTransactionPage([first], { items: [second], nextCursor: null, hasMore: false }, false),
+    ).toEqual([second]);
+  });
+
   it("keeps fixture writes in the same adapter for quick capture", async () => {
     const adapter = createFixtureFinanceAdapter();
     const before = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
-    await adapter.createTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", {
+    const created = await adapter.createTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", {
       kind: "expense",
       amount: { currency: "BRL", minor: "2500" },
     });
     const after = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
-    expect(after).toHaveLength(before.length + 1);
+    expect(after.items).toHaveLength(before.items.length + 1);
+    await expect(
+      adapter.reverseTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", created),
+    ).resolves.toMatchObject({ id: created.id, state: "canceled" });
   });
 
   it("keeps statement pagination metadata and loads a second page over fifty items", async () => {

@@ -6,6 +6,7 @@ import {
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  type TransactionListQuery,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
 import { executeIdempotent, type JsonValue, withUnitOfWork } from "@casei/database";
@@ -108,6 +109,8 @@ export interface StatementItemsPage {
 
 type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const statementItemsCursorOrdering = "occurred_on,created_at,id";
+type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: string];
+const transactionCursorOrdering = "occurred_on,created_at,id:desc";
 
 interface TransactionRow {
   id: string;
@@ -125,6 +128,7 @@ interface TransactionRow {
   card_id: string | null;
   statement_id: string | null;
   recurrence_id: string | null;
+  created_at?: Date | string;
   version: number;
 }
 
@@ -174,18 +178,64 @@ export class FinanceService {
     };
   }
 
-  async listTransactions(scope: FinanceScope, limit = 50): Promise<TransactionView[]> {
+  async listTransactions(
+    scope: FinanceScope,
+    options: Partial<TransactionListQuery> = {},
+  ): Promise<{ items: TransactionView[]; nextCursor: string | null; hasMore: boolean }> {
     return this.withScopedClient(scope, async (client) => {
+      const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+      const values: unknown[] = [scope.workspaceId];
+      const conditions = ["t.workspace_id = $1"];
+      const addValue = (value: unknown): string => {
+        values.push(value);
+        return `$${values.length}`;
+      };
+      if (options.search) {
+        const parameter = addValue(`%${options.search}%`);
+        conditions.push(`t.description ILIKE ${parameter}`);
+      }
+      if (options.from) conditions.push(`t.occurred_on >= ${addValue(options.from)}::date`);
+      if (options.to) conditions.push(`t.occurred_on <= ${addValue(options.to)}::date`);
+      if (options.state) conditions.push(`t.state = ${addValue(options.state)}`);
+      if (options.kind) conditions.push(`t.kind = ${addValue(options.kind)}`);
+      if (options.cardId) conditions.push(`t.card_id = ${addValue(options.cardId)}::uuid`);
+
+      const cursor = options.cursor
+        ? decodeTransactionCursor(options.cursor, this.cursorSecret)
+        : null;
+      if (cursor) {
+        const occurredOn = addValue(cursor[0]);
+        const createdAt = addValue(cursor[1]);
+        const id = addValue(cursor[2]);
+        conditions.push(
+          `(t.occurred_on < ${occurredOn}::date OR (t.occurred_on = ${occurredOn}::date AND t.created_at < ${createdAt}::timestamptz) OR (t.occurred_on = ${occurredOn}::date AND t.created_at = ${createdAt}::timestamptz AND t.id < ${id}::uuid))`,
+        );
+      }
+
+      const limitParameter = addValue(limit + 1);
       const result = await client.query<TransactionRow>(
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
-                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version
+                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, created_at, version
            FROM finance_transaction
-          WHERE workspace_id = $1
-          ORDER BY occurred_on DESC, id DESC
-          LIMIT $2`,
-        [scope.workspaceId, Math.min(Math.max(limit, 1), 100)],
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY occurred_on DESC, created_at DESC, id DESC
+          LIMIT ${limitParameter}`,
+        values,
       );
-      return result.rows.map(toTransactionView);
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+      const last = rows.at(-1);
+      const nextCursor =
+        hasMore && last?.created_at
+          ? encodeCursor(
+              {
+                ordering: transactionCursorOrdering,
+                position: [last.occurred_on, new Date(last.created_at).toISOString(), last.id],
+              },
+              this.cursorSecret,
+            )
+          : null;
+      return { items: rows.map(toTransactionView), nextCursor, hasMore };
     });
   }
 
@@ -601,6 +651,7 @@ export class FinanceService {
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
+        await this.recordTransactionAudit(client, scope, id, "transaction.reversed");
         return toTransactionView(result.rows[0]);
       },
     );
@@ -1195,6 +1246,21 @@ export class FinanceService {
     );
   }
 
+  private async recordTransactionAudit(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    transactionId: string,
+    action: "transaction.reversed",
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO audit_event
+         (category, action, actor_id, workspace_id, target_type, target_id,
+          origin, correlation_id, result)
+       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, 'api', $5, 'success')`,
+      [action, scope.actorId, scope.workspaceId, transactionId, scope.correlationId],
+    );
+  }
+
   private async workspaceCurrency(client: PgPoolClient, workspaceId: string): Promise<string> {
     const result = await client.query<{ currency_code: string }>(
       `SELECT currency_code FROM workspace_preference WHERE workspace_id = $1`,
@@ -1328,6 +1394,28 @@ function decodeStatementItemsCursor(cursor: string, secret: string): StatementIt
   const position = payload.position;
   if (
     payload.ordering !== statementItemsCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 3 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [occurredOn, createdAt, id] = position as [string, string, string];
+  if (
+    !parseLocalDate(occurredOn).ok ||
+    Number.isNaN(Date.parse(createdAt)) ||
+    !domainIdSchema.safeParse(id).success
+  ) {
+    throw new InvalidCursorError();
+  }
+  return [occurredOn, createdAt, id];
+}
+
+function decodeTransactionCursor(cursor: string, secret: string): TransactionCursorPosition {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== transactionCursorOrdering ||
     !Array.isArray(position) ||
     position.length !== 3 ||
     position.some((value) => typeof value !== "string")

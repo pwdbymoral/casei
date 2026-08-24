@@ -10,6 +10,8 @@ export type WorkspaceSummary = {
   timeZone: string;
   status: "active" | "deletion_pending" | "deactivated";
   version: number;
+  /** Exposed by identity when workspace preferences include the active currency. */
+  currency?: string;
 };
 
 export type WorkspaceUser = {

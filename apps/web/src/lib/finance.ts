@@ -68,6 +68,44 @@ export type StatementItemsQuery = {
   limit?: number;
 };
 
+export type TransactionPage = {
+  items: Transaction[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type TransactionQuery = {
+  cursor?: string | null;
+  limit?: number;
+  search?: string;
+  from?: string;
+  to?: string;
+  state?: Transaction["state"];
+  kind?: Transaction["kind"];
+  cardId?: string;
+};
+
+/** Keeps timeline URL parsing and pagination deterministic outside the page component. */
+export function transactionQueryFromSearchParams(params: URLSearchParams): TransactionQuery {
+  const value = (key: string) => params.get(key) || undefined;
+  return {
+    cursor: value("cursor"),
+    search: value("search"),
+    from: value("from"),
+    to: value("to"),
+    state: value("state") as Transaction["state"] | undefined,
+    kind: value("kind") as Transaction["kind"] | undefined,
+  };
+}
+
+export function mergeTransactionPage(
+  current: Transaction[],
+  page: TransactionPage,
+  append: boolean,
+): Transaction[] {
+  return append ? [...current, ...page.items] : page.items;
+}
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -89,8 +127,9 @@ export type CreateTransactionInput = {
 };
 
 export type FinanceAdapter = {
-  listTransactions(workspaceId: string): Promise<Transaction[]>;
+  listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
   createTransaction(workspaceId: string, input: CreateTransactionInput): Promise<Transaction>;
+  reverseTransaction(workspaceId: string, transaction: Transaction): Promise<Transaction>;
   listCategories(workspaceId: string): Promise<Category[]>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
   createCard(
@@ -165,6 +204,7 @@ const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> 
 export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   listTransactions: unavailableFinanceOperation,
   createTransaction: unavailableFinanceOperation,
+  reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
   listCards: unavailableFinanceOperation,
   createCard: unavailableFinanceOperation,
@@ -221,12 +261,38 @@ export function createHttpFinanceAdapter(
   const list = async <T>(path: string) => (await listPage<T>(path)).items;
 
   return {
-    listTransactions: (workspaceId) => list<Transaction>(`/workspaces/${workspaceId}/transactions`),
+    listTransactions: (workspaceId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      if (query.search) params.set("search", query.search);
+      if (query.from) params.set("from", query.from);
+      if (query.to) params.set("to", query.to);
+      if (query.state) params.set("state", query.state);
+      if (query.kind) params.set("kind", query.kind);
+      if (query.cardId) params.set("cardId", query.cardId);
+      const search = params.toString();
+      return listPage<Transaction>(
+        `/workspaces/${workspaceId}/transactions${search ? `?${search}` : ""}`,
+      ).then((response) => ({
+        items: response.items,
+        nextCursor: response.page.nextCursor,
+        hasMore: response.page.hasMore,
+      }));
+    },
     createTransaction: async (workspaceId, input) =>
       call<Transaction>(`/workspaces/${workspaceId}/transactions`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify(input),
+      }),
+    reverseTransaction: (workspaceId, transaction) =>
+      call<Transaction>(`/workspaces/${workspaceId}/transactions/${transaction.id}/reverse`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${transaction.version}"`,
+        },
       }),
     listCategories: (workspaceId) => list<Category>(`/workspaces/${workspaceId}/categories`),
     listCards: (workspaceId) => list<CreditCard>(`/workspaces/${workspaceId}/cards`),
@@ -340,7 +406,33 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     },
   ];
   return {
-    listTransactions: async () => [...transactions],
+    listTransactions: async (_workspaceId, query = {}) => {
+      const filtered = transactions.filter((transaction) => {
+        if (
+          query.search &&
+          !transaction.description.toLowerCase().includes(query.search.toLowerCase())
+        )
+          return false;
+        if (query.from && transaction.occurredOn < query.from) return false;
+        if (query.to && transaction.occurredOn > query.to) return false;
+        if (query.state && transaction.state !== query.state) return false;
+        if (query.kind && transaction.kind !== query.kind) return false;
+        if (query.cardId && transaction.cardId !== query.cardId) return false;
+        return true;
+      });
+      const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+      const offset = query.cursor?.startsWith("fixture:")
+        ? Number.parseInt(query.cursor.slice("fixture:".length), 10)
+        : 0;
+      const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+      const items = filtered.slice(start, start + limit);
+      const hasMore = start + limit < filtered.length;
+      return {
+        items,
+        nextCursor: hasMore ? `fixture:${start + limit}` : null,
+        hasMore,
+      };
+    },
     createTransaction: async (workspaceId, input) => {
       const value: Transaction = {
         id: fixtureId(transactions.length + 1),
@@ -374,6 +466,13 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           value.statementId = statement.id;
         }
       }
+      return value;
+    },
+    reverseTransaction: async (_workspaceId, transaction) => {
+      const current = transactions.find((value) => value.id === transaction.id);
+      if (!current) throw new FinanceAdapterError("Lançamento não encontrado.", 404);
+      const value = { ...current, state: "canceled" as const, version: current.version + 1 };
+      transactions[transactions.indexOf(current)] = value;
       return value;
     },
     listCategories: async () => [],

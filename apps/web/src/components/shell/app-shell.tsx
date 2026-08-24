@@ -62,6 +62,7 @@ export type AuthenticatedWorkspaceScope = {
   workspaceId: string;
   role: NonNullable<ReturnType<typeof getActiveWorkspace>>["role"];
   fixtureMode: boolean;
+  currency?: string;
 };
 
 const AuthenticatedWorkspaceContext = createContext<AuthenticatedWorkspaceScope | null>(null);
@@ -377,6 +378,7 @@ export function AppShell({
         workspaceId: activeWorkspace.id,
         role: activeWorkspace.role,
         fixtureMode: adapterMode === "fixture",
+        currency: activeWorkspace.currency,
       }}
     >
       {children}

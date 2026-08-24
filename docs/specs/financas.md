@@ -60,6 +60,17 @@ Compra no cartão é `expense` na data da compra e aumenta o passivo do cartão;
 
 Sem descrição, a UI usa rótulo neutro como `Despesa sem descrição`, sem inventar categoria.
 
+### Captura rápida e linha do tempo
+
+- A captura rápida exige somente valor, mostra carteira/estado realizado como defaults e preserva os
+  detalhes opcionais recolhidos. Após uma gravação realizada, a confirmação oferece desfazer por
+  curto período; desfazer usa o comando de reversão auditável, não apaga o histórico.
+- `GET /v1/workspaces/:workspaceId/transactions` aceita `search`, `from`, `to`, `state`, `kind`,
+  `cardId`, `limit` e cursor. A ordenação é civil decrescente por `occurredOn`, instante de criação
+  decrescente e ID decrescente; o cursor é opaco e assinado. A lista retorna envelope `items/page`.
+- A UI mantém os filtros da linha do tempo na URL, distingue vazio inicial de vazio filtrado e
+  permite carregar a próxima página sem substituir os itens já visíveis.
+
 ### Conta a pagar ou receber
 
 O usuário muda o estado para `Planejada` e informa vencimento. A ocorrência aparece em próximos compromissos, não no saldo atual. Ao marcar como paga/recebida, informa ou aceita data e valor efetivos. Pagamento parcial registra cumprimento parcial e mantém o restante planejado.
