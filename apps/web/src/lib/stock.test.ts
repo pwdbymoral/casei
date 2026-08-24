@@ -215,6 +215,7 @@ describe("stock adapter", () => {
         note: null,
         purchased: false,
         purchasedAt: null,
+        expenseTransactionId: null,
         lastChangedBy: "user_fixture_marina",
         version: 4,
       },

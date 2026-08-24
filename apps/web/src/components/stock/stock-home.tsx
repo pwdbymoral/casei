@@ -30,6 +30,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { financeAdapterForEnvironment, type Transaction } from "@/lib/finance";
+import { formatMoneyMinor } from "@/lib/money";
 import {
   canWriteStock,
   type StockAdapter,
@@ -50,6 +52,10 @@ export function StockHome() {
   const { workspaceId, role, fixtureMode } = useAuthenticatedWorkspace();
   const adapter = useMemo<StockAdapter>(
     () => stockAdapterForEnvironment({ fixtures: fixtureMode }),
+    [fixtureMode],
+  );
+  const financeAdapter = useMemo(
+    () => financeAdapterForEnvironment({ fixtures: fixtureMode }),
     [fixtureMode],
   );
   const [products, setProducts] = useState<StockProduct[]>([]);
@@ -82,6 +88,11 @@ export function StockHome() {
   const [freeItemQuantity, setFreeItemQuantity] = useState("");
   const [selectedShoppingIds, setSelectedShoppingIds] = useState<string[]>([]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [checkoutExpenses, setCheckoutExpenses] = useState<Transaction[]>([]);
+  const [checkoutExpenseId, setCheckoutExpenseId] = useState<string | null>(null);
+  const [checkoutExpenseStatus, setCheckoutExpenseStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [checkoutDraft, setCheckoutDraft] = useState<
     Record<string, { addToStock: boolean; quantity: string }>
   >({});
@@ -200,7 +211,7 @@ export function StockHome() {
     );
   }
 
-  function openCheckout() {
+  async function openCheckout() {
     const selected = shoppingItems.filter((item) => selectedShoppingIds.includes(item.id));
     setCheckoutDraft(
       Object.fromEntries(
@@ -210,7 +221,23 @@ export function StockHome() {
         ]),
       ),
     );
+    setCheckoutExpenseId(null);
+    setCheckoutExpenseStatus("loading");
     setCheckoutOpen(true);
+    try {
+      const page = await financeAdapter.listTransactions(workspaceId, {
+        kind: "expense",
+        state: "posted",
+        limit: 50,
+      });
+      setCheckoutExpenses(page.items);
+      setCheckoutExpenseStatus("ready");
+    } catch {
+      // The link is optional. A finance read failure must not hide the
+      // explicit stock completion action; the user can continue without it.
+      setCheckoutExpenses([]);
+      setCheckoutExpenseStatus("error");
+    }
   }
 
   async function finalizeShopping() {
@@ -223,6 +250,7 @@ export function StockHome() {
         await adapter.purchaseShoppingItem(workspaceId, item, {
           addToStock: draft.addToStock,
           quantity: draft.quantity || null,
+          expenseTransactionId: checkoutExpenseId,
         });
       }
       setSelectedShoppingIds([]);
@@ -637,6 +665,37 @@ export function StockHome() {
               ser adicionadas.
             </DialogDescription>
           </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="checkout-expense">Despesa financeira (opcional)</Label>
+            <select
+              id="checkout-expense"
+              className="min-h-11 rounded-md border border-input bg-background px-3 text-sm"
+              value={checkoutExpenseId ?? ""}
+              onChange={(event) => setCheckoutExpenseId(event.target.value || null)}
+              disabled={checkoutExpenseStatus === "loading" || busy === "shopping-checkout"}
+            >
+              <option value="">Não vincular despesa</option>
+              {checkoutExpenses.map((expense) => (
+                <option key={expense.id} value={expense.id}>
+                  {expense.occurredOn} · {expense.description || "Despesa"} ·{" "}
+                  {formatMoneyMinor(expense.amount.minor, expense.amount.currency)}
+                </option>
+              ))}
+            </select>
+            {checkoutExpenseStatus === "loading" ? (
+              <p className="text-xs text-muted-foreground" role="status">
+                Carregando despesas recentes…
+              </p>
+            ) : checkoutExpenseStatus === "error" ? (
+              <p className="text-xs text-muted-foreground" role="status">
+                Não foi possível carregar despesas. Você pode concluir sem vínculo.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                A seleção é apenas uma referência; nenhum lançamento financeiro será criado.
+              </p>
+            )}
+          </div>
           <div className="flex max-h-[55vh] flex-col gap-3 overflow-y-auto">
             {shoppingItems
               .filter((item) => selectedShoppingIds.includes(item.id))
