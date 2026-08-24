@@ -62,6 +62,10 @@ CREATE TRIGGER shopping_item_event_immutable_guard
   BEFORE UPDATE OR DELETE ON shopping_item_event
   FOR EACH ROW EXECUTE FUNCTION app.guard_shopping_item_event_immutable();
 
+-- The baseline migration grants DML on every public table. Revoke destructive
+-- access before granting the smallest command surface for the append-only log.
+REVOKE DELETE ON shopping_item FROM casei_app;
+REVOKE UPDATE, DELETE ON shopping_item_event FROM casei_app;
 GRANT SELECT, INSERT, UPDATE ON shopping_item TO casei_app;
 GRANT SELECT, INSERT ON shopping_item_event TO casei_app;
 ALTER TABLE shopping_item ENABLE ROW LEVEL SECURITY;

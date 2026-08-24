@@ -42,6 +42,8 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
   assert.match(shopping, /shopping_item_source_product_check/);
   assert.match(shopping, /shopping_item_event_immutable_guard/);
   assert.match(shopping, /FORCE ROW LEVEL SECURITY/);
+  assert.match(shopping, /REVOKE DELETE ON shopping_item FROM casei_app/);
+  assert.match(shopping, /REVOKE UPDATE, DELETE ON shopping_item_event FROM casei_app/);
   assert.doesNotMatch(shopping, /GRANT .*DELETE ON shopping_item/);
   assert.match(shoppingDown, /DROP TABLE IF EXISTS shopping_item_event/);
   assert.match(shoppingDown, /DROP COLUMN IF EXISTS "shopping_auto"/);
@@ -91,6 +93,10 @@ if (!adminUrl) {
           movement_delete: boolean;
           movement_insert: boolean;
           movement_update: boolean;
+          shopping_item_delete: boolean;
+          shopping_item_event_insert: boolean;
+          shopping_item_event_update: boolean;
+          shopping_item_event_delete: boolean;
         }>(
           `SELECT
              has_table_privilege(current_user, 'stock_product', 'DELETE') AS product_delete,
@@ -98,7 +104,11 @@ if (!adminUrl) {
              has_table_privilege(current_user, 'stock_product', 'UPDATE') AS product_update,
              has_table_privilege(current_user, 'stock_movement', 'DELETE') AS movement_delete,
              has_table_privilege(current_user, 'stock_movement', 'INSERT') AS movement_insert,
-             has_table_privilege(current_user, 'stock_movement', 'UPDATE') AS movement_update`,
+             has_table_privilege(current_user, 'stock_movement', 'UPDATE') AS movement_update,
+             has_table_privilege(current_user, 'shopping_item', 'DELETE') AS shopping_item_delete,
+             has_table_privilege(current_user, 'shopping_item_event', 'INSERT') AS shopping_item_event_insert,
+             has_table_privilege(current_user, 'shopping_item_event', 'UPDATE') AS shopping_item_event_update,
+             has_table_privilege(current_user, 'shopping_item_event', 'DELETE') AS shopping_item_event_delete`,
         );
         assert.deepEqual(privileges.rows[0], {
           product_delete: false,
@@ -107,6 +117,10 @@ if (!adminUrl) {
           movement_delete: false,
           movement_insert: true,
           movement_update: false,
+          shopping_item_delete: false,
+          shopping_item_event_insert: true,
+          shopping_item_event_update: false,
+          shopping_item_event_delete: false,
         });
         const product = await client.query<{ id: string }>(
           `INSERT INTO stock_product (workspace_id, name, name_normalized)
