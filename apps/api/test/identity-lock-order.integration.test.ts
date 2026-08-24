@@ -109,15 +109,13 @@ async function createFixture(adminConnectionString: string, label: string) {
       },
       async close() {
         await pool?.end();
-        await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+        await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
         await adminPool.end();
       },
     };
   } catch (error) {
     await pool?.end().catch(() => undefined);
-    await adminPool
-      .query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`)
-      .catch(() => undefined);
+    await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => undefined);
     await adminPool.end();
     throw error;
   }
