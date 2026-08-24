@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canWriteFinance,
   clearTransactionQueryParams,
+  commitmentBucket,
+  commitmentRemainingMinor,
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
   createQuickCaptureTransactionInput,
@@ -12,6 +14,7 @@ import {
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
   mergeTransactionPage,
+  previewInstallmentMinor,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
@@ -721,5 +724,124 @@ describe("finance adapter", () => {
     expect(statementItemAmountPrefix({ type: "payment", state: "canceled" })).toBe("Cancelada · ");
     expect(statementItemAmountPrefix({ type: "purchase", state: "posted" })).toBe("+");
     expect(statementItemAmountPrefix({ type: "payment", state: "posted" })).toBe("−");
+  });
+
+  it("classifies only open commitments and distributes preview cents exactly", () => {
+    expect(commitmentBucket({ state: "planned", dueOn: "2026-08-23" }, "2026-08-24")).toBe(
+      "overdue",
+    );
+    expect(
+      commitmentBucket({ state: "partially_settled", dueOn: "2026-08-24" }, "2026-08-24"),
+    ).toBe("upcoming");
+    expect(commitmentBucket({ state: "posted", dueOn: "2026-08-24" }, "2026-08-24")).toBe(null);
+    expect(
+      commitmentRemainingMinor({
+        amount: { currency: "BRL", minor: "1001" },
+        settledAmount: { currency: "BRL", minor: "250" },
+      }),
+    ).toBe("751");
+    expect(previewInstallmentMinor("1001", 3)).toEqual(["334", "334", "333"]);
+    expect(previewInstallmentMinor("1000", 1)).toEqual([]);
+  });
+
+  it("posts a commitment with the current version and effective settlement", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe("/v1/workspaces/workspace/transactions/transaction-1/post");
+      expect(init?.method).toBe("POST");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("If-Match")).toBe('"v2"');
+      expect(headers.get("Idempotency-Key")).toBe("settle-command-001");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        amount: { currency: "BRL", minor: "2500" },
+        occurredOn: "2026-08-24",
+      });
+      return Response.json({ id: "transaction-1", state: "partially_settled", version: 3 });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const transaction = {
+      id: "transaction-1",
+      workspaceId: "workspace",
+      kind: "expense" as const,
+      state: "planned" as const,
+      amount: { currency: "BRL", minor: "5000" },
+      settledAmount: { currency: "BRL", minor: "0" },
+      occurredOn: "2026-08-24",
+      dueOn: "2026-08-24",
+      postedOn: null,
+      description: "Conta",
+      categoryId: null,
+      cardId: null,
+      statementId: null,
+      version: 2,
+    } satisfies Transaction;
+
+    await expect(
+      adapter.postTransaction(
+        "workspace",
+        transaction,
+        {
+          amount: { currency: "BRL", minor: "2500" },
+          occurredOn: "2026-08-24",
+        },
+        "settle-command-001",
+      ),
+    ).resolves.toMatchObject({ id: "transaction-1", state: "partially_settled", version: 3 });
+  });
+
+  it("settles fixture commitments partially and then totally without exceeding the plan", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "workspace-settlement";
+    const created = await adapter.createTransaction(workspaceId, {
+      kind: "expense",
+      amount: { currency: "BRL", minor: "5000" },
+      state: "planned",
+      dueOn: "2026-08-24",
+      description: "Conta de luz",
+    });
+
+    const partial = await adapter.postTransaction(workspaceId, created, {
+      amount: { currency: "BRL", minor: "2000" },
+    });
+    expect(partial).toMatchObject({ state: "partially_settled", version: 1 });
+    expect(partial.settledAmount.minor).toBe("2000");
+
+    const total = await adapter.postTransaction(workspaceId, partial);
+    expect(total).toMatchObject({ state: "posted", version: 2 });
+    expect(total.settledAmount.minor).toBe("5000");
+  });
+
+  it("sends the requested partial invoice payment without reclassifying it", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe("/v1/workspaces/workspace/statements/statement-1/payments");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        amount: { currency: "BRL", minor: "1200" },
+      });
+      return Response.json({
+        statementId: "statement-1",
+        transactionId: "payment-1",
+        amount: { currency: "BRL", minor: "1200" },
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    await expect(
+      adapter.payStatement(
+        "workspace",
+        {
+          id: "statement-1",
+          workspaceId: "workspace",
+          cardId: "card-1",
+          periodStart: "2026-08-01",
+          closingOn: "2026-08-10",
+          dueOn: "2026-08-17",
+          state: "closed",
+          total: { currency: "BRL", minor: "3000" },
+          paid: { currency: "BRL", minor: "0" },
+          openAmount: { currency: "BRL", minor: "3000" },
+          version: 1,
+        },
+        { currency: "BRL", minor: "1200" },
+      ),
+    ).resolves.toMatchObject({ amount: { minor: "1200" } });
   });
 });

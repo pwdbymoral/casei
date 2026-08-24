@@ -39,6 +39,8 @@ import {
   type CreditCard,
   canWriteFinance,
   clearTransactionQueryParams,
+  commitmentBucket,
+  commitmentRemainingMinor,
   createQuickCaptureTransactionInput,
   createRequestGuard,
   createWorkspaceGenerationGuard,
@@ -48,6 +50,9 @@ import {
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
   mergeTransactionPage,
+  previewInstallmentDates,
+  previewInstallmentMinor,
+  type SettlementInput,
   type Statement,
   type StatementItem,
   shouldRetryIdempotentCommand,
@@ -88,6 +93,14 @@ function auditSnapshotText(snapshot: Record<string, unknown> | null): string {
   return JSON.stringify(snapshot, null, 2) ?? "Nenhum snapshot";
 }
 
+function todayCivilDate(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 type FinanceDashboardProps = {
   adapter?: FinanceAdapter;
   fixtureMode?: boolean;
@@ -109,6 +122,7 @@ function FinanceDashboard({
     () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [commitmentTransactions, setCommitmentTransactions] = useState<Transaction[]>([]);
   const [dataWorkspaceId, setDataWorkspaceId] = useState(workspaceId);
   const [transactionsNextCursor, setTransactionsNextCursor] = useState<string | null>(null);
   const [transactionsHasMore, setTransactionsHasMore] = useState(false);
@@ -179,10 +193,62 @@ function FinanceDashboard({
   const [timelineKind, setTimelineKind] = useState<"" | Transaction["kind"]>("");
   const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
   const [undoing, setUndoing] = useState(false);
+  const [settlingTransaction, setSettlingTransaction] = useState<Transaction | null>(null);
+  const [settlementAmount, setSettlementAmount] = useState("");
+  const [settlementDate, setSettlementDate] = useState("");
+  const [settling, setSettling] = useState(false);
+  const [showRecurrenceForm, setShowRecurrenceForm] = useState(false);
+  const [recurrenceKind, setRecurrenceKind] = useState<"expense" | "income">("expense");
+  const [recurrenceAmount, setRecurrenceAmount] = useState("0");
+  const [recurrenceEstimatedAmount, setRecurrenceEstimatedAmount] = useState("0");
+  const [recurrenceVariable, setRecurrenceVariable] = useState(false);
+  const [recurrenceFrequency, setRecurrenceFrequency] = useState<"weekly" | "monthly" | "annual">(
+    "monthly",
+  );
+  const [recurrenceInterval, setRecurrenceInterval] = useState("1");
+  const [recurrenceStartOn, setRecurrenceStartOn] = useState("");
+  const [recurrenceEndOn, setRecurrenceEndOn] = useState("");
+  const [recurrenceDescription, setRecurrenceDescription] = useState("");
+  const [savingRecurrence, setSavingRecurrence] = useState(false);
+  const [showInstallmentForm, setShowInstallmentForm] = useState(false);
+  const [installmentTotal, setInstallmentTotal] = useState("0");
+  const [installmentCount, setInstallmentCount] = useState("2");
+  const [installmentFirstDueOn, setInstallmentFirstDueOn] = useState("");
+  const [installmentDescription, setInstallmentDescription] = useState("");
+  const [savingInstallment, setSavingInstallment] = useState(false);
+  const [pendingStatementPayment, setPendingStatementPayment] = useState<Statement | null>(null);
+  const [statementPaymentAmount, setStatementPaymentAmount] = useState("");
+  const [payingStatement, setPayingStatement] = useState(false);
   const transactionCommandKey = useRef<string | null>(null);
   const transactionReverseCommandKey = useRef<string | null>(null);
+  const settlementCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
+  const today = todayCivilDate();
+
+  const commitments = useMemo(
+    () =>
+      commitmentTransactions
+        .map((transaction) => ({
+          transaction,
+          bucket: commitmentBucket(transaction, today),
+        }))
+        .filter(
+          (item): item is { transaction: Transaction; bucket: "upcoming" | "overdue" } =>
+            item.bucket !== null,
+        )
+        .sort((left, right) => {
+          const leftDate = left.transaction.dueOn ?? "9999-12-31";
+          const rightDate = right.transaction.dueOn ?? "9999-12-31";
+          return (
+            leftDate.localeCompare(rightDate) ||
+            left.transaction.id.localeCompare(right.transaction.id)
+          );
+        }),
+    [commitmentTransactions, today],
+  );
+  const overdueCommitments = commitments.filter((item) => item.bucket === "overdue");
+  const upcomingCommitments = commitments.filter((item) => item.bucket === "upcoming");
 
   const timelineQuery = useMemo(
     () => transactionQueryFromSearchParams(new URLSearchParams(searchParams.toString())),
@@ -215,6 +281,7 @@ function FinanceDashboard({
     // generation guard prevents late responses from repopulating this empty state.
     setDataWorkspaceId(workspaceId);
     setTransactions([]);
+    setCommitmentTransactions([]);
     setTransactionsNextCursor(null);
     setTransactionsHasMore(false);
     setCards([]);
@@ -255,6 +322,17 @@ function FinanceDashboard({
     setBusyStatementId(null);
     setPendingStatementAction(null);
     setUndoableTransaction(null);
+    setSettlingTransaction(null);
+    setSettlementAmount("");
+    setSettlementDate("");
+    setShowRecurrenceForm(false);
+    setShowInstallmentForm(false);
+    setPendingStatementPayment(null);
+    setStatementPaymentAmount("");
+    setSettling(false);
+    setSavingRecurrence(false);
+    setSavingInstallment(false);
+    settlementCommandKey.current = null;
   }, [
     statementItemsRequest,
     timelineRequest,
@@ -318,17 +396,33 @@ function FinanceDashboard({
       setStatementItemsNextCursor(null);
       setStatementItemsHasMore(false);
       try {
-        const [nextTransactions, nextCards, nextStatements, nextCategories] = await Promise.all([
+        const [
+          nextTransactions,
+          nextCards,
+          nextStatements,
+          nextCategories,
+          nextPlanned,
+          nextPartial,
+        ] = await Promise.all([
           adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
           adapter.listCategories(workspaceId),
+          adapter.listTransactions(workspaceId, { state: "planned", limit: 100 }),
+          adapter.listTransactions(workspaceId, { state: "partially_settled", limit: 100 }),
         ]);
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
           return;
         setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
         setTransactionsNextCursor(nextTransactions.nextCursor);
         setTransactionsHasMore(nextTransactions.hasMore);
+        const commitmentById = new Map(
+          [...nextPlanned.items, ...nextPartial.items].map((transaction) => [
+            transaction.id,
+            transaction,
+          ]),
+        );
+        setCommitmentTransactions([...commitmentById.values()]);
         setCards(nextCards);
         setStatements(nextStatements);
         setCategories(nextCategories);
@@ -405,6 +499,166 @@ function FinanceDashboard({
       setError(cause instanceof Error ? cause.message : "Não foi possível salvar o lançamento.");
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSaving(false);
+    }
+  }
+
+  function openSettlement(transaction: Transaction) {
+    setSettlingTransaction(transaction);
+    setSettlementAmount(commitmentRemainingMinor(transaction));
+    setSettlementDate(today);
+    setSettlementError(null);
+  }
+
+  const [settlementError, setSettlementError] = useState<string | null>(null);
+
+  async function handleSettlementSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!settlingTransaction || settling || !writeAccess) return;
+    let effectiveMinor: bigint;
+    try {
+      effectiveMinor = BigInt(settlementAmount);
+    } catch {
+      setSettlementError("Informe um valor válido para esta liquidação.");
+      return;
+    }
+    const remainingMinor = BigInt(commitmentRemainingMinor(settlingTransaction));
+    if (effectiveMinor <= BigInt(0) || effectiveMinor > remainingMinor) {
+      setSettlementError("O valor deve ser maior que zero e não pode superar o saldo restante.");
+      return;
+    }
+    const input: SettlementInput = {
+      amount: { currency, minor: effectiveMinor.toString() },
+      ...(settlementDate ? { occurredOn: settlementDate } : {}),
+    };
+    setSettling(true);
+    setSettlementError(null);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey = settlementCommandKey.current ?? `web-settle-${crypto.randomUUID()}`;
+    settlementCommandKey.current = commandKey;
+    try {
+      const updated = await adapter.postTransaction(
+        workspaceId,
+        settlingTransaction,
+        input,
+        commandKey,
+      );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      settlementCommandKey.current = null;
+      setTransactions((current) =>
+        current.map((transaction) => (transaction.id === updated.id ? updated : transaction)),
+      );
+      setCommitmentTransactions((current) =>
+        updated.state === "posted" || updated.state === "canceled"
+          ? current.filter((transaction) => transaction.id !== updated.id)
+          : current.map((transaction) => (transaction.id === updated.id ? updated : transaction)),
+      );
+      setSettlingTransaction(null);
+      setNotice(
+        updated.state === "posted" ? "Compromisso liquidado." : "Liquidação parcial registrada.",
+      );
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setSettlingTransaction(null);
+        await load();
+        if (workspaceRequests.isCurrent(workspaceRequest)) {
+          setNotice("O compromisso mudou enquanto você o revisava. Recarregamos os dados.");
+        }
+      } else {
+        if (!shouldRetryIdempotentCommand(cause)) settlementCommandKey.current = null;
+        setSettlementError(
+          cause instanceof Error ? cause.message : "Não foi possível liquidar o compromisso.",
+        );
+      }
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSettling(false);
+    }
+  }
+
+  async function handleRecurrenceSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (savingRecurrence || !writeAccess) return;
+    let recurrenceAmountMinor: bigint;
+    let estimatedAmountMinor: bigint;
+    try {
+      recurrenceAmountMinor = BigInt(recurrenceAmount || "0");
+      estimatedAmountMinor = BigInt(recurrenceEstimatedAmount || "0");
+    } catch {
+      setError("Informe valores monetários válidos para a recorrência.");
+      return;
+    }
+    if (recurrenceAmountMinor <= BigInt(0)) {
+      setError("Informe o valor planejado da recorrência.");
+      return;
+    }
+    if (recurrenceVariable && estimatedAmountMinor < BigInt(0)) {
+      setError("A estimativa da recorrência não pode ser negativa.");
+      return;
+    }
+    setSavingRecurrence(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const result = await adapter.createRecurrence(workspaceId, {
+        kind: recurrenceKind,
+        amount: { currency, minor: recurrenceAmount },
+        frequency: recurrenceFrequency,
+        interval: Number(recurrenceInterval),
+        startOn: recurrenceStartOn || today,
+        endOn: recurrenceEndOn || null,
+        maxOccurrences: null,
+        variable: recurrenceVariable,
+        estimatedAmount:
+          recurrenceVariable && estimatedAmountMinor > BigInt(0)
+            ? { currency, minor: recurrenceEstimatedAmount }
+            : null,
+        description: recurrenceDescription.trim(),
+      });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setShowRecurrenceForm(false);
+      setNotice(`Recorrência criada com ${result.occurrences.length} ocorrência(s) inicial(is).`);
+      setRecurrenceAmount("0");
+      setRecurrenceEstimatedAmount("0");
+      setRecurrenceDescription("");
+      await load();
+    } catch (cause) {
+      if (workspaceRequests.isCurrent(workspaceRequest))
+        setError(cause instanceof Error ? cause.message : "Não foi possível criar a recorrência.");
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingRecurrence(false);
+    }
+  }
+
+  async function handleInstallmentSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (savingInstallment || !writeAccess) return;
+    const count = Number(installmentCount);
+    if (previewInstallmentMinor(installmentTotal, count).length === 0) {
+      setError("Informe um total positivo e entre 2 e 999 parcelas.");
+      return;
+    }
+    setSavingInstallment(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const result = await adapter.createInstallmentPlan(workspaceId, {
+        total: { currency, minor: installmentTotal },
+        count,
+        firstDueOn: installmentFirstDueOn || today,
+        description: installmentDescription.trim(),
+      });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setShowInstallmentForm(false);
+      setNotice(`Parcelamento criado com ${result.installments.length} parcela(s).`);
+      setInstallmentTotal("0");
+      setInstallmentDescription("");
+      await load();
+    } catch (cause) {
+      if (workspaceRequests.isCurrent(workspaceRequest))
+        setError(cause instanceof Error ? cause.message : "Não foi possível criar o parcelamento.");
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingInstallment(false);
     }
   }
 
@@ -680,6 +934,17 @@ function FinanceDashboard({
 
   const viewingStatementId = visibleViewingStatement?.id;
 
+  const installmentPreview = useMemo(() => {
+    const count = Number(installmentCount);
+    const amounts = previewInstallmentMinor(installmentTotal, count);
+    const dates = previewInstallmentDates(installmentFirstDueOn || today, count);
+    return amounts.map((minor, index) => ({
+      minor,
+      number: index + 1,
+      dueOn: dates[index] ?? (installmentFirstDueOn || today),
+    }));
+  }, [installmentCount, installmentFirstDueOn, installmentTotal, today]);
+
   const loadStatementItems = useCallback(
     async (statementId: string, cursor: string | undefined, append: boolean) => {
       const request = statementItemsRequest.begin();
@@ -873,22 +1138,54 @@ function FinanceDashboard({
     workspaceRequests,
   ]);
 
-  async function payStatement(statement: Statement) {
+  function openStatementPayment(statement: Statement) {
+    setPendingStatementPayment(statement);
+    setStatementPaymentAmount(statement.openAmount.minor);
+    setError(null);
+  }
+
+  async function payStatement(statement: Statement, amountMinor: string) {
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
+    let parsedAmount: bigint;
+    try {
+      parsedAmount = BigInt(amountMinor || "0");
+    } catch {
+      setError("Informe um valor monetário válido para o pagamento.");
+      return;
+    }
+    if (parsedAmount <= BigInt(0) || parsedAmount > BigInt(statement.openAmount.minor)) {
+      setError("O pagamento deve ser maior que zero e não pode superar o valor em aberto.");
+      return;
+    }
     setBusyStatementId(statement.id);
     setError(null);
     const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
-      await adapter.payStatement(workspaceId, statement);
+      await adapter.payStatement(workspaceId, statement, {
+        currency: statement.openAmount.currency,
+        minor: parsedAmount.toString(),
+      });
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       await load();
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice("Pagamento registrado na carteira.");
+      setPendingStatementPayment(null);
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível pagar a fatura.");
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
+    }
+  }
+
+  async function handleStatementPaymentSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!pendingStatementPayment || payingStatement) return;
+    setPayingStatement(true);
+    try {
+      await payStatement(pendingStatementPayment, statementPaymentAmount);
+    } finally {
+      setPayingStatement(false);
     }
   }
 
@@ -1575,7 +1872,7 @@ function FinanceDashboard({
                             <Button
                               size="sm"
                               disabled={busyStatementId !== null || !writeAccess}
-                              onClick={() => void payStatement(statement)}
+                              onClick={() => openStatementPayment(statement)}
                             >
                               {busyStatementId === statement.id ? "Pagando…" : "Pagar"}
                             </Button>
@@ -1590,35 +1887,445 @@ function FinanceDashboard({
         </Card>
       </section>
 
-      <Card id="safe-to-spend">
+      <Card id="commitments">
         <CardHeader>
           <div className="flex items-start gap-3">
             <CalendarClockIcon aria-hidden="true" />
             <div>
-              <CardTitle>Planejamento</CardTitle>
+              <CardTitle>Compromissos</CardTitle>
               <CardDescription>
-                Recorrências e parcelamentos entram como compromissos sem alterar o saldo antes da
-                hora.
+                Veja o que vence, confirme o valor efetivo e liquide sem misturar o planejado com o
+                saldo de hoje.
               </CardDescription>
             </div>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border border-dashed p-4">
-            <p className="font-medium">Recorrências</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              O cadastro da regra já está disponível na API; a tela dedicada será adicionada junto
-              da confirmação de valores variáveis.
+        <CardContent className="grid gap-5">
+          {commitments.length === 0 ? (
+            <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+              Nenhum compromisso próximo ou vencido na página carregada. Compromissos futuros
+              continuam fora do saldo até serem liquidados.
             </p>
-          </div>
-          <div className="rounded-lg border border-dashed p-4">
-            <p className="font-medium">Parcelamentos</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              As parcelas são calculadas em centavos exatos no servidor antes de publicar o plano.
+          ) : (
+            <div className="grid gap-5 md:grid-cols-2">
+              {[
+                { title: "Vencidos", items: overdueCommitments },
+                { title: "Próximos", items: upcomingCommitments },
+              ].map(({ title, items }) => (
+                <section
+                  key={title}
+                  aria-labelledby={`commitments-${title}`}
+                  className="grid gap-2"
+                >
+                  <h3 id={`commitments-${title}`} className="text-sm font-semibold">
+                    {title} <span className="text-muted-foreground">({items.length})</span>
+                  </h3>
+                  {items.length === 0 ? (
+                    <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                      Nenhum compromisso.
+                    </p>
+                  ) : (
+                    <ul className="grid gap-2">
+                      {items.map(({ transaction }) => {
+                        const remaining = commitmentRemainingMinor(transaction);
+                        return (
+                          <li key={transaction.id} className="rounded-lg border p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate font-medium">
+                                  {transactionLabel(transaction)}
+                                </p>
+                                <p className="text-sm text-muted-foreground">
+                                  Vence em {transaction.dueOn} ·{" "}
+                                  {transaction.state === "partially_settled"
+                                    ? "parcial"
+                                    : "planejado"}
+                                </p>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                <p className="font-semibold">
+                                  {transactionAmountPrefix(transaction.kind)}
+                                  {formatMoneyMinor(remaining, transaction.amount.currency)}
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  de{" "}
+                                  {formatMoneyMinor(
+                                    transaction.amount.minor,
+                                    transaction.amount.currency,
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="mt-3"
+                              onClick={() => openSettlement(transaction)}
+                              disabled={!writeAccess || settling}
+                            >
+                              Liquidar
+                            </Button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </section>
+              ))}
+            </div>
+          )}
+          {transactionsHasMore ? (
+            <p className="text-xs text-muted-foreground">
+              Há mais lançamentos na linha do tempo. Carregue mais para revisar outros compromissos.
             </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2 border-t pt-4">
+            <Button
+              type="button"
+              onClick={() => setShowRecurrenceForm(true)}
+              disabled={!writeAccess}
+            >
+              <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
+              Nova recorrência
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowInstallmentForm(true)}
+              disabled={!writeAccess}
+            >
+              <CalendarClockIcon data-icon="inline-start" aria-hidden="true" />
+              Novo parcelamento
+            </Button>
           </div>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={settlingTransaction !== null}
+        onOpenChange={(open) => {
+          if (!open && !settling) setSettlingTransaction(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Liquidar compromisso</DialogTitle>
+            <DialogDescription>
+              Informe o valor efetivo. Um valor menor mantém o restante planejado; o valor cheio
+              publica a liquidação total.
+            </DialogDescription>
+          </DialogHeader>
+          {settlingTransaction ? (
+            <form className="grid gap-4" onSubmit={handleSettlementSubmit}>
+              <p className="rounded-lg bg-muted/50 p-3 text-sm">
+                {transactionLabel(settlingTransaction)} · restante{" "}
+                <strong>
+                  {formatMoneyMinor(
+                    commitmentRemainingMinor(settlingTransaction),
+                    settlingTransaction.amount.currency,
+                  )}
+                </strong>
+              </p>
+              <MoneyInput
+                id="settlement-amount"
+                value={settlementAmount}
+                onChange={setSettlementAmount}
+                label="Valor efetivo"
+                currency={currency}
+                disabled={settling}
+              />
+              <Field>
+                <FieldLabel htmlFor="settlement-date">Data efetiva</FieldLabel>
+                <Input
+                  id="settlement-date"
+                  type="date"
+                  value={settlementDate}
+                  onChange={(event) => setSettlementDate(event.target.value)}
+                  disabled={settling}
+                />
+              </Field>
+              {settlementError ? (
+                <p className="text-sm text-destructive" role="alert">
+                  {settlementError}
+                </p>
+              ) : null}
+              <DialogFooter>
+                <DialogClose
+                  render={<Button type="button" variant="outline" />}
+                  disabled={settling}
+                >
+                  Cancelar
+                </DialogClose>
+                <Button type="submit" disabled={settling || !writeAccess}>
+                  {settling ? "Salvando…" : "Confirmar liquidação"}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showRecurrenceForm} onOpenChange={setShowRecurrenceForm}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Nova recorrência</DialogTitle>
+            <DialogDescription>
+              A prévia inicial é materializada pelo servidor até 12 meses. Recorrência variável pede
+              o valor efetivo quando cada ocorrência for liquidada.
+            </DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={handleRecurrenceSubmit}>
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <FieldLabel htmlFor="recurrence-kind">Tipo</FieldLabel>
+                <select
+                  id="recurrence-kind"
+                  className="h-9 rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={recurrenceKind}
+                  onChange={(event) =>
+                    setRecurrenceKind(event.target.value as "expense" | "income")
+                  }
+                >
+                  <option value="expense">Despesa</option>
+                  <option value="income">Receita</option>
+                </select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="recurrence-frequency">Frequência</FieldLabel>
+                <select
+                  id="recurrence-frequency"
+                  className="h-9 rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={recurrenceFrequency}
+                  onChange={(event) =>
+                    setRecurrenceFrequency(event.target.value as "weekly" | "monthly" | "annual")
+                  }
+                >
+                  <option value="weekly">Semanal</option>
+                  <option value="monthly">Mensal</option>
+                  <option value="annual">Anual</option>
+                </select>
+              </Field>
+            </div>
+            <MoneyInput
+              id="recurrence-amount"
+              value={recurrenceAmount}
+              onChange={setRecurrenceAmount}
+              label="Valor planejado"
+              currency={currency}
+              disabled={savingRecurrence}
+            />
+            <label className="flex min-h-11 items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={recurrenceVariable}
+                onChange={(event) => setRecurrenceVariable(event.target.checked)}
+                disabled={savingRecurrence}
+              />
+              O valor varia a cada ocorrência
+            </label>
+            {recurrenceVariable ? (
+              <MoneyInput
+                id="recurrence-estimate"
+                value={recurrenceEstimatedAmount}
+                onChange={setRecurrenceEstimatedAmount}
+                label="Estimativa (opcional)"
+                currency={currency}
+                disabled={savingRecurrence}
+              />
+            ) : null}
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <FieldLabel htmlFor="recurrence-interval">A cada</FieldLabel>
+                <Input
+                  id="recurrence-interval"
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={recurrenceInterval}
+                  onChange={(event) => setRecurrenceInterval(event.target.value)}
+                  disabled={savingRecurrence}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="recurrence-start">Começa em</FieldLabel>
+                <Input
+                  id="recurrence-start"
+                  type="date"
+                  value={recurrenceStartOn || today}
+                  onChange={(event) => setRecurrenceStartOn(event.target.value)}
+                  disabled={savingRecurrence}
+                />
+              </Field>
+            </div>
+            <Field>
+              <FieldLabel htmlFor="recurrence-end">Termina em (opcional)</FieldLabel>
+              <Input
+                id="recurrence-end"
+                type="date"
+                value={recurrenceEndOn}
+                onChange={(event) => setRecurrenceEndOn(event.target.value)}
+                disabled={savingRecurrence}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="recurrence-description">Descrição (opcional)</FieldLabel>
+              <Input
+                id="recurrence-description"
+                value={recurrenceDescription}
+                onChange={(event) => setRecurrenceDescription(event.target.value)}
+                maxLength={500}
+                disabled={savingRecurrence}
+              />
+            </Field>
+            <DialogFooter>
+              <DialogClose
+                render={<Button type="button" variant="outline" />}
+                disabled={savingRecurrence}
+              >
+                Cancelar
+              </DialogClose>
+              <Button type="submit" disabled={savingRecurrence || !writeAccess}>
+                {savingRecurrence ? "Criando…" : "Criar recorrência"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showInstallmentForm} onOpenChange={setShowInstallmentForm}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Novo parcelamento</DialogTitle>
+            <DialogDescription>
+              O servidor distribui os centavos exatamente. Confira a prévia antes de criar as
+              parcelas planejadas.
+            </DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={handleInstallmentSubmit}>
+            <MoneyInput
+              id="installment-total"
+              value={installmentTotal}
+              onChange={setInstallmentTotal}
+              label="Total"
+              currency={currency}
+              disabled={savingInstallment}
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <FieldLabel htmlFor="installment-count">Quantidade</FieldLabel>
+                <Input
+                  id="installment-count"
+                  type="number"
+                  min={2}
+                  max={999}
+                  value={installmentCount}
+                  onChange={(event) => setInstallmentCount(event.target.value)}
+                  disabled={savingInstallment}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="installment-first-due">Primeiro vencimento</FieldLabel>
+                <Input
+                  id="installment-first-due"
+                  type="date"
+                  value={installmentFirstDueOn || today}
+                  onChange={(event) => setInstallmentFirstDueOn(event.target.value)}
+                  disabled={savingInstallment}
+                />
+              </Field>
+            </div>
+            <Field>
+              <FieldLabel htmlFor="installment-description">Descrição (opcional)</FieldLabel>
+              <Input
+                id="installment-description"
+                value={installmentDescription}
+                onChange={(event) => setInstallmentDescription(event.target.value)}
+                maxLength={500}
+                disabled={savingInstallment}
+              />
+            </Field>
+            {installmentPreview.length > 0 ? (
+              <div className="rounded-lg border bg-muted/20 p-3">
+                <p className="text-sm font-semibold">Prévia</p>
+                <ul className="mt-2 grid max-h-40 gap-1 overflow-y-auto text-sm">
+                  {installmentPreview.map((row) => (
+                    <li key={row.dueOn} className="flex justify-between gap-3">
+                      <span>
+                        Parcela {row.number} · {row.dueOn}
+                      </span>
+                      <strong>{formatMoneyMinor(row.minor, currency)}</strong>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <DialogFooter>
+              <DialogClose
+                render={<Button type="button" variant="outline" />}
+                disabled={savingInstallment}
+              >
+                Cancelar
+              </DialogClose>
+              <Button type="submit" disabled={savingInstallment || !writeAccess}>
+                {savingInstallment ? "Criando…" : "Criar parcelamento"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingStatementPayment !== null}
+        onOpenChange={(open) => {
+          if (!open && !payingStatement && busyStatementId === null)
+            setPendingStatementPayment(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pagar fatura</DialogTitle>
+            <DialogDescription>
+              Informe o total ou um valor menor. Pagamento parcial mantém o restante em aberto e não
+              cria uma nova despesa.
+            </DialogDescription>
+          </DialogHeader>
+          {pendingStatementPayment ? (
+            <form className="grid gap-4" onSubmit={handleStatementPaymentSubmit}>
+              <p className="rounded-lg bg-muted/50 p-3 text-sm">
+                Em aberto:{" "}
+                <strong>
+                  {formatMoneyMinor(
+                    pendingStatementPayment.openAmount.minor,
+                    pendingStatementPayment.openAmount.currency,
+                  )}
+                </strong>
+              </p>
+              <MoneyInput
+                id="statement-payment-amount"
+                value={statementPaymentAmount}
+                onChange={setStatementPaymentAmount}
+                label="Valor do pagamento"
+                currency={pendingStatementPayment.openAmount.currency}
+                disabled={payingStatement || busyStatementId !== null}
+              />
+              <DialogFooter>
+                <DialogClose
+                  render={<Button type="button" variant="outline" />}
+                  disabled={payingStatement || busyStatementId !== null}
+                >
+                  Cancelar
+                </DialogClose>
+                <Button
+                  type="submit"
+                  disabled={payingStatement || busyStatementId !== null || !writeAccess}
+                >
+                  {payingStatement || busyStatementId !== null ? "Pagando…" : "Confirmar pagamento"}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={visibleViewingTransaction !== null}

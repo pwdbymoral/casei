@@ -222,6 +222,58 @@ export function mergeTransactionPage(
   return append ? [...current, ...page.items] : page.items;
 }
 
+export function commitmentRemainingMinor(
+  transaction: Pick<Transaction, "amount" | "settledAmount">,
+): string {
+  const remaining = BigInt(transaction.amount.minor) - BigInt(transaction.settledAmount.minor);
+  return (remaining > BigInt(0) ? remaining : BigInt(0)).toString();
+}
+
+export function commitmentBucket(
+  transaction: Pick<Transaction, "state" | "dueOn">,
+  today: string,
+): "upcoming" | "overdue" | null {
+  if (
+    (transaction.state !== "planned" && transaction.state !== "partially_settled") ||
+    transaction.dueOn === null
+  )
+    return null;
+  return transaction.dueOn < today ? "overdue" : "upcoming";
+}
+
+/** Deterministic cent distribution used for the local preflight before submit. */
+export function previewInstallmentMinor(totalMinor: string, count: number): string[] {
+  let total: bigint;
+  try {
+    total = BigInt(totalMinor);
+  } catch {
+    return [];
+  }
+  if (total <= BigInt(0) || !Number.isSafeInteger(count) || count < 2 || count > 999) return [];
+  const base = total / BigInt(count);
+  const remainder = total % BigInt(count);
+  return Array.from({ length: count }, (_, index) =>
+    (base + (BigInt(index) < remainder ? BigInt(1) : BigInt(0))).toString(),
+  );
+}
+
+export function previewInstallmentDates(firstDueOn: string, count: number): string[] {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(firstDueOn);
+  if (!match || !Number.isSafeInteger(count) || count < 2 || count > 999) return [];
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return [];
+  return Array.from({ length: count }, (_, index) => {
+    const absoluteMonth = month - 1 + index;
+    const targetYear = year + Math.floor(absoluteMonth / 12);
+    const targetMonth = absoluteMonth % 12;
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Math.min(day, lastDay);
+    return `${targetYear.toString().padStart(4, "0")}-${(targetMonth + 1).toString().padStart(2, "0")}-${targetDay.toString().padStart(2, "0")}`;
+  });
+}
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -242,6 +294,11 @@ export type CreateTransactionInput = {
   cardId?: string | null;
 };
 
+export type SettlementInput = {
+  amount?: Money;
+  occurredOn?: string;
+};
+
 export type UpdateCategoryInput = { name?: string; kind?: Category["kind"] };
 
 export type FinanceAdapter = {
@@ -259,6 +316,12 @@ export type FinanceAdapter = {
   createTransaction(
     workspaceId: string,
     input: CreateTransactionInput,
+    idempotencyKey?: string,
+  ): Promise<Transaction>;
+  postTransaction(
+    workspaceId: string,
+    transaction: Transaction,
+    input?: SettlementInput,
     idempotencyKey?: string,
   ): Promise<Transaction>;
   reverseTransaction(
@@ -359,6 +422,7 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   listTransactionAudit: unavailableFinanceOperation,
   getTransactionAudit: unavailableFinanceOperation,
   createTransaction: unavailableFinanceOperation,
+  postTransaction: unavailableFinanceOperation,
   reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
   createCategory: unavailableFinanceOperation,
@@ -462,6 +526,15 @@ export function createHttpFinanceAdapter(
       call<Transaction>(`/workspaces/${workspaceId}/transactions`, {
         method: "POST",
         headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
+        body: JSON.stringify(input),
+      }),
+    postTransaction: (workspaceId, transaction, input = {}, commandKey) =>
+      call<Transaction>(`/workspaces/${workspaceId}/transactions/${transaction.id}/post`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": commandKey ?? idempotencyKey(),
+          "If-Match": `"v${transaction.version}"`,
+        },
         body: JSON.stringify(input),
       }),
     reverseTransaction: (workspaceId, transaction, commandKey) =>
@@ -611,6 +684,10 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     statements: Statement[];
     transactionAudit: Map<string, FinanceAuditEvent[]>;
     transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
+    settlementCommands: Map<
+      string,
+      { transactionId: string; fingerprint: string; transaction: Transaction }
+    >;
     reverseCommands: Map<
       string,
       { transactionId: string; fingerprint: string; transaction: Transaction }
@@ -662,6 +739,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       statements,
       transactionAudit: new Map(),
       transactionCommands: new Map(),
+      settlementCommands: new Map(),
       reverseCommands: new Map(),
     };
   };
@@ -784,6 +862,82 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       event.after = { ...event.after, statementId: value.statementId };
       if (commandKey)
         state.transactionCommands.set(commandKey, { fingerprint, transaction: value });
+      return value;
+    },
+    postTransaction: async (workspaceId, transaction, input = {}, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.transactions.find((value) => value.id === transaction.id);
+      if (!current) throw new FinanceAdapterError("Compromisso não encontrado.", 404);
+      const fingerprint = JSON.stringify({ transactionId: transaction.id, input });
+      if (commandKey) {
+        const previous = state.settlementCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outra liquidação.", 409);
+          }
+          return previous.transaction;
+        }
+      }
+      if (current.version !== transaction.version) {
+        throw new FinanceAdapterError(
+          "O compromisso foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      if (current.state !== "planned" && current.state !== "partially_settled") {
+        throw new FinanceAdapterError("O compromisso não está pendente.", 409);
+      }
+      const remaining = BigInt(current.amount.minor) - BigInt(current.settledAmount.minor);
+      const amount = input.amount ? BigInt(input.amount.minor) : remaining;
+      if (!input.amount && remaining <= BigInt(0)) {
+        throw new FinanceAdapterError("O compromisso já foi liquidado.", 409);
+      }
+      if (input.amount && input.amount.currency !== current.amount.currency) {
+        throw new FinanceAdapterError("A moeda da liquidação não corresponde ao espaço.", 422);
+      }
+      if (amount <= BigInt(0) || amount > remaining) {
+        throw new FinanceAdapterError(
+          "A liquidação deve estar entre zero e o saldo restante.",
+          422,
+        );
+      }
+      const settledMinor = BigInt(current.settledAmount.minor) + amount;
+      const value: Transaction = {
+        ...current,
+        settledAmount: { ...current.settledAmount, minor: settledMinor.toString() },
+        state: settledMinor === BigInt(current.amount.minor) ? "posted" : "partially_settled",
+        postedOn: new Date().toISOString(),
+        version: current.version + 1,
+      };
+      state.transactions[state.transactions.indexOf(current)] = value;
+      const events = state.transactionAudit.get(value.id) ?? [];
+      events.unshift({
+        id: fixtureId(50 + state.transactionAudit.size + events.length),
+        transactionId: value.id,
+        category: "finance",
+        action: value.state === "posted" ? "transaction.posted" : "transaction.partially_settled",
+        actorId: "fixture-user",
+        occurredAt: new Date().toISOString(),
+        origin: "fixture",
+        correlationId: "fixture-correlation",
+        result: "success",
+        reason: null,
+        before: {
+          state: current.state,
+          settledAmount: current.settledAmount,
+          version: current.version,
+        },
+        after: { state: value.state, settledAmount: value.settledAmount, version: value.version },
+      });
+      state.transactionAudit.set(value.id, events);
+      if (commandKey) {
+        state.settlementCommands.set(commandKey, {
+          transactionId: value.id,
+          fingerprint,
+          transaction: value,
+        });
+      }
       return value;
     },
     reverseTransaction: async (workspaceId, transaction, commandKey) => {
