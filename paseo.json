@@ -1,9 +1,6 @@
 {
   "worktree": {
-    "setup": [
-      "corepack enable",
-      "pnpm install --frozen-lockfile"
-    ]
+    "setup": ["corepack enable", "pnpm install --frozen-lockfile"]
   },
   "scripts": {
     "Check": {
