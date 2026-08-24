@@ -143,7 +143,75 @@ function retryPool() {
     statements,
   };
 }
+
+function currencyPreferencePool() {
+  const statements: string[] = [];
+  const client = {
+    async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM membership m JOIN workspace")) {
+        return { rows: [{ role: "owner" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM workspace w") && sql.includes("FOR UPDATE OF w, p")) {
+        return {
+          rows: [
+            {
+              id: scope.workspaceId,
+              name: "Casa",
+              version: 0,
+              currency_code: "BRL",
+              timezone: "America/Fortaleza",
+              safety_margin_minor: 0n,
+            },
+          ] as T[],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("SELECT EXISTS")) return { rows: [{ exists: false }] as T[], rowCount: 1 };
+      return { rows: [] as T[], rowCount: 1 };
+    },
+    release() {},
+  };
+  return {
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+  };
+}
+
 describe("IdentityService workspace lock ordering", () => {
+  it("checks goals and reserve movements after taking the canonical workspace lock", async () => {
+    const harness = currencyPreferencePool();
+    const service = new IdentityService(harness.pool as never);
+
+    await expect(
+      service.updateWorkspacePreferences(
+        scope,
+        {
+          name: "Casa",
+          currency: "USD",
+          timeZone: "America/Fortaleza",
+          safetyMarginMinor: "0",
+        },
+        0,
+      ),
+    ).resolves.toMatchObject({ currency: "USD", version: 1 });
+
+    const locks = forUpdateStatements(harness.statements);
+    expect(locks[0]).toMatch(/FROM membership m JOIN workspace/);
+    expect(locks[1]).toMatch(/FROM workspace w/);
+    expect(locks[1]).toMatch(/FOR UPDATE OF w, p/);
+    const movementCheck = harness.statements.findIndex((statement) =>
+      statement.includes("SELECT EXISTS"),
+    );
+    expect(movementCheck).toBeGreaterThan(harness.statements.indexOf(locks[1] as string));
+    expect(harness.statements[movementCheck]).toMatch(/FROM goal/);
+    expect(harness.statements[movementCheck]).toMatch(/FROM goal_reservation_movement/);
+  });
+
   it("locks transfer memberships in sorted user order before workspace", async () => {
     const harness = poolFor();
     const service = new IdentityService(harness.pool as never);

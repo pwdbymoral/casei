@@ -2,17 +2,25 @@ import {
   closeStatementSchema,
   createCategorySchema,
   createCreditCardSchema,
+  createGoalSchema,
   createInstallmentPlanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  goalAllocateSchema,
+  goalReleaseSchema,
+  goalSpendSchema,
+  goalTransitionSchema,
   paginationQuerySchema,
   payStatementSchema,
   reopenStatementSchema,
   settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
+  updateGoalSchema,
 } from "@casei/contracts";
+import { IdempotencyConflictError } from "@casei/database";
+import { DomainError } from "@casei/domain";
 import type { Hono, MiddlewareHandler } from "hono";
 import {
   FinanceConflictError,
@@ -22,6 +30,7 @@ import {
   type FinanceService,
   VersionConflictError,
 } from "./finance-service.js";
+import type { GoalService } from "./goal-service.js";
 import {
   ApiHttpError,
   errorResponse,
@@ -35,12 +44,14 @@ import type { ApiEnv } from "./http/types.js";
 
 export interface FinanceRoutesOptions {
   service: FinanceService;
+  goalService?: GoalService;
   scopeMiddleware: MiddlewareHandler<ApiEnv>;
 }
 
 /** Mounts the financial vertical below /v1. The app composition supplies AUTH-004 actor/scope middleware. */
 export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRoutesOptions): void {
   const { service } = options;
+  const { goalService } = options;
   router.onError((error, context) => errorResponse(context, financeErrorToHttp(error)));
   for (const path of [
     "/workspaces/:workspaceId/transactions",
@@ -55,8 +66,128 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     "/workspaces/:workspaceId/recurrences/*",
     "/workspaces/:workspaceId/installments",
     "/workspaces/:workspaceId/installments/*",
+    "/workspaces/:workspaceId/goals",
+    "/workspaces/:workspaceId/goals/*",
   ]) {
     router.use(path, options.scopeMiddleware);
+  }
+
+  if (goalService) {
+    router.post("/workspaces/:workspaceId/goals", async (context) => {
+      const input = await parseJsonBody(context, createGoalSchema);
+      const result = await goalService.createGoal(
+        scopeOf(context),
+        input,
+        requiredIdempotencyKey(context),
+      );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      return context.json(result.goal, result.replayed ? 200 : 201);
+    });
+
+    router.get("/workspaces/:workspaceId/goals", async (context) => {
+      const query = parseQuery(context, paginationQuerySchema);
+      const page = await goalService.listGoals(scopeOf(context), query);
+      return context.json({
+        items: page.items,
+        page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+      });
+    });
+
+    router.get("/workspaces/:workspaceId/goals/:goalId", async (context) => {
+      const goalId = parseDomainId(context.req.param("goalId"));
+      const goal = await goalService.getGoal(scopeOf(context), goalId);
+      if (!goal) throw notFoundError();
+      setVersionHeaders(context, goal.version);
+      return context.json(goal);
+    });
+
+    router.get("/workspaces/:workspaceId/goals/:goalId/movements", async (context) => {
+      const goalId = parseDomainId(context.req.param("goalId"));
+      const query = parseQuery(context, paginationQuerySchema);
+      const page = await goalService.listMovements(scopeOf(context), goalId, query);
+      return context.json({
+        items: page.items,
+        page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+      });
+    });
+
+    router.patch("/workspaces/:workspaceId/goals/:goalId", async (context) => {
+      const goalId = parseDomainId(context.req.param("goalId"));
+      const input = await parseJsonBody(context, updateGoalSchema);
+      const result = await goalService.updateGoal(
+        scopeOf(context),
+        goalId,
+        input,
+        requiredIdempotencyKey(context),
+        requireIfMatch(context),
+      );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      setVersionHeaders(context, result.goal.version);
+      return context.json(result, 200);
+    });
+
+    router.post("/workspaces/:workspaceId/goals/:goalId/allocate", async (context) => {
+      const goalId = parseDomainId(context.req.param("goalId"));
+      const input = await parseJsonBody(context, goalAllocateSchema);
+      const result = await goalService.allocateGoal(
+        scopeOf(context),
+        goalId,
+        input,
+        requiredIdempotencyKey(context),
+        requireIfMatch(context),
+      );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      setVersionHeaders(context, result.goal.version);
+      return context.json(result, 200);
+    });
+
+    router.post("/workspaces/:workspaceId/goals/:goalId/release", async (context) => {
+      const goalId = parseDomainId(context.req.param("goalId"));
+      const input = await parseJsonBody(context, goalReleaseSchema);
+      const result = await goalService.releaseGoal(
+        scopeOf(context),
+        goalId,
+        input,
+        requiredIdempotencyKey(context),
+        requireIfMatch(context),
+      );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      setVersionHeaders(context, result.goal.version);
+      return context.json(result, 200);
+    });
+
+    router.post("/workspaces/:workspaceId/goals/:goalId/spend", async (context) => {
+      const goalId = parseDomainId(context.req.param("goalId"));
+      const input = await parseJsonBody(context, goalSpendSchema);
+      const result = await goalService.spendGoal(
+        scopeOf(context),
+        goalId,
+        input,
+        requiredIdempotencyKey(context),
+        requireIfMatch(context),
+      );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      setVersionHeaders(context, result.goal.version);
+      return context.json(result, result.replayed ? 200 : 201);
+    });
+
+    for (const action of ["pause", "resume", "complete", "cancel"] as const) {
+      router.post(`/workspaces/:workspaceId/goals/:goalId/${action}`, async (context) => {
+        const goalId = parseDomainId(context.req.param("goalId"));
+        const input = await parseJsonBody(context, goalTransitionSchema);
+        const result = await goalService.transitionGoal(
+          scopeOf(context),
+          goalId,
+          action,
+          input,
+          requiredIdempotencyKey(context),
+          requireIfMatch(context),
+        );
+        context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+        setVersionHeaders(context, result.goal.version);
+        return context.json(result, 200);
+      });
+    }
   }
 
   router.post("/workspaces/:workspaceId/transactions", async (context) => {
@@ -282,6 +413,11 @@ function parseDomainId(value: string | undefined): string {
 }
 
 export function financeErrorToHttp(error: unknown): unknown {
+  if (error instanceof IdempotencyConflictError)
+    return new ApiHttpError(409, "idempotency_conflict");
+  if (error instanceof DomainError && error.code === "validation_failed") {
+    return new ApiHttpError(422, "validation_failed", { message: error.message });
+  }
   if (error instanceof FinanceNotFoundError) return notFoundError();
   if (error instanceof FinancePermissionError) return new ApiHttpError(403, "permission_denied");
   if (error instanceof VersionConflictError)

@@ -393,12 +393,18 @@ export class IdentityService {
               UNION ALL
            SELECT 1 FROM credit_card
               WHERE workspace_id = $1
+           UNION ALL
+           SELECT 1 FROM goal
+              WHERE workspace_id = $1
+           UNION ALL
+           SELECT 1 FROM goal_reservation_movement
+              WHERE workspace_id = $1
            ) AS exists`,
           [scope.workspaceId],
         );
         if (movement.rows[0]?.exists) {
           throw new IdentityConflictError(
-            "A moeda não pode ser alterada após registrar movimentações, compromissos ou cartões.",
+            "A moeda não pode ser alterada após registrar movimentações, compromissos, cartões ou metas.",
           );
         }
       }
@@ -1265,6 +1271,7 @@ export class IdentityService {
           workspaceId,
         ]);
         await this.deleteInvitationEmailArtifacts(client, workspaceId);
+        await client.query(`SELECT app.purge_workspace_goals($1)::int`, [workspaceId]);
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
       },

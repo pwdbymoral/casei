@@ -475,6 +475,65 @@ export const transactionListQuerySchema = paginationQuerySchema
 
 export type TransactionListQuery = z.infer<typeof transactionListQuerySchema>;
 
+export const goalStatusSchema = z.enum(["active", "completed", "paused", "canceled"]);
+export const goalPrioritySchema = z.enum(["low", "normal", "high"]);
+export const goalAmountSchema = z.object({
+  amount: positiveMoneySchema,
+  allowUncovered: z.boolean().default(false),
+});
+export const goalAllocateSchema = goalAmountSchema.extend({
+  occurredOn: civilDateSchema.optional(),
+  note: z.string().trim().max(500).optional(),
+});
+export const goalReleaseSchema = z.object({
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+  note: z.string().trim().max(500).optional(),
+});
+export const createGoalSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  target: positiveMoneySchema,
+  deadline: civilDateSchema.nullable().optional(),
+  priority: goalPrioritySchema.default("normal"),
+  note: z.string().trim().max(500).nullable().optional(),
+});
+export const updateGoalSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    target: positiveMoneySchema.optional(),
+    deadline: civilDateSchema.nullable().optional(),
+    priority: goalPrioritySchema.optional(),
+    note: z.string().trim().max(500).nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+export const goalSpendSchema = z.object({
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+  description: z.string().trim().max(500).default("Gasto da meta"),
+  categoryId: domainIdSchema.nullable().optional(),
+});
+export const goalTransitionSchema = z.object({ confirm: z.literal(true) });
+export const goalSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  name: z.string().min(1).max(200),
+  target: positiveMoneySchema,
+  reserved: moneySchema,
+  uncovered: moneySchema,
+  deadline: civilDateSchema.nullable(),
+  priority: goalPrioritySchema,
+  status: goalStatusSchema,
+  note: z.string().max(500).nullable(),
+  version: versionSchema,
+});
+export type CreateGoalInput = z.infer<typeof createGoalSchema>;
+export type UpdateGoalInput = z.infer<typeof updateGoalSchema>;
+export type GoalAmountInput = z.infer<typeof goalAmountSchema>;
+export type GoalAllocateInput = z.infer<typeof goalAllocateSchema>;
+export type GoalReleaseInput = z.infer<typeof goalReleaseSchema>;
+export type GoalSpendInput = z.infer<typeof goalSpendSchema>;
+export type GoalContract = z.infer<typeof goalSchema>;
+
 /** Audit snapshots are allowlisted server-side and intentionally opaque to clients. */
 export const auditSnapshotSchema = z.record(z.string(), z.unknown());
 export const financeAuditEventSchema = z.object({
