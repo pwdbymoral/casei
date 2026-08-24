@@ -69,6 +69,7 @@ if (!adminUrl) {
       assert.ok(runtimePool);
 
       const actorId = "user-plat004";
+      const backupOwnerId = "user-plat004-backup";
       const workspaceId = (
         await pool.query<{ id: string }>(
           `INSERT INTO "workspace" (name) VALUES ('Casa') RETURNING id`,
@@ -81,9 +82,19 @@ if (!adminUrl) {
         [actorId],
       );
       await pool.query(
+        `INSERT INTO "user" (id, name, email, email_verified)
+         VALUES ($1, 'Pessoa reserva', 'plat004-backup@example.test', true)`,
+        [backupOwnerId],
+      );
+      await pool.query(
         `INSERT INTO "membership" (workspace_id, user_id, role)
          VALUES ($1, $2, 'owner')`,
         [workspaceId, actorId],
+      );
+      await pool.query(
+        `INSERT INTO "membership" (workspace_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [workspaceId, backupOwnerId],
       );
 
       const runtimeIdentity = await withUnitOfWork(
@@ -474,10 +485,31 @@ if (!adminUrl) {
       );
       const batchRun = batchWorker.runOnce(workspaceId, new Date(Date.now() + 60_000));
       await firstBatch;
-      await pool.query(
-        `UPDATE "membership" SET status = 'revoked' WHERE workspace_id = $1 AND user_id = $2`,
-        [workspaceId, actorId],
-      );
+      await pool.query("BEGIN");
+      try {
+        // Ownership transfer and revocation are one atomic operation. The
+        // deferred invariant validates that the workspace still has exactly
+        // one active owner when this transaction commits.
+        await pool.query(
+          `UPDATE "membership" SET role = 'member'
+           WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, actorId],
+        );
+        await pool.query(
+          `UPDATE "membership" SET role = 'owner'
+           WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, backupOwnerId],
+        );
+        await pool.query(
+          `UPDATE "membership" SET status = 'revoked'
+           WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, actorId],
+        );
+        await pool.query("COMMIT");
+      } catch (error) {
+        await pool.query("ROLLBACK");
+        throw error;
+      }
       releaseSecondBatch();
       assert.equal((await batchRun).state, "cancelled");
       const batchActions = await pool.query<{ action: string }>(
