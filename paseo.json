@@ -1,0 +1,24 @@
+{
+  "worktree": {
+    "setup": [
+      "corepack enable",
+      "pnpm install --frozen-lockfile"
+    ]
+  },
+  "scripts": {
+    "Check": {
+      "command": "pnpm check"
+    }
+  },
+  "metadataGeneration": {
+    "branchName": {
+      "instructions": "Use feat/, fix/, test/, refactor/, chore/ ou docs/, seguidos de um nome curto em kebab-case e, quando aplicável, o domínio da mudança. Exemplos: feat/auth-007-email-change, fix/stock-rls. Nunca trabalhe diretamente na main."
+    },
+    "commitMessage": {
+      "instructions": "Use Conventional Commits em inglês, sempre com escopo quando possível: feat(auth): ..., fix(stock): ..., test(database): ..., chore(ci): .... Use imperativo, uma mudança lógica por commit e sem ponto final."
+    },
+    "pullRequest": {
+      "instructions": "Comece com um resumo objetivo de um parágrafo. Inclua uma seção Test plan com os comandos realmente executados e seus resultados; informe explicitamente o que não foi executado e por quê. Inclua Risks/Notes somente quando aplicável e relacione a spec ou plano afetado. Não invente validações."
+    }
+  }
+}
