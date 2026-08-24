@@ -748,7 +748,7 @@ export const loanContract = pgTable(
       columns: [table.workspaceId, table.principalEventId, table.currencyCode],
       foreignColumns: [ledgerEvent.workspaceId, ledgerEvent.id, ledgerEvent.currencyCode],
       name: "loan_contract_principal_event_fk",
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     check("loan_contract_direction_check", sql`${table.direction} in ('lent', 'borrowed')`),
     check(
       "loan_contract_counterparty_check",
@@ -791,12 +791,12 @@ export const loanPayment = pgTable(
       columns: [table.workspaceId, table.loanId],
       foreignColumns: [loanContract.workspaceId, loanContract.id],
       name: "loan_payment_loan_fk",
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     foreignKey({
       columns: [table.workspaceId, table.ledgerEventId, table.currencyCode],
       foreignColumns: [ledgerEvent.workspaceId, ledgerEvent.id, ledgerEvent.currencyCode],
       name: "loan_payment_event_fk",
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     check("loan_payment_amount_check", sql`${table.amountMinor} > 0`),
     check("loan_payment_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
   ],

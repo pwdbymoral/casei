@@ -45,12 +45,17 @@ O indicador responde “quanto posso gastar sem consumir reservas ou deixar comp
 
 `seguro = max(0, saldo atual + entradas planejadas no horizonte − saídas planejadas no horizonte − reservas cobertas − margem de segurança)`
 
+Na resposta, `loanReceivable` está incluído nas entradas planejadas e
+`loanPayable` nas saídas planejadas, ambos também apresentados separadamente
+para que a explicação não esconda o efeito dos empréstimos.
+
 - Faturas entram como saída; suas compras não entram novamente na fórmula de caixa.
 - Compromissos vencidos entram antes dos futuros.
 - Reserva coberta é limitada ao saldo disponível para evitar subtração dupla de reserva já descoberta.
 - Margem de segurança padrão é zero no onboarding; o usuário pode definir valor fixo. Percentuais ficam fora do MVP.
 - O valor bruto negativo também é mostrado na explicação como déficit previsto; o CTA muda de `Ver quanto posso gastar` para `Revisar déficit`.
 - O indicador nunca é apresentado quando faltam saldo inicial e eventos suficientes; nesse caso, mostra passos objetivos para aumentar a confiança.
+- Empréstimos em aberto com vencimento no horizonte são projetados pelo saldo principal restante: um empréstimo concedido aumenta `loanReceivable` e uma obrigação recebida aumenta `loanPayable`. O principal e os pagamentos já publicados no ledger não são somados novamente como receita ou despesa.
 
 No backend do MVP, a leitura reconstruível fica disponível em
 `GET /v1/workspaces/{workspaceId}/insights/financial` e o cálculo em
@@ -58,6 +63,9 @@ No backend do MVP, a leitura reconstruível fica disponível em
 determinísticas; o segundo aceita `horizonDays` entre 1 e 365. A resposta do valor
 seguro inclui `gross`, `safe`, `available`, `confidence` e o breakdown de saldo,
 entradas, saídas da carteira, faturas, reservas cobertas/descobertas e margem.
+O breakdown também expõe `loanReceivable` e `loanPayable`; esses valores já
+estão incluídos, respectivamente, em `plannedIncome` e `plannedOutflow`, sem
+dupla contagem.
 Quando ainda não há evento publicado de abertura ou conferência de saldo para
 sustentar o saldo, `available` é `false` e os valores `safe`/`gross` são nulos,
 mesmo que o breakdown mostre os dados observados. A UI deve transformar a razão

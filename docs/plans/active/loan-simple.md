@@ -25,6 +25,10 @@ efeito de caixa no ledger.
 - Auditoria registra origem, autor, correlação e snapshots sanitizados do
   contrato/pagamento.
 - Juros, tarifas, baixa e perdão não têm campos nem comandos nesta fatia.
+- O purge de um espaço chama uma rotina `SECURITY DEFINER` que seleciona apenas
+  eventos de empréstimos daquele espaço, remove entradas antes dos eventos e
+  mantém a auditoria detached. O role de runtime não pode atualizar/apagar
+  pagamentos, eventos ou lançamentos históricos diretamente.
 
 ## Estratégia
 

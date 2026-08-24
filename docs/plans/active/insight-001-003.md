@@ -20,6 +20,10 @@ cache ou uma nova tabela de projeção.
   o valor bruto e a confiança.
 - Despesas de cartão não são subtraídas duas vezes: o cálculo usa somente o
   saldo aberto das faturas na janela como saída de caixa futura.
+- Empréstimos em aberto com vencimento dentro da janela entram pelo saldo
+  principal restante: concedidos aparecem como `loanReceivable`/entrada e
+  recebidos como `loanPayable`/saída. O principal já lançado no ledger não é
+  contado novamente como receita ou despesa.
 - Reservas cobertas são limitadas ao saldo disponível e movimentos de reserva
   são agregados como append-only; dados inconsistentes não são mascarados.
 - Ausência de evidência de saldo torna o indicador indisponível e explica uma

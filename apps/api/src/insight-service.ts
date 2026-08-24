@@ -38,6 +38,8 @@ export interface FinancialReadModel {
     overdueOutflow: InsightMoney;
     walletOutflow: InsightMoney;
     cardBills: InsightMoney;
+    loanReceivable: InsightMoney;
+    loanPayable: InsightMoney;
     count: number;
   };
   reservations: {
@@ -68,6 +70,8 @@ export interface SafeToSpendView {
     plannedOutflow: InsightMoney;
     walletOutflow: InsightMoney;
     cardBills: InsightMoney;
+    loanReceivable: InsightMoney;
+    loanPayable: InsightMoney;
     coveredReservations: InsightMoney;
     reserved: InsightMoney;
     uncoveredReservations: InsightMoney;
@@ -123,6 +127,8 @@ interface Snapshot {
   walletOutflow: bigint;
   cardBills: bigint;
   overdueOutflow: bigint;
+  loanReceivable: bigint;
+  loanPayable: bigint;
   commitmentCount: number;
   unknownVariableCount: number;
   reserved: bigint;
@@ -145,6 +151,10 @@ interface InsightNumericRow {
   commitment_count?: string | bigint | null;
   unknown_variable_count?: string | bigint | null;
   card_bills_minor?: string | bigint | null;
+  loan_receivable_minor?: string | bigint | null;
+  loan_payable_minor?: string | bigint | null;
+  loan_overdue_payable_minor?: string | bigint | null;
+  loan_commitment_count?: string | bigint | null;
   reserved_minor?: string | bigint | null;
   missing_count?: string | bigint | null;
   low_count?: string | bigint | null;
@@ -308,6 +318,25 @@ export class InsightService {
          LEFT JOIN recurrence_rule rr ON rr.workspace_id = ft.workspace_id AND rr.id = ft.recurrence_id`,
       [workspaceId, config.currency, dates.to, dates.asOf],
     );
+    const loans = await client.query<InsightNumericRow>(
+      `SELECT COALESCE(SUM(CASE WHEN projected.direction = 'lent' THEN projected.remaining_minor ELSE 0 END), 0) AS loan_receivable_minor,
+              COALESCE(SUM(CASE WHEN projected.direction = 'borrowed' THEN projected.remaining_minor ELSE 0 END), 0) AS loan_payable_minor,
+              COALESCE(SUM(CASE WHEN projected.direction = 'borrowed' AND projected.due_on < $3::date THEN projected.remaining_minor ELSE 0 END), 0) AS loan_overdue_payable_minor,
+              COUNT(*) AS loan_commitment_count
+         FROM (
+           SELECT lc.direction,
+                  lc.due_on,
+                  lc.principal_minor - lc.paid_minor AS remaining_minor
+             FROM loan_contract lc
+            WHERE lc.workspace_id = $1
+              AND lc.currency_code = $2
+              AND lc.occurred_on <= $3::date
+              AND lc.due_on IS NOT NULL
+         ) projected
+        WHERE projected.due_on <= $4::date
+          AND projected.remaining_minor > 0`,
+      [workspaceId, config.currency, dates.asOf, dates.to],
+    );
     const statements = await client.query<InsightNumericRow>(
       `SELECT COALESCE(SUM(GREATEST(total_minor - paid_minor, 0)), 0) AS card_bills_minor
          FROM credit_statement
@@ -337,6 +366,9 @@ export class InsightService {
     const balanceRow = balanceResult.rows[0];
     const resultRow = result.rows[0];
     const commitmentRow = commitment.rows[0];
+    const loanRow = loans.rows[0];
+    const loanReceivable = toBigInt(loanRow?.loan_receivable_minor);
+    const loanPayable = toBigInt(loanRow?.loan_payable_minor);
     return {
       asOf: dates.asOf,
       from: dates.from,
@@ -349,11 +381,17 @@ export class InsightService {
       expense: toBigInt(resultRow?.expense_minor),
       transfer: toBigInt(transferResult.rows[0]?.transfer_minor),
       adjustment: toBigInt(resultRow?.adjustment_minor),
-      plannedIncome: toBigInt(commitmentRow?.planned_income_minor),
+      plannedIncome: toBigInt(commitmentRow?.planned_income_minor) + loanReceivable,
       walletOutflow: toBigInt(commitmentRow?.wallet_outflow_minor),
       cardBills: toBigInt(statements.rows[0]?.card_bills_minor),
-      overdueOutflow: toBigInt(commitmentRow?.overdue_outflow_minor),
-      commitmentCount: Number(toBigInt(commitmentRow?.commitment_count)),
+      overdueOutflow:
+        toBigInt(commitmentRow?.overdue_outflow_minor) +
+        toBigInt(loanRow?.loan_overdue_payable_minor),
+      loanReceivable,
+      loanPayable,
+      commitmentCount:
+        Number(toBigInt(commitmentRow?.commitment_count)) +
+        Number(toBigInt(loanRow?.loan_commitment_count)),
       unknownVariableCount: Number(toBigInt(commitmentRow?.unknown_variable_count)),
       reserved: toBigInt(reservations.rows[0]?.reserved_minor),
       missingStockCount: Number(toBigInt(stock.rows[0]?.missing_count)),
@@ -391,10 +429,15 @@ function toFinancialReadModel(snapshot: Snapshot): FinancialReadModel {
     },
     commitments: {
       plannedIncome: money(snapshot.config.currency, snapshot.plannedIncome),
-      plannedOutflow: money(snapshot.config.currency, snapshot.walletOutflow + snapshot.cardBills),
+      plannedOutflow: money(
+        snapshot.config.currency,
+        snapshot.walletOutflow + snapshot.cardBills + snapshot.loanPayable,
+      ),
       overdueOutflow: money(snapshot.config.currency, snapshot.overdueOutflow),
       walletOutflow: money(snapshot.config.currency, snapshot.walletOutflow),
       cardBills: money(snapshot.config.currency, snapshot.cardBills),
+      loanReceivable: money(snapshot.config.currency, snapshot.loanReceivable),
+      loanPayable: money(snapshot.config.currency, snapshot.loanPayable),
       count: snapshot.commitmentCount,
     },
     reservations: {
@@ -409,7 +452,7 @@ function toFinancialReadModel(snapshot: Snapshot): FinancialReadModel {
 
 function toSafeToSpendView(snapshot: Snapshot, horizonDays: number): SafeToSpendView {
   const covered = coveredReservations(snapshot.balance, snapshot.reserved);
-  const plannedOutflow = snapshot.walletOutflow + snapshot.cardBills;
+  const plannedOutflow = snapshot.walletOutflow + snapshot.cardBills + snapshot.loanPayable;
   const calculation = calculateSafeToSpendAmounts({
     balance: snapshot.balance,
     plannedIncome: snapshot.plannedIncome,
@@ -435,6 +478,8 @@ function toSafeToSpendView(snapshot: Snapshot, horizonDays: number): SafeToSpend
       plannedOutflow: money(currency, plannedOutflow),
       walletOutflow: money(currency, snapshot.walletOutflow),
       cardBills: money(currency, snapshot.cardBills),
+      loanReceivable: money(currency, snapshot.loanReceivable),
+      loanPayable: money(currency, snapshot.loanPayable),
       coveredReservations: money(currency, covered),
       reserved: money(currency, snapshot.reserved),
       uncoveredReservations: money(currency, snapshot.reserved - covered),

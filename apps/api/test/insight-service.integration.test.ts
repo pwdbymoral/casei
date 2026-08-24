@@ -32,11 +32,13 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
           reasons: ["recorrencia_variavel_sem_estimativa"],
         },
         breakdown: {
-          balance: { currency: "BRL", minor: "1500" },
-          plannedIncome: { currency: "BRL", minor: "100" },
-          plannedOutflow: { currency: "BRL", minor: "575" },
+          balance: { currency: "BRL", minor: "1700" },
+          plannedIncome: { currency: "BRL", minor: "300" },
+          plannedOutflow: { currency: "BRL", minor: "975" },
           walletOutflow: { currency: "BRL", minor: "275" },
           cardBills: { currency: "BRL", minor: "300" },
+          loanReceivable: { currency: "BRL", minor: "200" },
+          loanPayable: { currency: "BRL", minor: "400" },
           coveredReservations: { currency: "BRL", minor: "200" },
           reserved: { currency: "BRL", minor: "200" },
           uncoveredReservations: { currency: "BRL", minor: "0" },
@@ -56,8 +58,11 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
         adjustment: { currency: "BRL", minor: "0" },
       });
       expect(model.commitments).toMatchObject({
-        plannedOutflow: { currency: "BRL", minor: "575" },
-        overdueOutflow: { currency: "BRL", minor: "25" },
+        plannedIncome: { currency: "BRL", minor: "300" },
+        plannedOutflow: { currency: "BRL", minor: "975" },
+        overdueOutflow: { currency: "BRL", minor: "425" },
+        loanReceivable: { currency: "BRL", minor: "200" },
+        loanPayable: { currency: "BRL", minor: "400" },
       });
       expect(model.stock).toEqual({ missingCount: 2, lowCount: 2 });
     } finally {
@@ -133,6 +138,8 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
       income_id: string;
       expense_id: string;
       card_liability_id: string;
+      loan_receivable_id: string;
+      loan_payable_id: string;
     }>(
       `WITH wallet AS (
          INSERT INTO financial_account (workspace_id, kind, name, currency_code)
@@ -146,10 +153,18 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
        ), card_liability AS (
          INSERT INTO financial_account (workspace_id, kind, name, currency_code)
          VALUES ($1, 'card_liability', 'Cartão', 'BRL') RETURNING id
+       ), loan_receivable AS (
+         INSERT INTO financial_account (workspace_id, kind, name, currency_code)
+         VALUES ($1, 'loan_receivable', 'Empréstimos a receber', 'BRL') RETURNING id
+       ), loan_payable AS (
+         INSERT INTO financial_account (workspace_id, kind, name, currency_code)
+         VALUES ($1, 'loan_payable', 'Empréstimos a pagar', 'BRL') RETURNING id
        )
        SELECT wallet.id AS wallet_id, income.id AS income_id, expense.id AS expense_id,
-              card_liability.id AS card_liability_id
-         FROM wallet, income, expense, card_liability`,
+              card_liability.id AS card_liability_id,
+              loan_receivable.id AS loan_receivable_id,
+              loan_payable.id AS loan_payable_id
+         FROM wallet, income, expense, card_liability, loan_receivable, loan_payable`,
       [workspaceId],
     );
     const account = accounts.rows[0];
@@ -165,6 +180,66 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
       [account.wallet_id, -500],
       [account.expense_id, 500],
     ]);
+    const lentPrincipalEventId = await insertLedgerEvent(
+      pool,
+      workspaceId,
+      "loan.principal.lent.v1",
+      "2026-08-01",
+      [
+        [account.wallet_id, -300],
+        [account.loan_receivable_id, 300],
+      ],
+    );
+    const borrowedPrincipalEventId = await insertLedgerEvent(
+      pool,
+      workspaceId,
+      "loan.principal.borrowed.v1",
+      "2026-08-01",
+      [
+        [account.wallet_id, 500],
+        [account.loan_payable_id, -500],
+      ],
+    );
+    const lentPaymentEventId = await insertLedgerEvent(
+      pool,
+      workspaceId,
+      "loan.payment.received.v1",
+      "2026-08-04",
+      [
+        [account.wallet_id, 100],
+        [account.loan_receivable_id, -100],
+      ],
+    );
+    const borrowedPaymentEventId = await insertLedgerEvent(
+      pool,
+      workspaceId,
+      "loan.payment.made.v1",
+      "2026-08-04",
+      [
+        [account.wallet_id, -100],
+        [account.loan_payable_id, 100],
+      ],
+    );
+    const loans = await pool.query<{ id: string; direction: "lent" | "borrowed" }>(
+      `INSERT INTO loan_contract
+         (workspace_id, direction, counterparty, principal_minor, paid_minor, currency_code,
+          occurred_on, due_on, principal_event_id, status, version)
+       VALUES
+         ($1, 'lent', 'Ana', 300, 100, 'BRL', '2026-08-01', '2026-08-20', $2, 'open', 1),
+         ($1, 'borrowed', 'Banco doméstico', 500, 100, 'BRL', '2026-08-01', '2026-08-03', $3, 'open', 1)
+       RETURNING id, direction`,
+      [workspaceId, lentPrincipalEventId, borrowedPrincipalEventId],
+    );
+    const lentLoanId = loans.rows.find((row) => row.direction === "lent")?.id;
+    const borrowedLoanId = loans.rows.find((row) => row.direction === "borrowed")?.id;
+    if (!lentLoanId || !borrowedLoanId) throw new Error("loans were not created");
+    await pool.query(
+      `INSERT INTO loan_payment
+         (workspace_id, loan_id, amount_minor, currency_code, occurred_on, ledger_event_id)
+       VALUES ($1, $2, 100, 'BRL', '2026-08-04', $3),
+              ($1, $4, 100, 'BRL', '2026-08-04', $5)`,
+      [workspaceId, lentLoanId, lentPaymentEventId, borrowedLoanId, borrowedPaymentEventId],
+    );
 
     const card = await pool.query<{ id: string }>(
       `INSERT INTO credit_card (workspace_id, name, closing_day, due_day, currency_code)
@@ -296,6 +371,7 @@ async function insertLedgerEvent(
       [eventId],
     );
     await client.query("COMMIT");
+    return eventId;
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;

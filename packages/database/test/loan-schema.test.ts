@@ -12,6 +12,14 @@ test("LOAN-001/002 migration persists scoped IOU contracts and payments", async 
     fileURLToPath(new URL("../drizzle/0013_loans.down.sql", import.meta.url)),
     "utf8",
   );
+  const purgeHardening = await readFile(
+    fileURLToPath(new URL("../drizzle/0015_loan_purge_hardening.sql", import.meta.url)),
+    "utf8",
+  );
+  const purgeHardeningDown = await readFile(
+    fileURLToPath(new URL("../drizzle/0015_loan_purge_hardening.down.sql", import.meta.url)),
+    "utf8",
+  );
   const journal = await readFile(
     fileURLToPath(new URL("../drizzle/meta/_journal.json", import.meta.url)),
     "utf8",
@@ -29,4 +37,13 @@ test("LOAN-001/002 migration persists scoped IOU contracts and payments", async 
   assert.match(migration, /CREATE POLICY "loan_payment_scope"/i);
   assert.match(down, /DROP TABLE IF EXISTS.*loan_payment.*loan_contract/is);
   assert.match(journal, /"idx": 13[\s\S]*"tag": "0013_loans"/i);
+  assert.match(journal, /"idx": 14[\s\S]*"tag": "0014_stock_purchase_finance_link"/i);
+  assert.match(journal, /"idx": 15[\s\S]*"tag": "0015_loan_purge_hardening"/i);
+  assert.match(purgeHardening, /CREATE OR REPLACE FUNCTION app\.purge_workspace_loans/i);
+  assert.match(purgeHardening, /SECURITY DEFINER/i);
+  assert.match(purgeHardening, /ON DELETE CASCADE/i);
+  assert.match(purgeHardening, /REVOKE UPDATE, DELETE ON TABLE "loan_payment"/i);
+  assert.match(purgeHardening, /REVOKE UPDATE, DELETE ON TABLE "ledger_event", "ledger_entry"/i);
+  assert.match(purgeHardeningDown, /ON DELETE RESTRICT/i);
+  assert.match(purgeHardeningDown, /DROP FUNCTION IF EXISTS app\.purge_workspace_loans/i);
 });
