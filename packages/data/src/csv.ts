@@ -840,7 +840,8 @@ export function protectCsvFormula(value: string): ProtectedCsvCell {
   };
 }
 
-function escapeCsvCell(value: string): string {
+/** Escapes one cell using canonical RFC4180 double-quote notation. */
+export function serializeCsvCell(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
@@ -862,7 +863,7 @@ export function serializeCsv(
         .map((cell) => {
           const protectedCell =
             options.protectFormulas === false ? cell : protectCsvFormula(cell).value;
-          return escapeCsvCell(protectedCell);
+          return serializeCsvCell(protectedCell);
         })
         .join(delimiter),
     )

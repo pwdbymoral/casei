@@ -55,3 +55,17 @@ repetir um fingerprint não remove nem invalida automaticamente uma linha.
 com espaço/tab/quebra de linha seguido de `=`, `+`, `-` ou `@`. O resultado
 expõe também o `logicalValue`, permitindo que DATA-005 preserve o valor lógico
 no manifesto sem entregar uma célula executável a planilhas.
+
+`createVersionedCsvExport` acrescenta as colunas reservadas
+`casei_schema_version` e `casei_id` ao cabeçalho canônico e recebe somente
+colunas declaradas pelo domínio. Ele devolve um `ReadableStream<Uint8Array>`
+UTF-8 de uso único: o hash SHA-256, contagem e tamanho são calculados durante o
+consumo, em chunks limitados, sem acumular o arquivo inteiro em memória. O
+manifesto só resolve após o EOF e contém schema, domínio, horário UTC, fuso,
+moeda, filtros congelados, colunas, checksum do CSV e posições/valores lógicos
+das células protegidas.
+
+O núcleo rejeita linhas sem `casei_id`, campos não declarados, valores que não
+sejam strings/nulos, excesso de linhas/bytes/células e cancelamento do stream.
+Jobs, autorização no momento do download, proxy autenticado, ZIP completo e
+armazenamento temporário permanecem fora do pacote.
