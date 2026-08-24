@@ -12,6 +12,9 @@ export type Goal = {
   target: GoalMoney;
   reserved: GoalMoney;
   uncovered: GoalMoney;
+  remaining: GoalMoney;
+  contributionPeriodsRemaining: number | null;
+  requiredContribution: GoalMoney | null;
   deadline: string | null;
   priority: GoalPriority;
   status: GoalStatus;
@@ -58,9 +61,15 @@ export type GoalAmountInput = {
 
 export type GoalMutation = { goal: Goal; replayed: boolean; transactionId?: string };
 
+export type GoalPageQuery = { cursor?: string | null; limit?: number };
+
 export type GoalsAdapter = {
-  listGoals(workspaceId: string): Promise<GoalPage>;
-  listMovements(workspaceId: string, goalId: string): Promise<GoalMovementPage>;
+  listGoals(workspaceId: string, query?: GoalPageQuery): Promise<GoalPage>;
+  listMovements(
+    workspaceId: string,
+    goalId: string,
+    query?: GoalPageQuery,
+  ): Promise<GoalMovementPage>;
   createGoal(workspaceId: string, input: CreateGoalInput): Promise<Goal>;
   updateGoal(workspaceId: string, goal: Goal, input: Partial<CreateGoalInput>): Promise<Goal>;
   allocate(workspaceId: string, goal: Goal, input: GoalAmountInput): Promise<GoalMutation>;
@@ -171,13 +180,21 @@ export function createHttpGoalsAdapter(
   });
 
   return {
-    listGoals: async (workspaceId) => {
-      const page = await call<JsonPage<Goal>>(path(workspaceId));
+    listGoals: async (workspaceId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const page = await call<JsonPage<Goal>>(path(workspaceId) + suffix);
       return { items: page.items, nextCursor: page.page.nextCursor, hasMore: page.page.hasMore };
     },
-    listMovements: async (workspaceId, goalId) => {
+    listMovements: async (workspaceId, goalId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const suffix = params.toString() ? `?${params.toString()}` : "";
       const page = await call<JsonPage<GoalMovement>>(
-        path(workspaceId, `/${encodeURIComponent(goalId)}/movements`),
+        path(workspaceId, `/${encodeURIComponent(goalId)}/movements`) + suffix,
       );
       return { items: page.items, nextCursor: page.page.nextCursor, hasMore: page.page.hasMore };
     },
@@ -238,6 +255,9 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
           target: { currency: "BRL", minor: "100000" },
           reserved: { currency: "BRL", minor: "25000" },
           uncovered: { currency: "BRL", minor: "0" },
+          remaining: { currency: "BRL", minor: "75000" },
+          contributionPeriodsRemaining: 5,
+          requiredContribution: { currency: "BRL", minor: "15000" },
           deadline: "2027-01-31",
           priority: "high",
           status: "active",
@@ -248,7 +268,13 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
     ],
   ]);
   const movements = new Map<string, GoalMovement[]>();
-  const list = (workspaceId: string) => goalsByWorkspace.get(workspaceId) ?? [];
+  const list = (workspaceId: string) => {
+    const existing = goalsByWorkspace.get(workspaceId);
+    if (existing) return existing;
+    const created: Goal[] = [];
+    goalsByWorkspace.set(workspaceId, created);
+    return created;
+  };
   const update = (workspaceId: string, goal: Goal, next: Goal): Goal => {
     const goals = list(workspaceId);
     const index = goals.findIndex((item) => item.id === goal.id);
@@ -275,10 +301,13 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
     const delta = BigInt(amount.minor);
     if (delta <= BigInt(0) || (kind === "release" && delta > current))
       throw new GoalsAdapterError("O valor não pode ser aplicado à reserva.", 409);
-    const reserved = kind === "release" ? current - delta : current + delta;
+    const reserved = kind === "allocate" ? current + delta : current - delta;
+    const remaining =
+      BigInt(goal.target.minor) > reserved ? BigInt(goal.target.minor) - reserved : BigInt(0);
     const next: Goal = {
       ...goal,
       reserved: { ...goal.reserved, minor: reserved.toString() },
+      remaining: { ...goal.remaining, minor: remaining.toString() },
       status: reserved >= BigInt(goal.target.minor) ? "completed" : goal.status,
       version: goal.version + 1,
     };
@@ -288,7 +317,8 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
       goalId: goal.id,
       kind,
       amount,
-      transactionId: null,
+      transactionId:
+        kind === "spend" ? `${goal.id}-transaction-${movements.get(goal.id)?.length ?? 0}` : null,
       occurredOn: new Date().toISOString().slice(0, 10),
       note: note ?? null,
     };
@@ -318,6 +348,9 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
         target: input.target,
         reserved: { ...input.target, minor: "0" },
         uncovered: { ...input.target, minor: "0" },
+        remaining: { ...input.target },
+        contributionPeriodsRemaining: null,
+        requiredContribution: null,
         deadline: input.deadline ?? null,
         priority: input.priority ?? "normal",
         status: "active",
@@ -332,6 +365,19 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
         ...goal,
         ...input,
         target: input.target ?? goal.target,
+        remaining: input.target
+          ? {
+              ...input.target,
+              minor: (BigInt(input.target.minor) > BigInt(goal.reserved.minor)
+                ? BigInt(input.target.minor) - BigInt(goal.reserved.minor)
+                : BigInt(0)
+              ).toString(),
+            }
+          : goal.remaining,
+        status:
+          input.target && BigInt(goal.reserved.minor) >= BigInt(input.target.minor)
+            ? "completed"
+            : goal.status,
         version: goal.version + 1,
       });
     },

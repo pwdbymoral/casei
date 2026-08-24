@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createHttpGoalsAdapter, type Goal, type GoalMovement, goalProgressPercent } from "./goals";
+import {
+  createFixtureGoalsAdapter,
+  createHttpGoalsAdapter,
+  type Goal,
+  type GoalMovement,
+  goalProgressPercent,
+} from "./goals";
 
 const goal: Goal = {
   id: "goal-1",
@@ -9,6 +15,9 @@ const goal: Goal = {
   target: { currency: "BRL", minor: "100000" },
   reserved: { currency: "BRL", minor: "25000" },
   uncovered: { currency: "BRL", minor: "0" },
+  remaining: { currency: "BRL", minor: "75000" },
+  contributionPeriodsRemaining: 5,
+  requiredContribution: { currency: "BRL", minor: "15000" },
   deadline: "2027-01-31",
   priority: "high",
   status: "active",
@@ -28,7 +37,7 @@ describe("goals adapter", () => {
   it("uses the published goal routes and concurrency headers", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/goals"))
+      if (new URL(url).pathname.endsWith("/goals"))
         return new Response(
           JSON.stringify({ items: [goal], page: { nextCursor: null, hasMore: false } }),
           {
@@ -45,11 +54,14 @@ describe("goals adapter", () => {
     });
     const adapter = createHttpGoalsAdapter({ baseUrl: "https://api.example", fetch });
 
-    await expect(adapter.listGoals("workspace-1")).resolves.toEqual({
+    await expect(
+      adapter.listGoals("workspace-1", { cursor: "cursor-1", limit: 100 }),
+    ).resolves.toEqual({
       items: [goal],
       nextCursor: null,
       hasMore: false,
     });
+    expect(String(fetch.mock.calls[0]?.[0])).toContain("?cursor=cursor-1&limit=100");
     await adapter.allocate("workspace-1", goal, { amount: { currency: "BRL", minor: "1000" } });
 
     const [, request] = fetch.mock.calls[1] ?? [];
@@ -70,5 +82,28 @@ describe("goals adapter", () => {
     };
     expect(movement.kind).toBe("allocate");
     expect(BigInt(movement.amount.minor)).toBe(BigInt(1000));
+  });
+
+  it("keeps fixture reserve arithmetic consistent for spending and new workspaces", async () => {
+    const adapter = createFixtureGoalsAdapter();
+    const created = await adapter.createGoal("workspace-new", {
+      name: "Viagem",
+      target: { currency: "BRL", minor: "10000" },
+    });
+    const allocated = await adapter.allocate("workspace-new", created, {
+      amount: { currency: "BRL", minor: "4000" },
+    });
+    const spent = await adapter.spend("workspace-new", allocated.goal, {
+      amount: { currency: "BRL", minor: "1500" },
+    });
+
+    expect(spent.goal.reserved.minor).toBe("2500");
+    expect(spent.goal.remaining.minor).toBe("7500");
+    const movements = await adapter.listMovements("workspace-new", created.id);
+    expect(movements.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "spend", transactionId: expect.any(String) }),
+      ]),
+    );
   });
 });

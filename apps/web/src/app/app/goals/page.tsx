@@ -90,6 +90,7 @@ function GoalCard({
   busy,
   onAction,
   onHistory,
+  onSimulation,
 }: {
   goal: Goal;
   currency: string;
@@ -97,10 +98,22 @@ function GoalCard({
   busy: boolean;
   onAction: (goal: Goal, action: GoalAction) => void;
   onHistory: (goal: Goal) => void;
+  onSimulation: (goal: Goal) => void;
 }) {
   const progress = goalProgressPercent(goal);
   const uncovered = BigInt(goal.uncovered.minor) > BigInt(0);
   const disabled = busy || goal.status === "canceled" || goal.status === "paused";
+  const remaining = BigInt(goal.remaining.minor);
+  const pace =
+    remaining <= BigInt(0)
+      ? "Meta atingida"
+      : goal.contributionPeriodsRemaining === null
+        ? "Defina um prazo para ver o ritmo sugerido"
+        : goal.contributionPeriodsRemaining === 0
+          ? "Prazo vencido; revise o objetivo"
+          : goal.requiredContribution
+            ? `${formatMoneyMinor(goal.requiredContribution.minor, currency)} por mês · ${goal.contributionPeriodsRemaining} período(s)`
+            : "Ritmo indisponível";
 
   return (
     <Card className="overflow-hidden">
@@ -150,6 +163,13 @@ function GoalCard({
             />
           </div>
         </div>
+        <p className="flex items-start gap-2 text-sm text-muted-foreground">
+          <CalendarDaysIcon aria-hidden="true" className="mt-0.5 shrink-0" />
+          <span>
+            <span className="font-medium text-foreground">Ritmo sugerido: </span>
+            {pace}
+          </span>
+        </p>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {uncovered ? (
@@ -200,6 +220,15 @@ function GoalCard({
         >
           <HistoryIcon aria-hidden="true" /> Ver histórico
         </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className="min-h-11 justify-start px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+          disabled={busy || remaining <= BigInt(0)}
+          onClick={() => onSimulation(goal)}
+        >
+          <CalendarDaysIcon aria-hidden="true" /> Simular contribuição
+        </Button>
       </CardContent>
     </Card>
   );
@@ -217,6 +246,8 @@ export default function GoalsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [action, setAction] = useState<{ goal: Goal; kind: GoalAction } | null>(null);
+  const [simulationGoal, setSimulationGoal] = useState<Goal | null>(null);
+  const [simulationMinor, setSimulationMinor] = useState("0");
   const [historyGoal, setHistoryGoal] = useState<Goal | null>(null);
   const [history, setHistory] = useState<GoalMovement[]>([]);
   const [historyStatus, setHistoryStatus] = useState<"idle" | "loading" | "error">("idle");
@@ -228,17 +259,29 @@ export default function GoalsPage() {
   const [priority, setPriority] = useState<Goal["priority"]>("normal");
   const [amountMinor, setAmountMinor] = useState("0");
   const [note, setNote] = useState("");
+  const [allowUncovered, setAllowUncovered] = useState(false);
+  const [uncoveredPrompt, setUncoveredPrompt] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<Goal[]> => {
     setStatus("loading");
     setError(null);
     try {
-      const page = await adapter.listGoals(workspaceId);
-      setGoals(page.items);
-      setStatus(page.items.length > 0 ? "success" : "empty");
+      const items: Goal[] = [];
+      let cursor: string | null = null;
+      let hasMore = true;
+      while (hasMore) {
+        const page = await adapter.listGoals(workspaceId, { cursor, limit: 100 });
+        items.push(...page.items);
+        cursor = page.nextCursor;
+        hasMore = page.hasMore;
+      }
+      setGoals(items);
+      setStatus(items.length > 0 ? "success" : "empty");
+      return items;
     } catch (cause) {
       setStatus(errorStatus(cause));
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar suas metas.");
+      return [];
     }
   }, [adapter, workspaceId]);
 
@@ -258,6 +301,14 @@ export default function GoalsPage() {
       ),
     [goals],
   );
+
+  const simulationPeriods = useMemo(() => {
+    if (!simulationGoal) return null;
+    const contribution = BigInt(simulationMinor || "0");
+    const remaining = BigInt(simulationGoal.remaining.minor);
+    if (contribution <= BigInt(0) || remaining <= BigInt(0)) return null;
+    return (remaining + contribution - BigInt(1)) / contribution;
+  }, [simulationGoal, simulationMinor]);
 
   function resetCreateForm() {
     setName("");
@@ -303,11 +354,17 @@ export default function GoalsPage() {
     setAction({ goal, kind });
     setAmountMinor("0");
     setNote("");
+    setAllowUncovered(false);
+    setUncoveredPrompt(false);
     setFormError(null);
   }
 
-  async function submitAction(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function openSimulation(goal: Goal) {
+    setSimulationGoal(goal);
+    setSimulationMinor("0");
+  }
+
+  async function runAction(allowUncoveredConfirmation = false) {
     if (!action) return;
     const amount = BigInt(amountMinor || "0");
     if (amount <= BigInt(0)) {
@@ -324,7 +381,10 @@ export default function GoalsPage() {
       const input = { amount: { currency, minor: amount.toString() }, note: note || null };
       const result =
         action.kind === "allocate"
-          ? await adapter.allocate(workspaceId, action.goal, { ...input, allowUncovered: false })
+          ? await adapter.allocate(workspaceId, action.goal, {
+              ...input,
+              allowUncovered: allowUncoveredConfirmation,
+            })
           : action.kind === "release"
             ? await adapter.release(workspaceId, action.goal, input)
             : await adapter.spend(workspaceId, action.goal, {
@@ -344,8 +404,19 @@ export default function GoalsPage() {
       );
     } catch (cause) {
       if (cause instanceof GoalsAdapterError && cause.status === 412) {
-        await load();
+        const refreshed = await load();
+        const current = refreshed.find((goal) => goal.id === action.goal.id);
+        if (current) setAction({ ...action, goal: current });
         setFormError("A meta mudou enquanto você revisava. Atualizamos os dados; tente novamente.");
+      } else if (
+        action.kind === "allocate" &&
+        cause instanceof GoalsAdapterError &&
+        /cobertura|saldo disponível/i.test(cause.message)
+      ) {
+        setUncoveredPrompt(true);
+        setFormError(
+          "A reserva ultrapassa o saldo disponível. Confirme abaixo se deseja registrar mesmo assim.",
+        );
       } else {
         setFormError(cause instanceof Error ? cause.message : "Não foi possível atualizar a meta.");
       }
@@ -354,12 +425,25 @@ export default function GoalsPage() {
     }
   }
 
+  function submitAction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void runAction(allowUncovered);
+  }
+
   async function openHistory(goal: Goal) {
     setHistoryGoal(goal);
     setHistoryStatus("loading");
     try {
-      const page = await adapter.listMovements(workspaceId, goal.id);
-      setHistory(page.items);
+      const items: GoalMovement[] = [];
+      let cursor: string | null = null;
+      let hasMore = true;
+      while (hasMore) {
+        const page = await adapter.listMovements(workspaceId, goal.id, { cursor, limit: 100 });
+        items.push(...page.items);
+        cursor = page.nextCursor;
+        hasMore = page.hasMore;
+      }
+      setHistory(items);
       setHistoryStatus("idle");
     } catch {
       setHistory([]);
@@ -451,6 +535,7 @@ export default function GoalsPage() {
                   busy={busy}
                   onAction={openAction}
                   onHistory={openHistory}
+                  onSimulation={openSimulation}
                 />
               ))}
             </section>
@@ -481,10 +566,10 @@ export default function GoalsPage() {
 
       <Alert>
         <CalendarDaysIcon aria-hidden="true" />
-        <AlertTitle>Ritmo sem automação</AlertTitle>
+        <AlertTitle>Planejamento sem automação oculta</AlertTitle>
         <AlertDescription>
-          A contribuição sugerida e as simulações entram na próxima camada de planejamento. Reservar
-          aqui nunca cria uma transação automaticamente.
+          O ritmo é uma sugestão transparente e a simulação é temporária. Reservar aqui nunca cria
+          uma transação automaticamente.
         </AlertDescription>
       </Alert>
 
@@ -601,6 +686,27 @@ export default function GoalsPage() {
               <p className="text-sm text-muted-foreground">
                 Reserva atual: {formatMoneyMinor(action.goal.reserved.minor, currency)}
               </p>
+              {uncoveredPrompt ? (
+                <Alert>
+                  <CircleAlertIcon aria-hidden="true" />
+                  <AlertTitle>Confirmar reserva sem cobertura?</AlertTitle>
+                  <AlertDescription className="flex flex-col items-start gap-3">
+                    O valor ficará visível como sem cobertura. Isso não altera o saldo da carteira.
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => {
+                        setAllowUncovered(true);
+                        setUncoveredPrompt(false);
+                        void runAction(true);
+                      }}
+                    >
+                      Reservar mesmo assim
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               {formError ? <FieldError>{formError}</FieldError> : null}
               <DialogFooter>
                 <Button
@@ -669,6 +775,55 @@ export default function GoalsPage() {
               ))}
             </ol>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(simulationGoal)}
+        onOpenChange={(open) => !open && setSimulationGoal(null)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Simular contribuição</DialogTitle>
+            <DialogDescription>
+              {simulationGoal?.name}. A simulação é temporária e não cria reserva nem transação.
+            </DialogDescription>
+          </DialogHeader>
+          {simulationGoal ? (
+            <div className="grid gap-4">
+              <MoneyInput
+                value={simulationMinor}
+                onChange={setSimulationMinor}
+                currency={currency}
+                label="Quanto você contribuiria por mês?"
+                autoFocus
+              />
+              <div className="rounded-lg border bg-muted/30 p-4 text-sm">
+                {simulationPeriods === null ? (
+                  <p className="text-muted-foreground">Informe um valor para ver o cenário.</p>
+                ) : (
+                  <>
+                    <p className="font-medium">
+                      Você atingiria o valor restante em {simulationPeriods.toString()} mês(es).
+                    </p>
+                    <p className="mt-2 text-muted-foreground">
+                      Faltam {formatMoneyMinor(simulationGoal.remaining.minor, currency)}. O prazo
+                      da meta é{" "}
+                      {simulationGoal.contributionPeriodsRemaining === null
+                        ? "indefinido"
+                        : `${simulationGoal.contributionPeriodsRemaining} período(s)`}
+                      . Nada será salvo até você decidir reservar um valor.
+                    </p>
+                  </>
+                )}
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setSimulationGoal(null)}>
+                  Fechar
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
     </div>
