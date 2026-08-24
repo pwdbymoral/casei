@@ -139,6 +139,15 @@ describe("financial domain", () => {
     expect(addLocalDateMonths(monthStart.value, 12)).toBe("2027-01-31");
   });
 
+  it("preserves years below 100 when adding civil months", () => {
+    const yearOne = parseLocalDate("0001-01-31");
+    const yearNinetyNine = parseLocalDate("0099-12-31");
+    if (!yearOne.ok || !yearNinetyNine.ok) throw new Error("test date should be valid");
+
+    expect(addLocalDateMonths(yearOne.value, 1)).toBe("0001-02-28");
+    expect(addLocalDateMonths(yearNinetyNine.value, 1)).toBe("0100-01-31");
+  });
+
   it("rejects impossible civil dates instead of relying on UTC rollover", () => {
     expect(parseLocalDate("2026-02-29").ok).toBe(false);
     expect(parseLocalDate("2028-02-29").ok).toBe(true);
