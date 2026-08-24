@@ -174,7 +174,8 @@ interface FinanceAuditRow {
   category: string;
   action: string;
   actor_id: string | null;
-  occurred_at: Date | string;
+  /** Selected as PostgreSQL text so cursor positions retain microseconds. */
+  occurred_at: string | Date;
   origin: string;
   correlation_id: string;
   result: string;
@@ -332,7 +333,8 @@ export class FinanceService {
       }
       values.push(limit + 1);
       const result = await client.query<FinanceAuditRow>(
-        `SELECT id, target_id AS transaction_id, category, action, actor_id, occurred_at,
+        `SELECT id, target_id AS transaction_id, category, action, actor_id,
+                occurred_at::text AS occurred_at,
                 origin, correlation_id, result, reason, before_redacted, after_redacted
            FROM audit_event
           WHERE ${conditions.join(" AND ")}
@@ -350,7 +352,7 @@ export class FinanceService {
             ? encodeCursor(
                 {
                   ordering: financeAuditCursorOrdering,
-                  position: [new Date(last.occurred_at).toISOString(), last.id],
+                  position: [normalizePostgresTimestamp(last.occurred_at), last.id],
                 },
                 this.cursorSecret,
               )
@@ -372,7 +374,8 @@ export class FinanceService {
       );
       if (!transaction.rows[0]) throw new FinanceNotFoundError();
       const event = await client.query<FinanceAuditRow>(
-        `SELECT id, target_id AS transaction_id, category, action, actor_id, occurred_at,
+        `SELECT id, target_id AS transaction_id, category, action, actor_id,
+                occurred_at::text AS occurred_at,
                 origin, correlation_id, result, reason, before_redacted, after_redacted
            FROM audit_event
           WHERE workspace_id = $1 AND target_type = 'finance_transaction'
@@ -1735,7 +1738,7 @@ function toFinanceAuditEventView(row: FinanceAuditRow): FinanceAuditEventView {
     category: row.category,
     action: row.action,
     actorId: row.actor_id,
-    occurredAt: new Date(row.occurred_at).toISOString(),
+    occurredAt: normalizePostgresTimestamp(row.occurred_at),
     origin: row.origin,
     correlationId: row.correlation_id,
     result: row.result,
@@ -1743,6 +1746,13 @@ function toFinanceAuditEventView(row: FinanceAuditRow): FinanceAuditEventView {
     before: asAuditSnapshot(row.before_redacted),
     after: asAuditSnapshot(row.after_redacted),
   };
+}
+
+/** PostgreSQL text preserves timestamptz fractional seconds; Date would truncate them. */
+function normalizePostgresTimestamp(value: string | Date): string {
+  if (value instanceof Date) return value.toISOString();
+  const normalized = value.trim().replace(" ", "T");
+  return /[+-]\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
 }
 
 /** Snapshot allowlist deliberately excludes amount, description and identity secrets. */

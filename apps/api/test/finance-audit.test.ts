@@ -16,6 +16,7 @@ function fakePool(rows: Array<Record<string, unknown>>) {
         return { rows: [{ id: transactionId }] };
       }
       if (/^SELECT id, target_id AS transaction_id/.test(text)) {
+        if (text.includes("LIMIT")) return { rows };
         return { rows: rows[rowIndex++] ? [rows[rowIndex - 1]] : [] };
       }
       if (/^SELECT id, event_type/.test(text)) {
@@ -49,7 +50,8 @@ describe("finance transaction audit history", () => {
         after_redacted: { state: "posted", kind: "expense" },
       },
     ]);
-    const service = new FinanceService(fake.pool as never, { cursorSecret: "test-secret" });
+    const cursorSecret = "test-secret-that-is-long-enough";
+    const service = new FinanceService(fake.pool as never, { cursorSecret });
 
     const page = await service.listTransactionAudit(
       {
@@ -99,7 +101,8 @@ describe("finance transaction audit history", () => {
         reversed_event_id: "0190f3c8-2a10-7abc-8def-1234567890af",
       },
     ]);
-    const service = new FinanceService(fake.pool as never, { cursorSecret: "test-secret" });
+    const cursorSecret = "test-secret-that-is-long-enough";
+    const service = new FinanceService(fake.pool as never, { cursorSecret });
 
     await expect(
       service.getTransactionAudit(
@@ -125,5 +128,56 @@ describe("finance transaction audit history", () => {
         ],
       },
     });
+  });
+
+  it("keeps microseconds in the signed audit cursor position", async () => {
+    const fake = fakePool([
+      {
+        id: auditId,
+        transaction_id: transactionId,
+        category: "finance",
+        action: "transaction.created",
+        actor_id: "user-1",
+        occurred_at: "2026-08-23 12:00:00.123456+00",
+        origin: "api",
+        correlation_id: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        result: "success",
+        reason: null,
+        before_redacted: null,
+        after_redacted: { state: "posted" },
+      },
+      {
+        id: "0190f3c8-2a10-7abc-8def-1234567890ae",
+        transaction_id: transactionId,
+        category: "finance",
+        action: "transaction.posted",
+        actor_id: "user-1",
+        occurred_at: "2026-08-23 12:00:00.123100+00",
+        origin: "api",
+        correlation_id: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        result: "success",
+        reason: null,
+        before_redacted: null,
+        after_redacted: { state: "posted" },
+      },
+    ]);
+    const cursorSecret = "test-secret-that-is-long-enough";
+    const service = new FinanceService(fake.pool as never, { cursorSecret });
+    const page = await service.listTransactionAudit(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        role: "member",
+      },
+      transactionId,
+      { limit: 1 },
+    );
+    expect(page.nextCursor).toBeTruthy();
+    const { decodeCursor } = await import("../src/http/cursor.js");
+    expect(decodeCursor(page.nextCursor as string, cursorSecret).position).toEqual([
+      "2026-08-23T12:00:00.123456+00:00",
+      auditId,
+    ]);
   });
 });
