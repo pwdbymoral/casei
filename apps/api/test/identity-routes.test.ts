@@ -1,5 +1,5 @@
+import { workspaceSessionSchema } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
-
 import { createApp } from "../src/app.js";
 import {
   IdentityConflictError,
@@ -31,6 +31,38 @@ describe("AUTH-002..005 HTTP boundary", () => {
       "InvitationRateLimitError",
     ]);
     expect(errors[3]).toMatchObject({ code: "version_conflict", currentVersion: 7 });
+  });
+
+  it("requires each workspace session summary to carry its configured currency", () => {
+    expect(
+      workspaceSessionSchema.parse({
+        user: { id: "user-1", displayName: "Ada", email: "ada@example.com" },
+        workspaces: [
+          {
+            id: workspaceId,
+            name: "Casa",
+            role: "owner",
+            locale: "pt-BR",
+            timeZone: "America/Fortaleza",
+            currency: "USD",
+          },
+        ],
+      }).workspaces[0]?.currency,
+    ).toBe("USD");
+    expect(() =>
+      workspaceSessionSchema.parse({
+        user: { id: "user-1", displayName: "Ada", email: "ada@example.com" },
+        workspaces: [
+          {
+            id: workspaceId,
+            name: "Casa",
+            role: "owner",
+            locale: "pt-BR",
+            timeZone: "America/Fortaleza",
+          },
+        ],
+      }),
+    ).toThrow();
   });
 
   it("requires an authenticated actor and keeps onboarding idempotency explicit", async () => {

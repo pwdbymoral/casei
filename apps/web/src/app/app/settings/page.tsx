@@ -23,9 +23,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import {
   authenticatedSettingsAdapter,
+  confirmedPreferencesPayload,
+  createPreferencesPreviewState,
+  type PreferencesPreviewState,
   preferenceChangeSummary,
+  preferencesFormFieldsDisabled,
   settingsErrorMessage,
-  snapshotPreferencesDraft,
   type UserProfile,
   type WorkspacePreferences,
 } from "@/lib/settings";
@@ -64,10 +67,9 @@ export default function SettingsPage() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newEmail, setNewEmail] = useState("");
-  const [preferencesPreview, setPreferencesPreview] = useState<Omit<
-    WorkspacePreferences,
-    "workspaceId" | "version"
-  > | null>(null);
+  const [preferencesPreview, setPreferencesPreview] = useState<PreferencesPreviewState | null>(
+    null,
+  );
   const preferencesNameRef = useRef<HTMLInputElement>(null);
   const preferencesConfirmRef = useRef<HTMLButtonElement>(null);
   const restorePreferencesFocus = useRef(false);
@@ -82,6 +84,11 @@ export default function SettingsPage() {
     [session],
   );
   const isOwner = workspace?.role === "owner";
+  const preferencesFieldsDisabled = preferencesFormFieldsDisabled(
+    isOwner === true,
+    busy !== null,
+    preferencesPreview,
+  );
 
   useEffect(() => {
     if (preferencesPreview) {
@@ -224,7 +231,7 @@ export default function SettingsPage() {
     if (!preferences || busy || !isOwner) return;
     setMessage(null);
     setPreferencesPreview(
-      snapshotPreferencesDraft({
+      createPreferencesPreviewState({
         name: workspaceName.trim(),
         currency: currency.toUpperCase(),
         timeZone: timeZone.trim(),
@@ -238,7 +245,7 @@ export default function SettingsPage() {
     await run("preferences", async () => {
       const next = await authenticatedSettingsAdapter.updateWorkspacePreferences(
         preferences.workspaceId,
-        preferencesPreview,
+        confirmedPreferencesPayload(preferencesPreview),
         preferences.version,
       );
       setPreferencesPreview(null);
@@ -562,7 +569,7 @@ export default function SettingsPage() {
                     value={workspaceName}
                     minLength={2}
                     maxLength={200}
-                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
+                    disabled={preferencesFieldsDisabled}
                     onChange={(event) => setWorkspaceName(event.target.value)}
                     className="min-h-11"
                   />
@@ -573,7 +580,7 @@ export default function SettingsPage() {
                     id="workspace-currency"
                     value={currency}
                     maxLength={3}
-                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
+                    disabled={preferencesFieldsDisabled}
                     onChange={(event) => setCurrency(event.target.value.toUpperCase())}
                     className="min-h-11 uppercase"
                   />
@@ -586,7 +593,7 @@ export default function SettingsPage() {
                   <Input
                     id="workspace-timezone"
                     value={timeZone}
-                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
+                    disabled={preferencesFieldsDisabled}
                     onChange={(event) => setTimeZone(event.target.value)}
                     placeholder="America/Fortaleza"
                     className="min-h-11"
@@ -599,7 +606,7 @@ export default function SettingsPage() {
                     inputMode="numeric"
                     pattern="[0-9]+"
                     value={safetyMarginMinor}
-                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
+                    disabled={preferencesFieldsDisabled}
                     onChange={(event) =>
                       setSafetyMarginMinor(event.target.value.replace(/[^0-9]/g, ""))
                     }
@@ -641,9 +648,11 @@ export default function SettingsPage() {
                     </p>
                   </div>
                   <ul className="grid gap-1 text-sm" aria-label="Alterações nas preferências">
-                    {preferenceChangeSummary(preferences, preferencesPreview).map((change) => (
-                      <li key={change}>• {change}</li>
-                    ))}
+                    {preferenceChangeSummary(preferences, preferencesPreview.payload).map(
+                      (change) => (
+                        <li key={change}>• {change}</li>
+                      ),
+                    )}
                   </ul>
                   <div className="flex flex-wrap gap-2">
                     <Button

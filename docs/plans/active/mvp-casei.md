@@ -69,6 +69,8 @@ Executar schema/base antes das fatias paralelas.
 
 Implementação web publicada no PR #16. O guard de produção não usa fixtures: sem um `WorkspaceAdapter` autenticado ou papel `platform_admin`, `/app` e `/admin` exibem somente estado de acesso negado. Fixtures permanecem disponíveis apenas para testes/componentes isolados.
 
+A sessão autenticada propaga a moeda configurada em cada resumo de espaço até a captura e a apresentação financeira; sessões sem código válido falham fechadas. A troca de espaço invalida carregamentos e mutações pendentes, e fixtures financeiras particionam estado por workspace com replay de chave de criação.
+
 AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspaces`, o adapter de troca/logout ao boundary Better Auth e o onboarding ao comando idempotente `/v1/onboarding`. A validação de banco continua dependente do job PostgreSQL descartável do CI quando `DATABASE_URL_TEST` não estiver configurado localmente.
 
 **Gate 1:** usuário autenticado cria/troca espaço; permissões são comprovadas no servidor; shell passa teclado, 320 px, tablet e desktop; nenhum dado cruza espaços.
@@ -78,14 +80,16 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 - [ ] **FIN-001 Ledger schema e domínio:** accounts, user transactions, events, entries, categorias, constraints de soma/escopo e guards de imutabilidade de evento publicado conforme ADR; testar insert/update/delete, alteração de cabeçalho e unpublish.
 - [ ] **FIN-002 Carteira:** saldo inicial, saldo atual, conferência e ajuste com motivo; testes de conservação e concorrência.
 - [ ] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
-- [ ] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer.
-- [ ] **FIN-005 Linha do tempo:** busca, período, filtros em URL, paginação, estados e detalhe auditável.
+- [x] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer por reversão auditável.
+- [x] **FIN-005 Linha do tempo — base:** busca, período, filtros em URL, paginação incremental, detalhe básico e estados de carregamento/vazio/erro.
+- [ ] **FIN-005b Histórico auditável:** detalhe com eventos de auditoria, origem, antes/depois sanitizado e consequências relacionadas.
 - [ ] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia.
 
 O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
 auditável, categorias, idempotência, isolamento por papel e moeda, além dos contratos e guards
-necessários. Captura rápida UI, edição completa, ajustes com saldo observado e concorrência de
-produção continuam pendentes para o Gate 2.
+necessários. A fatia FIN-004/FIN-005 acrescenta captura rápida e linha do tempo autenticadas, com
+filtros/cursor no contrato HTTP e desfazer por reversão. Edição completa, ajustes com saldo observado,
+auditoria detalhada e concorrência de produção continuam pendentes para o Gate 2.
 
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 

@@ -4,6 +4,7 @@ import {
   authenticatedWorkspaceAdapter,
   authenticatedWorkspaceManagementAdapter,
   getActiveWorkspace,
+  normalizeWorkspaceSession,
   unauthenticatedPlatformAdminSessionPort,
   unauthenticatedWorkspaceAdapter,
   type WorkspaceSession,
@@ -18,6 +19,7 @@ const session: WorkspaceSession = {
       role: "owner",
       locale: "pt-BR",
       timeZone: "America/Fortaleza",
+      currency: "USD",
       status: "active",
       version: 0,
     },
@@ -56,12 +58,22 @@ describe("workspace shell boundary", () => {
     );
     await expect(authenticatedWorkspaceAdapter.getSession()).resolves.toMatchObject({
       activeWorkspaceId: session.activeWorkspaceId,
+      workspaces: [expect.objectContaining({ currency: "USD" })],
     });
     await expect(
       authenticatedWorkspaceAdapter.switchWorkspace("not-authorized"),
     ).rejects.toMatchObject({
       code: "permission_denied",
     });
+  });
+
+  it("fails closed instead of assuming BRL when the session omits currency", () => {
+    expect(() =>
+      normalizeWorkspaceSession({
+        user: session.user,
+        workspaces: [{ ...session.workspaces[0], currency: undefined as never }],
+      }),
+    ).toThrowError("A moeda do espaço não foi carregada");
   });
 
   it("maps an expired session to an unauthenticated state", async () => {

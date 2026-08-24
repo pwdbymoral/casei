@@ -13,6 +13,7 @@ Dados do Casei são íntimos e podem ser compartilhados. O produto precisa permi
 - Recuperação de senha invalida tokens de uso único após sucesso; mensagens não revelam se um e-mail possui conta.
 - Sessões podem ser listadas e revogadas pelo usuário. Mudança de senha e ação administrativa crítica podem revogar todas.
 - Onboarding solicita nome de exibição, nome do espaço, moeda, fuso e saldo inicial opcional. A pessoa pode pular saldo e começar com confiança baixa nas projeções.
+- Cada resumo de espaço na sessão autenticada retorna `currency` como código ISO 4217 configurado nas preferências. A interface rejeita sessão sem moeda válida e não assume BRL silenciosamente.
 - Aceite de termos/privacidade é versionado quando esses documentos existirem; não inventar checkbox antes do conteúdo jurídico aprovado.
 
 ## Espaços e papéis domésticos
