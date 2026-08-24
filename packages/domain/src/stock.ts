@@ -1,4 +1,5 @@
 export type StockMovementKind = "entry" | "consume" | "correction" | "discard";
+export type StockUnit = "unit" | "package" | "box" | "kg" | "g" | "L" | "ml" | "other";
 export type StockState = "unknown" | "ok" | "low" | "missing";
 
 const MAX_QUANTITY_MILLI = 999_999_999_999_999n;

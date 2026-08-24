@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  parseStockBulk,
-  previewStockBulk,
-  type StockBulkExistingProduct,
-} from "../src/index.js";
+import { parseStockBulk, previewStockBulk, type StockBulkExistingProduct } from "../src/index.js";
 
 const existing: StockBulkExistingProduct[] = [
   {
@@ -71,28 +67,29 @@ describe("STOCK-004 prévia", () => {
       existing,
     );
 
-    expect(result.rows.map((row) => row.status)).toEqual([
-      "new",
-      "update",
-      "duplicate",
-      "invalid",
-    ]);
+    expect(result.rows.map((row) => row.status)).toEqual(["new", "update", "duplicate", "invalid"]);
     expect(result.counts).toEqual({ new: 1, update: 1, duplicate: 1, invalid: 1 });
-    expect(result.rows[1]?.changes).toEqual([
-      { field: "quantity", before: "1", after: "3" },
-    ]);
+    expect(result.rows[1]?.changes).toEqual([{ field: "quantity", before: "1", after: "3" }]);
     expect(result.rows[2]?.errors).toEqual([expect.stringContaining("duplicada")]);
     expect(result.rows[3]?.errors).toEqual([expect.stringContaining("obrigatório")]);
   });
 
   it("classifica repetição sem mudança como duplicata e mudança de unidade histórica como erro", () => {
-    const result = previewStockBulk(
-      "Nome\tUnidade\nFeijão\tkg\nFeijão\tg",
-      existing,
-    );
+    const repeated = previewStockBulk("Nome\tUnidade\nFeijão\tkg\nFeijão\tkg", existing);
+    expect(repeated.rows[0]).toMatchObject({
+      status: "duplicate",
+      existingProductId: "product-feijao",
+    });
+    expect(repeated.rows[1]).toMatchObject({
+      status: "duplicate",
+      existingProductId: "product-feijao",
+    });
 
-    expect(result.rows[0]).toMatchObject({ status: "duplicate", existingProductId: "product-feijao" });
-    expect(result.rows[1]).toMatchObject({ status: "invalid", existingProductId: "product-feijao" });
-    expect(result.rows[1]?.errors).toEqual([expect.stringContaining("unidade")]);
+    const changed = previewStockBulk("Nome\tUnidade\nFeijão\tg", existing);
+    expect(changed.rows[0]).toMatchObject({
+      status: "invalid",
+      existingProductId: "product-feijao",
+    });
+    expect(changed.rows[0]?.errors).toEqual([expect.stringContaining("unidade")]);
   });
 });

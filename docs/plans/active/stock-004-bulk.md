@@ -1,7 +1,7 @@
 # Plano: STOCK-004 cadastro em lote
 
 - Status: em andamento
-- Spec: [estoque doméstico](../specs/estoque-domestico.md)
+- Spec: [estoque doméstico](../../specs/estoque-domestico.md)
 - Escopo: parser de linhas/colagem tabular, prévia e aplicação transacional pela API.
 
 ## Critérios de aceitação
