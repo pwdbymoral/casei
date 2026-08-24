@@ -25,8 +25,11 @@ de escrita que alteram produtos e, quando `addToStock=true`, também após a con
 sem entrada continua suprimida até uma movimentação posterior; a comparação estrita de
 `purchased_at` com `max(stock_movement.occurred_at)` permite o movimento e a confirmação na mesma
 transação sem empate suprimir o item. A sincronização grava a versão do produto em novas linhas e
-invalida a versão de linhas automáticas ativas quando o produto muda, sem tocar itens livres nem
-criar evento `created` artificial. Não foi necessária nova migration.
+invalida a versão de linhas automáticas ativas quando o produto muda. Se um item livre anterior
+coincidir com um produto que se tornou `low`/`missing`, a linha é convertida em automática no
+mesmo comando, preservando seu ID e histórico sem criar evento `created` artificial; enquanto o
+produto não for candidato, o item livre continua visível. A FK dos eventos usa cascade apenas no
+purge do workspace, preservando o log append-only durante a operação normal.
 
 ## Etapas
 
@@ -34,6 +37,7 @@ criar evento `created` artificial. Não foi necessária nova migration.
 - [x] Mover sincronização para escritas e derivar supressão pela última movimentação.
 - [x] Invalidar versões automáticas ativas após alteração do produto e rejeitar `If-Match` antigo.
 - [x] Atualizar spec e testes de contrato; não houve mudança necessária na fixture web.
+- [x] Reconciliar item livre homônimo sem desaparecimento e permitir purge do workspace com eventos históricos.
 - [x] Rodar lint, typecheck, testes e diff-check; commit/push/PR encadeado permanece como handoff.
 
 ## Rastreabilidade

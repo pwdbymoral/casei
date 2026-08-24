@@ -55,7 +55,10 @@ a sincronização automática. Quando um item automático é concluído com `add
 reaparece enquanto não houver uma nova movimentação real no produto relacionado. Itens livres podem
 ser concluídos, mas não podem criar movimentação de estoque. A migration `0007`
 mantém eventos de lista append-only, RLS por espaço e constraints de fonte, unidade, quantidade e
-estado comprado.
+estado comprado. Se um item livre já existente tiver o mesmo nome de um produto que se torna
+`low`/`missing`, o comando do produto o reconcilia em uma única linha automática, preservando ID,
+histórico e versão; enquanto o produto não for candidato, o item livre continua visível. Eventos
+somente são removidos por cascade quando o workspace inteiro é purgado após a janela de recuperação.
 
 ## Busca e uso no mercado
 
@@ -79,5 +82,5 @@ estado comprado.
 - [ ] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
 - [x] Lista automática e item livre convivem sem duplicação.
 - [x] Concluir compra só altera estoque após confirmação explícita.
-- [ ] A leitura autenticada da lista não muta dados; compra automática sem entrada não reaparece até uma movimentação real.
+- [x] A leitura autenticada da lista não muta dados; compra automática sem entrada não reaparece até uma movimentação real.
 - [x] Busca e lista permanecem utilizáveis em telefone e teclado, com alvos de toque e reflow responsivo; o modo avançado tabular fica para STOCK-004.
