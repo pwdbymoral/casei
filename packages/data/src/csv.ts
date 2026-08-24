@@ -24,7 +24,15 @@ export type CsvImportErrorCode =
   | "duplicate_header"
   | "invalid_date"
   | "ambiguous_locale"
-  | "invalid_amount";
+  | "invalid_amount"
+  | "invalid_xlsx"
+  | "unsupported_format"
+  | "macro_detected"
+  | "external_link_detected"
+  | "sheet_selection_required"
+  | "sheet_not_found"
+  | "formula_without_cached_value"
+  | "numeric_precision_loss";
 
 /**
  * Public parser error. The message intentionally does not include raw file
@@ -59,17 +67,22 @@ export interface CsvParserOptions {
   locale?: CsvLocale;
 }
 
-export interface CsvRow {
+export interface TabularRow {
   /** One-based data row number in the source, including the header row. */
   readonly rowNumber: number;
   readonly cells: readonly string[];
 }
 
-export interface ParsedCsv {
+export interface ParsedTabular {
+  readonly headers: readonly string[];
+  readonly rows: readonly TabularRow[];
+}
+
+export interface CsvRow extends TabularRow {}
+
+export interface ParsedCsv extends ParsedTabular {
   readonly encoding: CsvEncoding;
   readonly delimiter: CsvDelimiter;
-  readonly headers: readonly string[];
-  readonly rows: readonly CsvRow[];
   readonly byteLength: number;
 }
 
@@ -434,6 +447,128 @@ export interface CsvColumnMapping {
   readonly mappingErrors: readonly CsvMappingError[];
 }
 
+export type CsvMappingProfileErrorCode = "invalid_name" | "invalid_domain" | "invalid_mapping";
+
+export class CsvMappingProfileError extends Error {
+  readonly code: CsvMappingProfileErrorCode;
+
+  constructor(code: CsvMappingProfileErrorCode, message: string) {
+    super(message);
+    this.name = "CsvMappingProfileError";
+    this.code = code;
+  }
+}
+
+/** Serializable mapping preferences; raw file contents are never retained. */
+export interface CsvMappingProfile {
+  readonly version: "1";
+  readonly name: string;
+  readonly domain: string;
+  readonly locale?: CsvLocale;
+  /** Field key -> normalized source header. */
+  readonly mapping: Readonly<Record<string, string>>;
+}
+
+function assertProfileName(name: string): string {
+  const normalized = normalizeImportValue(name);
+  if (normalized.length === 0 || normalized.length > 100 || /[\r\n]/u.test(normalized)) {
+    throw new CsvMappingProfileError("invalid_name", "O nome do perfil é inválido.");
+  }
+  return normalized;
+}
+
+function assertProfileDomain(domain: string): string {
+  if (!/^[a-z][a-z0-9_]{0,63}$/u.test(domain)) {
+    throw new CsvMappingProfileError("invalid_domain", "O domínio do perfil é inválido.");
+  }
+  return domain;
+}
+
+/** Creates a named mapping without retaining the original file. */
+export function createCsvMappingProfile(options: {
+  readonly name: string;
+  readonly domain: string;
+  readonly headers: readonly string[];
+  readonly mapping: Readonly<Record<string, string>>;
+  readonly locale?: CsvLocale;
+}): CsvMappingProfile {
+  const headersByKey = new Map<string, string>();
+  for (const header of options.headers) {
+    const key = normalizeHeader(header);
+    if (key !== "") headersByKey.set(key, header);
+  }
+  const mapping: Record<string, string> = Object.create(null) as Record<string, string>;
+  const assigned = new Set<string>();
+  for (const [field, header] of Object.entries(options.mapping)) {
+    if (!/^[a-z][a-zA-Z0-9_]{0,99}$/u.test(field)) {
+      throw new CsvMappingProfileError("invalid_mapping", "O campo do perfil é inválido.");
+    }
+    const normalizedHeader = normalizeHeader(header);
+    const actualHeader = headersByKey.get(normalizedHeader);
+    if (actualHeader === undefined || assigned.has(normalizedHeader)) {
+      throw new CsvMappingProfileError("invalid_mapping", "O mapeamento do perfil é inválido.");
+    }
+    assigned.add(normalizedHeader);
+    mapping[field] = normalizedHeader;
+  }
+  return Object.freeze({
+    version: "1" as const,
+    name: assertProfileName(options.name),
+    domain: assertProfileDomain(options.domain),
+    ...(options.locale === undefined ? {} : { locale: options.locale }),
+    mapping: Object.freeze(mapping),
+  });
+}
+
+/** Reapplies a saved profile to a new header row, keeping ambiguity explicit. */
+export function applyCsvMappingProfile<T>(
+  profile: CsvMappingProfile,
+  headers: readonly string[],
+  fields: readonly CsvFieldDefinition<T>[],
+): CsvColumnMapping {
+  if (profile.version !== "1") {
+    throw new CsvMappingProfileError("invalid_mapping", "A versão do perfil não é suportada.");
+  }
+  const explicitMapping: Record<string, string> = Object.create(null) as Record<string, string>;
+  const profileErrors: CsvMappingError[] = [];
+  const fieldKeys = new Set(fields.map((field) => field.key));
+  for (const [field, normalizedHeader] of Object.entries(profile.mapping)) {
+    if (!fieldKeys.has(field)) {
+      profileErrors.push({
+        code: "unknown_column",
+        field,
+        message: "O perfil contém um campo que não existe neste domínio.",
+      });
+      continue;
+    }
+    const candidates = headers.filter((header) => normalizeHeader(header) === normalizedHeader);
+    if (candidates.length === 1 && candidates[0] !== undefined) {
+      explicitMapping[field] = candidates[0];
+    } else if (candidates.length > 1) {
+      profileErrors.push({
+        code: "ambiguous_mapping",
+        field,
+        candidates,
+        message: "Mais de uma coluna corresponde ao campo salvo no perfil.",
+      });
+    }
+  }
+  const mapped = mapCsvColumns(headers, fields, explicitMapping);
+  const mappingErrors = [...profileErrors, ...mapped.mappingErrors].filter(
+    (error, index, errors) =>
+      errors.findIndex(
+        (candidate) =>
+          candidate.code === error.code &&
+          candidate.field === error.field &&
+          candidate.header === error.header,
+      ) === index,
+  );
+  return {
+    ...mapped,
+    mappingErrors,
+  };
+}
+
 function fieldCandidates<T>(field: CsvFieldDefinition<T>): string[] {
   return [field.key, ...(field.aliases ?? [])].map(normalizeHeader);
 }
@@ -694,7 +829,7 @@ function asRecord(values: Record<string, unknown>): Readonly<Record<string, unkn
  * fingerprints are suggestions (status `duplicate`), never an implicit delete.
  */
 export function preflightCsvImport<T>(
-  parsed: ParsedCsv,
+  parsed: ParsedTabular,
   fields: readonly CsvFieldDefinition<T>[],
   options: CsvPreflightOptions = {},
 ): CsvPreflightResult {
