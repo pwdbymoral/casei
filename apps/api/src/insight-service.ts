@@ -272,7 +272,7 @@ export class InsightService {
       [workspaceId, config.currency, dates.from, dates.to],
     );
 
-    const lowerBound = includeOverdue ? "" : "AND due_date >= $3::date";
+    const lowerBound = includeOverdue ? "" : "AND due_date >= $5::date";
     const commitment = await client.query<InsightNumericRow>(
       `SELECT COALESCE(SUM(CASE WHEN ft.kind = 'income' THEN ft.amount_minor - ft.settled_minor ELSE 0 END), 0) AS planned_income_minor,
               COALESCE(SUM(CASE WHEN ft.kind IN ('expense', 'transfer', 'adjustment') THEN ft.amount_minor - ft.settled_minor ELSE 0 END), 0) AS wallet_outflow_minor,
@@ -286,13 +286,13 @@ export class InsightService {
               AND ft.currency_code = $2
               AND ft.instrument = 'wallet'
               AND ft.state IN ('planned', 'partially_settled')
-              AND COALESCE(ft.due_on, ft.occurred_on) <= $4::date
+              AND COALESCE(ft.due_on, ft.occurred_on) <= $3::date
               ${lowerBound}
          ) ft
          LEFT JOIN recurrence_rule rr ON rr.workspace_id = ft.workspace_id AND rr.id = ft.recurrence_id`,
       includeOverdue
-        ? [workspaceId, config.currency, dates.from, dates.to]
-        : [workspaceId, config.currency, dates.from, dates.to],
+        ? [workspaceId, config.currency, dates.to, dates.asOf]
+        : [workspaceId, config.currency, dates.to, dates.asOf, dates.from],
     );
     const statements = await client.query<InsightNumericRow>(
       `SELECT COALESCE(SUM(GREATEST(total_minor - paid_minor, 0)), 0) AS card_bills_minor

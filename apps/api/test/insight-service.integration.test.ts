@@ -25,8 +25,8 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
         asOf: "2026-08-05",
         to: "2026-09-04",
         available: true,
-        safe: { currency: "BRL", minor: "750" },
-        gross: { currency: "BRL", minor: "750" },
+        safe: { currency: "BRL", minor: "725" },
+        gross: { currency: "BRL", minor: "725" },
         confidence: {
           level: "medium",
           reasons: ["saldo_sem_conferencia_recente", "recorrencia_variavel_sem_estimativa"],
@@ -34,8 +34,8 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
         breakdown: {
           balance: { currency: "BRL", minor: "1500" },
           plannedIncome: { currency: "BRL", minor: "100" },
-          plannedOutflow: { currency: "BRL", minor: "550" },
-          walletOutflow: { currency: "BRL", minor: "250" },
+          plannedOutflow: { currency: "BRL", minor: "575" },
+          walletOutflow: { currency: "BRL", minor: "275" },
           cardBills: { currency: "BRL", minor: "300" },
           coveredReservations: { currency: "BRL", minor: "200" },
           reserved: { currency: "BRL", minor: "200" },
@@ -54,6 +54,10 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
         expense: { currency: "BRL", minor: "900" },
         transfer: { currency: "BRL", minor: "0" },
         adjustment: { currency: "BRL", minor: "0" },
+      });
+      expect(model.commitments).toMatchObject({
+        plannedOutflow: { currency: "BRL", minor: "575" },
+        overdueOutflow: { currency: "BRL", minor: "25" },
       });
       expect(model.stock).toEqual({ missingCount: 1, lowCount: 1 });
     } finally {
@@ -184,7 +188,8 @@ async function createFixture() {
          (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, due_on, recurrence_id)
        VALUES ($1, 'expense', 'planned', 'wallet', 50, 0, 'BRL', '2026-08-04', '2026-08-10', $2),
               ($1, 'income', 'planned', 'wallet', 100, 0, 'BRL', '2026-08-04', '2026-08-09', NULL),
-              ($1, 'expense', 'planned', 'wallet', 200, 0, 'BRL', '2026-08-04', '2026-08-11', NULL)`,
+              ($1, 'expense', 'planned', 'wallet', 200, 0, 'BRL', '2026-08-04', '2026-08-11', NULL),
+              ($1, 'expense', 'planned', 'wallet', 25, 0, 'BRL', '2026-07-31', '2026-08-01', NULL)`,
       [workspaceId, recurrence.rows[0]?.id],
     );
 
