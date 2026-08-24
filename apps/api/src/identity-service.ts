@@ -759,6 +759,13 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
+        // Memberships are the first lock in every multi-membership identity
+        // mutation. Acquire this actor row before the invitation's joined
+        // workspace lock so acceptance cannot deadlock with deactivation.
+        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
+          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+          [workspaceId, actor.userId],
+        );
         const result = await client.query<
           InvitationRow & {
             workspace_name: string;
@@ -808,10 +815,6 @@ export class IdentityService {
         if (invite.workspace_status !== "active")
           throw new IdentityConflictError("O espaço não está disponível.");
         await this.deleteInvitationEmailArtifacts(client, workspaceId, invitationId);
-        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
-          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-          [workspaceId, actor.userId],
-        );
         if (current.rows[0]?.status === "active") {
           if (current.rows[0].role !== invite.role) {
             await client.query(
@@ -864,30 +867,36 @@ export class IdentityService {
     expectedVersion: number,
   ): Promise<{ version: number }> {
     assertRole(scope, "owner");
-    return this.withScoped(scope, async (client) => {
-      const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
-        `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-        [scope.workspaceId, userId],
-      );
-      const row = result.rows[0];
-      if (!row) throw new IdentityNotFoundError();
-      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
-      if (row.role === "owner")
-        throw new IdentityConflictError("Transfira a propriedade antes de remover o owner.");
-      if (row.status === "revoked") return { version: row.version };
-      await client.query(
-        `UPDATE membership SET status = 'revoked', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
-        [scope.workspaceId, userId],
-      );
-      await writeAudit(client, {
-        actorId: scope.actor.userId,
-        workspaceId: scope.workspaceId,
-        correlationId: scope.correlationId,
-        action: "membership.revoked",
-        targetId: userId,
-      });
-      return { version: row.version + 1 };
-    });
+    return this.withScoped(
+      scope,
+      async (client) => {
+        const locked = await lockMembershipsThenWorkspace(client, scope.workspaceId, [
+          scope.actor.userId,
+          userId,
+        ]);
+        assertLockedActiveMembership(locked.memberships, scope);
+        assertLockedActiveWorkspace(locked.workspace);
+        const row = locked.memberships.find((membership) => membership.user_id === userId);
+        if (!row) throw new IdentityNotFoundError();
+        if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
+        if (row.role === "owner")
+          throw new IdentityConflictError("Transfira a propriedade antes de remover o owner.");
+        if (row.status === "revoked") return { version: row.version };
+        await client.query(
+          `UPDATE membership SET status = 'revoked', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+          [scope.workspaceId, userId],
+        );
+        await writeAudit(client, {
+          actorId: scope.actor.userId,
+          workspaceId: scope.workspaceId,
+          correlationId: scope.correlationId,
+          action: "membership.revoked",
+          targetId: userId,
+        });
+        return { version: row.version + 1 };
+      },
+      { lockMembership: false },
+    );
   }
 
   async changeMemberRole(
@@ -898,30 +907,38 @@ export class IdentityService {
   ): Promise<{ role: WorkspaceRole; version: number }> {
     assertRole(scope, "owner");
     const { role } = updateMembershipRoleSchema.parse(input);
-    return this.withScoped(scope, async (client) => {
-      const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
-        `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-        [scope.workspaceId, userId],
-      );
-      const row = result.rows[0];
-      if (row?.status !== "active") throw new IdentityNotFoundError();
-      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
-      if (row.role === "owner")
-        throw new IdentityConflictError("Use a transferência de propriedade para alterar o owner.");
-      await client.query(
-        `UPDATE membership SET role = $3, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
-        [scope.workspaceId, userId, role],
-      );
-      await writeAudit(client, {
-        actorId: scope.actor.userId,
-        workspaceId: scope.workspaceId,
-        correlationId: scope.correlationId,
-        action: "membership.role_changed",
-        targetId: userId,
-        reason: role,
-      });
-      return { role, version: row.version + 1 };
-    });
+    return this.withScoped(
+      scope,
+      async (client) => {
+        const locked = await lockMembershipsThenWorkspace(client, scope.workspaceId, [
+          scope.actor.userId,
+          userId,
+        ]);
+        assertLockedActiveMembership(locked.memberships, scope);
+        assertLockedActiveWorkspace(locked.workspace);
+        const row = locked.memberships.find((membership) => membership.user_id === userId);
+        if (row?.status !== "active") throw new IdentityNotFoundError();
+        if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
+        if (row.role === "owner")
+          throw new IdentityConflictError(
+            "Use a transferência de propriedade para alterar o owner.",
+          );
+        await client.query(
+          `UPDATE membership SET role = $3, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+          [scope.workspaceId, userId, role],
+        );
+        await writeAudit(client, {
+          actorId: scope.actor.userId,
+          workspaceId: scope.workspaceId,
+          correlationId: scope.correlationId,
+          action: "membership.role_changed",
+          targetId: userId,
+          reason: role,
+        });
+        return { role, version: row.version + 1 };
+      },
+      { lockMembership: false },
+    );
   }
 
   async transferOwnership(
@@ -1118,17 +1135,32 @@ export class IdentityService {
       this.pool,
       { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole, correlationId },
       async ({ client }) => {
-        const result = await client.query<{ status: string; expires_at: Date; version: number }>(
-          `SELECT w.status, w.version, r.expires_at
-             FROM workspace w
-             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
-            WHERE w.id = $1 AND r.owner_user_id = $2 AND r.status = 'active'
-            FOR UPDATE OF w, r`,
+        // Purge locks the recovery row before deleting the workspace (and its
+        // memberships). Acquire that row first here as well, then follow the
+        // canonical membership→workspace order to avoid a late-cancel deadlock.
+        const recovery = await client.query<{ status: string; expires_at: Date }>(
+          `SELECT status, expires_at
+             FROM workspace_deletion_recovery
+            WHERE workspace_id = $1 AND owner_user_id = $2 AND status = 'active'
+            FOR UPDATE`,
           [workspaceId, actor.userId],
         );
-        const row = result.rows[0];
+        const locked = await lockMembershipsThenWorkspace(client, workspaceId);
+        const actorMembership = locked.memberships.find(
+          (membership) => membership.user_id === actor.userId,
+        );
+        if (actorMembership?.role !== "owner" || actorMembership.status !== "recovery_only")
+          throw new IdentityNotFoundError();
+        const row =
+          locked.workspace && recovery.rows[0]
+            ? {
+                workspaceStatus: locked.workspace.status,
+                version: locked.workspace.version,
+                expires_at: recovery.rows[0].expires_at,
+              }
+            : undefined;
         if (
-          row?.status !== "deletion_pending" ||
+          row?.workspaceStatus !== "deletion_pending" ||
           new Date(row.expires_at).getTime() <= this.now().getTime()
         )
           throw new IdentityNotFoundError();
