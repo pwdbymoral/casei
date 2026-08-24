@@ -189,6 +189,8 @@ export const stockProductSchema = z.object({
   quantity: stockQuantitySchema.nullable(),
   minimum: stockQuantitySchema.nullable(),
   markedMissing: z.boolean(),
+  /** Controls whether missing/low state is materialized in the shared shopping list. */
+  shoppingAuto: z.boolean(),
   state: stockStateSchema,
   category: z.string().trim().max(100).nullable(),
   location: z.string().trim().max(100).nullable(),
@@ -205,6 +207,7 @@ export const createStockProductSchema = z
     unitLabel: z.string().trim().max(40).nullable().optional(),
     quantity: stockQuantitySchema.nullable().optional(),
     minimum: stockQuantitySchema.nullable().optional(),
+    shoppingAuto: z.boolean().default(true),
     category: z.string().trim().max(100).nullable().optional(),
     location: z.string().trim().max(100).nullable().optional(),
     note: z.string().trim().max(500).nullable().optional(),
@@ -226,6 +229,7 @@ export const updateStockProductSchema = z
     unit: stockUnitSchema,
     unitLabel: z.string().trim().max(40).nullable().optional(),
     minimum: stockQuantitySchema.nullable().optional(),
+    shoppingAuto: z.boolean().optional(),
     category: z.string().trim().max(100).nullable().optional(),
     location: z.string().trim().max(100).nullable().optional(),
     note: z.string().trim().max(500).nullable().optional(),
@@ -269,6 +273,56 @@ export const createStockMovementSchema = z.object({
 export type CreateStockMovementInput = z.infer<typeof createStockMovementSchema>;
 
 export const markStockMissingSchema = z.object({ missing: z.boolean() });
+
+export const stockShoppingItemSourceSchema = z.enum(["automatic", "free"]);
+export type StockShoppingItemSource = z.infer<typeof stockShoppingItemSourceSchema>;
+
+export const stockShoppingItemSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  productId: domainIdSchema.nullable(),
+  name: z.string().trim().min(1).max(200),
+  source: stockShoppingItemSourceSchema,
+  quantity: stockQuantitySchema.nullable(),
+  unit: stockUnitSchema,
+  unitLabel: z.string().trim().max(40).nullable(),
+  note: z.string().trim().max(500).nullable(),
+  purchased: z.boolean(),
+  purchasedAt: z.string().datetime({ offset: true }).nullable(),
+  lastChangedBy: userIdSchema,
+  version: versionSchema,
+});
+export type StockShoppingItemContract = z.infer<typeof stockShoppingItemSchema>;
+
+export const createStockShoppingItemSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    quantity: stockQuantitySchema.nullable().optional(),
+    unit: stockUnitSchema.default("unit"),
+    unitLabel: z.string().trim().max(40).nullable().optional(),
+    note: z.string().trim().max(500).nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.unit === "other" && !value.unitLabel) {
+      context.addIssue({
+        code: "custom",
+        path: ["unitLabel"],
+        message: "Informe o rótulo da unidade.",
+      });
+    }
+  });
+export type CreateStockShoppingItemInput = z.infer<typeof createStockShoppingItemSchema>;
+
+export const purchaseStockShoppingItemSchema = z.object({
+  /** This explicit flag is the only way a purchase can create a stock entry. */
+  addToStock: z.boolean().default(false),
+  quantity: stockQuantitySchema.nullable().optional(),
+});
+export type PurchaseStockShoppingItemInput = z.infer<typeof purchaseStockShoppingItemSchema>;
+
+export const stockShoppingListQuerySchema = paginationQuerySchema.extend({
+  includePurchased: z.coerce.boolean().default(false),
+});
 
 export const pageSchema = z.object({
   nextCursor: z.string().min(1).nullable(),

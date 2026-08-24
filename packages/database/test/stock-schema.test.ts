@@ -15,6 +15,14 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
     fileURLToPath(new URL("../drizzle/0006_stock_core.down.sql", import.meta.url)),
     "utf8",
   );
+  const shopping = await readFile(
+    fileURLToPath(new URL("../drizzle/0007_stock_shopping.sql", import.meta.url)),
+    "utf8",
+  );
+  const shoppingDown = await readFile(
+    fileURLToPath(new URL("../drizzle/0007_stock_shopping.down.sql", import.meta.url)),
+    "utf8",
+  );
   assert.match(sql, /CREATE TABLE "stock_product"/);
   assert.match(sql, /stock_product_active_name_unique/);
   assert.match(sql, /WHERE "archived" = false/);
@@ -29,6 +37,14 @@ test("migration de estoque preserva histórico, RLS e invariantes de quantidade"
   assert.doesNotMatch(sql, /GRANT .*DELETE ON stock_product/);
   assert.match(down, /DROP TABLE IF EXISTS stock_movement/);
   assert.match(down, /DROP TABLE IF EXISTS stock_product/);
+  assert.match(shopping, /ADD COLUMN "shopping_auto" boolean/);
+  assert.match(shopping, /shopping_item_active_name_unique/);
+  assert.match(shopping, /shopping_item_source_product_check/);
+  assert.match(shopping, /shopping_item_event_immutable_guard/);
+  assert.match(shopping, /FORCE ROW LEVEL SECURITY/);
+  assert.doesNotMatch(shopping, /GRANT .*DELETE ON shopping_item/);
+  assert.match(shoppingDown, /DROP TABLE IF EXISTS shopping_item_event/);
+  assert.match(shoppingDown, /DROP COLUMN IF EXISTS "shopping_auto"/);
 });
 
 const adminUrl = process.env.DATABASE_URL_TEST;

@@ -46,6 +46,33 @@ export function deriveStockState(input: {
   return "ok";
 }
 
+/** Returns the amount needed to reach the desired minimum, or null when no minimum exists. */
+export function suggestedShoppingQuantity(input: {
+  quantityMilli: bigint | null;
+  minimumMilli: bigint | null;
+}): bigint | null {
+  if (input.minimumMilli === null) return null;
+  const quantityMilli = input.quantityMilli ?? 0n;
+  return input.minimumMilli > quantityMilli ? input.minimumMilli - quantityMilli : 0n;
+}
+
+/** Automatic shopping entries are derived from the same state shown by the stock card. */
+export function shouldAutoAddToShopping(input: {
+  quantityMilli: bigint | null;
+  minimumMilli: bigint | null;
+  markedMissing: boolean;
+  shoppingAuto?: boolean;
+}): boolean {
+  return (
+    (input.shoppingAuto ?? true) &&
+    (input.markedMissing ||
+      input.quantityMilli === 0n ||
+      (input.quantityMilli !== null &&
+        input.minimumMilli !== null &&
+        input.quantityMilli <= input.minimumMilli))
+  );
+}
+
 export function stockMovementAfter(input: {
   kind: StockMovementKind;
   beforeMilli: bigint | null;

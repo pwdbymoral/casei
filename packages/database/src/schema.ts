@@ -248,6 +248,7 @@ export const stockProduct = pgTable(
     quantityMilli: bigint("quantity_milli", { mode: "bigint" }),
     minimumMilli: bigint("minimum_milli", { mode: "bigint" }),
     markedMissing: boolean("marked_missing").notNull().default(false),
+    shoppingAuto: boolean("shopping_auto").notNull().default(true),
     category: text("category"),
     location: text("location"),
     note: text("note"),
@@ -274,6 +275,102 @@ export const stockProduct = pgTable(
     check(
       "stock_product_minimum_check",
       sql`${table.minimumMilli} is null or (${table.minimumMilli} >= 0 and ${table.minimumMilli} <= 999999999999999)`,
+    ),
+  ],
+);
+
+export const shoppingItem = pgTable(
+  "shopping_item",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    productId: uuid("product_id"),
+    name: text("name").notNull(),
+    nameNormalized: text("name_normalized").notNull(),
+    source: text("source").notNull(),
+    quantityMilli: bigint("quantity_milli", { mode: "bigint" }),
+    unit: text("unit").notNull().default("unit"),
+    unitLabel: text("unit_label"),
+    note: text("note"),
+    purchased: boolean("purchased").notNull().default(false),
+    purchasedAt: instant("purchased_at"),
+    purchasedBy: text("purchased_by").references(() => user.id, { onDelete: "restrict" }),
+    lastChangedBy: text("last_changed_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("shopping_item_workspace_id_id_unique").on(table.workspaceId, table.id),
+    foreignKey({
+      columns: [table.workspaceId, table.productId],
+      foreignColumns: [stockProduct.workspaceId, stockProduct.id],
+      name: "shopping_item_product_scope_fk",
+    }).onDelete("restrict"),
+    check("shopping_item_name_check", sql`length(trim(${table.name})) > 0`),
+    check("shopping_item_source_check", sql`${table.source} in ('automatic', 'free')`),
+    check(
+      "shopping_item_unit_check",
+      sql`${table.unit} in ('unit', 'package', 'box', 'kg', 'g', 'L', 'ml', 'other')`,
+    ),
+    check(
+      "shopping_item_other_unit_label_check",
+      sql`${table.unit} <> 'other' or (${table.unitLabel} is not null and length(trim(${table.unitLabel})) > 0)`,
+    ),
+    check(
+      "shopping_item_quantity_check",
+      sql`${table.quantityMilli} is null or (${table.quantityMilli} >= 0 and ${table.quantityMilli} <= 999999999999999)`,
+    ),
+    check(
+      "shopping_item_source_product_check",
+      sql`(${table.source} = 'automatic' and ${table.productId} is not null) or (${table.source} = 'free' and ${table.productId} is null)`,
+    ),
+    check(
+      "shopping_item_purchased_check",
+      sql`(${table.purchased} = false and ${table.purchasedAt} is null) or (${table.purchased} = true and ${table.purchasedAt} is not null)`,
+    ),
+    check("shopping_item_version_check", sql`${table.version} >= 0`),
+    uniqueIndex("shopping_item_active_name_unique")
+      .on(table.workspaceId, table.nameNormalized)
+      .where(sql`${table.purchased} = false`),
+    index("shopping_item_active_order_idx").on(
+      table.workspaceId,
+      table.purchased,
+      table.updatedAt,
+      table.id,
+    ),
+  ],
+);
+
+export const shoppingItemEvent = pgTable(
+  "shopping_item_event",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id").notNull(),
+    itemId: uuid("item_id").notNull(),
+    kind: text("kind").notNull(),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    payload: jsonb("payload").notNull().default({}),
+    occurredAt: instant("occurred_at").defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.itemId],
+      foreignColumns: [shoppingItem.workspaceId, shoppingItem.id],
+      name: "shopping_item_event_item_scope_fk",
+    }).onDelete("restrict"),
+    check("shopping_item_event_kind_check", sql`${table.kind} in ('created', 'purchased')`),
+    index("shopping_item_event_item_occurred_idx").on(
+      table.workspaceId,
+      table.itemId,
+      table.occurredAt,
+      table.id,
     ),
   ],
 );

@@ -39,6 +39,18 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 - Uma despesa financeira pode ser vinculada a uma compra concluída, mas o vínculo é opcional e não distribui valor por produto no MVP.
 - Várias pessoas podem marcar itens; alterações concorrentes não criam duplicatas e exibem autoria recente.
 
+### Contrato da implementação STOCK-003
+
+`GET /v1/workspaces/:workspaceId/stock/shopping` materializa entradas automáticas para produtos ativos
+com estado `missing`/`low` e preferência `shoppingAuto`, além de itens livres persistidos. A chave
+normalizada do nome possui unicidade parcial por espaço enquanto o item não estiver comprado; uma
+colisão concorrente retorna o item já existente. `POST /stock/shopping/:itemId/purchased` exige
+`If-Match` e `Idempotency-Key`. Seu corpo sempre explicita `addToStock`; somente `true` cria uma
+movimentação `entry`, com quantidade positiva editável, na mesma transação que marca o item comprado.
+Itens livres podem ser concluídos, mas não podem criar movimentação de estoque. A migration `0007`
+mantém eventos de lista append-only, RLS por espaço e constraints de fonte, unidade, quantidade e
+estado comprado.
+
 ## Busca e uso no mercado
 
 - Busca por nome tolera caixa e acentos e retorna primeiro faltantes/itens da lista.
@@ -59,6 +71,6 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 - [x] Toda alteração de quantidade possui histórico append-only e o estoque não fica negativo.
 - [x] Estados de falta/baixo/ok correspondem às regras e não dependem só de cor.
 - [ ] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
-- [ ] Lista automática e item livre convivem sem duplicação.
-- [ ] Concluir compra só altera estoque após confirmação explícita.
+- [x] Lista automática e item livre convivem sem duplicação.
+- [x] Concluir compra só altera estoque após confirmação explícita.
 - [x] Busca e lista permanecem utilizáveis em telefone e teclado, com alvos de toque e reflow responsivo; o modo avançado tabular fica para STOCK-004.
