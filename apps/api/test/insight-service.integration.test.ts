@@ -210,6 +210,16 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
         [account.loan_receivable_id, -100],
       ],
     );
+    const futureLentPaymentEventId = await insertLedgerEvent(
+      pool,
+      workspaceId,
+      "loan.payment.received.v1",
+      "2026-08-10",
+      [
+        [account.wallet_id, 50],
+        [account.loan_receivable_id, -50],
+      ],
+    );
     const borrowedPaymentEventId = await insertLedgerEvent(
       pool,
       workspaceId,
@@ -225,7 +235,7 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
          (workspace_id, direction, counterparty, principal_minor, paid_minor, currency_code,
           occurred_on, due_on, principal_event_id, status, version)
        VALUES
-         ($1, 'lent', 'Ana', 300, 100, 'BRL', '2026-08-01', '2026-08-20', $2, 'open', 1),
+         ($1, 'lent', 'Ana', 300, 150, 'BRL', '2026-08-01', '2026-08-20', $2, 'open', 1),
          ($1, 'borrowed', 'Banco doméstico', 500, 100, 'BRL', '2026-08-01', '2026-08-03', $3, 'open', 1)
        RETURNING id, direction`,
       [workspaceId, lentPrincipalEventId, borrowedPrincipalEventId],
@@ -237,8 +247,16 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
       `INSERT INTO loan_payment
          (workspace_id, loan_id, amount_minor, currency_code, occurred_on, ledger_event_id)
        VALUES ($1, $2, 100, 'BRL', '2026-08-04', $3),
-              ($1, $4, 100, 'BRL', '2026-08-04', $5)`,
-      [workspaceId, lentLoanId, lentPaymentEventId, borrowedLoanId, borrowedPaymentEventId],
+              ($1, $4, 100, 'BRL', '2026-08-04', $5),
+              ($1, $2, 50, 'BRL', '2026-08-10', $6)`,
+      [
+        workspaceId,
+        lentLoanId,
+        lentPaymentEventId,
+        borrowedLoanId,
+        borrowedPaymentEventId,
+        futureLentPaymentEventId,
+      ],
     );
 
     const card = await pool.query<{ id: string }>(

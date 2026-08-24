@@ -27,8 +27,10 @@ efeito de caixa no ledger.
 - Juros, tarifas, baixa e perdão não têm campos nem comandos nesta fatia.
 - O purge de um espaço chama uma rotina `SECURITY DEFINER` que seleciona apenas
   eventos de empréstimos daquele espaço, remove entradas antes dos eventos e
-  mantém a auditoria detached. O role de runtime não pode atualizar/apagar
-  pagamentos, eventos ou lançamentos históricos diretamente.
+  mantém a auditoria detached. A rotina valida tipo `loan.*`, workspace e
+  ausência de `transaction_id` antes de apagar. O role de runtime não pode
+  atualizar/apagar pagamentos, eventos ou lançamentos históricos diretamente;
+  referências de eventos também são imutáveis.
 
 ## Estratégia
 

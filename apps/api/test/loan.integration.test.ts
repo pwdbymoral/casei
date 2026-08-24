@@ -35,6 +35,24 @@ describe("LOAN-001/002 simple IOU PostgreSQL", () => {
         status: "open",
         version: 0,
       });
+      const principal = await fixture.pool.query<{ principal_event_id: string }>(
+        `SELECT principal_event_id FROM loan_contract WHERE workspace_id = $1 AND id = $2`,
+        [fixture.workspaceId, created.loan.id],
+      );
+      const alternateEvent = await fixture.pool.query<{ id: string }>(
+        `INSERT INTO ledger_event
+          (workspace_id, event_type, currency_code, status, occurred_on)
+         VALUES ($1, 'loan.principal.lent.v1', 'BRL', 'draft', '2030-01-10')
+         RETURNING id`,
+        [fixture.workspaceId],
+      );
+      await expect(
+        fixture.pool.query(
+          `UPDATE loan_contract SET principal_event_id = $1 WHERE workspace_id = $2 AND id = $3`,
+          [alternateEvent.rows[0]?.id, fixture.workspaceId, created.loan.id],
+        ),
+      ).rejects.toThrow(/loan contract ledger reference is immutable/);
+      expect(principal.rows[0]?.principal_event_id).toBeTruthy();
 
       const partial = await service.payLoan(
         fixture.scope,

@@ -326,7 +326,14 @@ export class InsightService {
          FROM (
            SELECT lc.direction,
                   lc.due_on,
-                  lc.principal_minor - lc.paid_minor AS remaining_minor
+                  lc.principal_minor - COALESCE((
+                    SELECT SUM(lp.amount_minor)
+                      FROM loan_payment lp
+                     WHERE lp.workspace_id = lc.workspace_id
+                       AND lp.loan_id = lc.id
+                       AND lp.currency_code = lc.currency_code
+                       AND lp.occurred_on <= $3::date
+                  ), 0) AS remaining_minor
              FROM loan_contract lc
             WHERE lc.workspace_id = $1
               AND lc.currency_code = $2

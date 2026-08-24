@@ -20,6 +20,14 @@ test("LOAN-001/002 migration persists scoped IOU contracts and payments", async 
     fileURLToPath(new URL("../drizzle/0015_loan_purge_hardening.down.sql", import.meta.url)),
     "utf8",
   );
+  const referenceHardening = await readFile(
+    fileURLToPath(new URL("../drizzle/0016_loan_reference_hardening.sql", import.meta.url)),
+    "utf8",
+  );
+  const referenceHardeningDown = await readFile(
+    fileURLToPath(new URL("../drizzle/0016_loan_reference_hardening.down.sql", import.meta.url)),
+    "utf8",
+  );
   const journal = await readFile(
     fileURLToPath(new URL("../drizzle/meta/_journal.json", import.meta.url)),
     "utf8",
@@ -39,6 +47,7 @@ test("LOAN-001/002 migration persists scoped IOU contracts and payments", async 
   assert.match(journal, /"idx": 13[\s\S]*"tag": "0013_loans"/i);
   assert.match(journal, /"idx": 14[\s\S]*"tag": "0014_stock_purchase_finance_link"/i);
   assert.match(journal, /"idx": 15[\s\S]*"tag": "0015_loan_purge_hardening"/i);
+  assert.match(journal, /"idx": 16[\s\S]*"tag": "0016_loan_reference_hardening"/i);
   assert.match(purgeHardening, /CREATE OR REPLACE FUNCTION app\.purge_workspace_loans/i);
   assert.match(purgeHardening, /SECURITY DEFINER/i);
   assert.match(purgeHardening, /ON DELETE CASCADE/i);
@@ -46,4 +55,17 @@ test("LOAN-001/002 migration persists scoped IOU contracts and payments", async 
   assert.match(purgeHardening, /REVOKE UPDATE, DELETE ON TABLE "ledger_event", "ledger_entry"/i);
   assert.match(purgeHardeningDown, /ON DELETE RESTRICT/i);
   assert.match(purgeHardeningDown, /DROP FUNCTION IF EXISTS app\.purge_workspace_loans/i);
+  assert.match(
+    referenceHardening,
+    /CREATE OR REPLACE FUNCTION app\.guard_loan_contract_event_reference/i,
+  );
+  assert.match(referenceHardening, /CREATE TRIGGER loan_payment_reference_guard/i);
+  assert.match(referenceHardening, /principal_event_id/i);
+  assert.match(referenceHardening, /event_type LIKE 'loan\.%'/i);
+  assert.match(referenceHardening, /transaction_id IS NULL/i);
+  assert.match(referenceHardening, /RAISE EXCEPTION/i);
+  assert.match(
+    referenceHardeningDown,
+    /DROP TRIGGER IF EXISTS loan_contract_event_reference_guard/i,
+  );
 });

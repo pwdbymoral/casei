@@ -55,7 +55,7 @@ para que a explicação não esconda o efeito dos empréstimos.
 - Margem de segurança padrão é zero no onboarding; o usuário pode definir valor fixo. Percentuais ficam fora do MVP.
 - O valor bruto negativo também é mostrado na explicação como déficit previsto; o CTA muda de `Ver quanto posso gastar` para `Revisar déficit`.
 - O indicador nunca é apresentado quando faltam saldo inicial e eventos suficientes; nesse caso, mostra passos objetivos para aumentar a confiança.
-- Empréstimos em aberto com vencimento no horizonte são projetados pelo saldo principal restante: um empréstimo concedido aumenta `loanReceivable` e uma obrigação recebida aumenta `loanPayable`. O principal e os pagamentos já publicados no ledger não são somados novamente como receita ou despesa.
+- Empréstimos em aberto com vencimento no horizonte são projetados pelo saldo principal restante reconstruído até `asOf`: pagamentos com data posterior à referência ainda não reduzem o saldo histórico. Um empréstimo concedido aumenta `loanReceivable` e uma obrigação recebida aumenta `loanPayable`. O principal e os pagamentos já publicados no ledger não são somados novamente como receita ou despesa.
 
 No backend do MVP, a leitura reconstruível fica disponível em
 `GET /v1/workspaces/{workspaceId}/insights/financial` e o cálculo em
