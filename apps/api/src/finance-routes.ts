@@ -86,6 +86,23 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     return context.json(transaction);
   });
 
+  router.get("/workspaces/:workspaceId/transactions/:id/audit", async (context) => {
+    const transactionId = parseDomainId(context.req.param("id"));
+    const query = parseQuery(context, paginationQuerySchema);
+    const page = await service.listTransactionAudit(scopeOf(context), transactionId, query);
+    return context.json({
+      items: page.items,
+      page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+    });
+  });
+
+  router.get("/workspaces/:workspaceId/transactions/:id/audit/:auditId", async (context) => {
+    const transactionId = parseDomainId(context.req.param("id"));
+    const auditId = parseDomainId(context.req.param("auditId"));
+    const event = await service.getTransactionAudit(scopeOf(context), transactionId, auditId);
+    return context.json(event);
+  });
+
   router.get("/workspaces/:workspaceId/categories", async (context) => {
     const query = parseQuery(context, paginationQuerySchema);
     const items = await service.listCategories(scopeOf(context), query.limit);

@@ -71,8 +71,13 @@ Sem descrição, a UI usa rótulo neutro como `Despesa sem descrição`, sem inv
 - A UI mantém os filtros da linha do tempo na URL, distingue vazio inicial de vazio filtrado e
   permite carregar a próxima página sem substituir os itens já visíveis.
 - Cada item oferece detalhe básico com estado, valor, data e versão. O histórico completo de
-  auditoria, incluindo antes/depois sanitizado e consequências relacionadas, permanece uma etapa
-  posterior e não é apresentado como concluído nesta fatia.
+  auditoria é autenticado e pode ser consultado por `GET /v1/workspaces/:workspaceId/transactions/:id/audit`,
+  com paginação por cursor opaco e assinado, ordenada por instante e ID decrescentes.
+- `GET /v1/workspaces/:workspaceId/transactions/:id/audit/:auditId` retorna o evento individual e
+  suas consequências relacionadas no livro razão, sem permitir cruzar transações ou espaços.
+- Eventos expõem categoria, ação, autor, instante, origem, correlação, resultado e motivo. Os
+  campos `before` e `after` contêm somente uma allowlist sanitizada de estado e referências; valor,
+  descrição, e-mail, token e outros dados sensíveis não entram no snapshot padrão.
 
 ### Conta a pagar ou receber
 
@@ -157,3 +162,5 @@ Todos os totais são calculados no servidor a partir de lançamentos canônicos.
 - [ ] Empréstimos alteram carteira e recebível/obrigação sem contaminar renda/despesa.
 - [ ] Ajuste cria somente a diferença mostrada e exige motivo.
 - [ ] Testes baseados em propriedades cobrem soma de parcelas e conservação dos lançamentos.
+- [ ] Histórico de cada transação lista eventos auditáveis com cursor seguro e detalhe de
+  consequências relacionadas, preservando snapshots antes/depois sanitizados.

@@ -223,9 +223,9 @@ export const auditEvent = pgTable(
     correlationId: varchar("correlation_id", { length: 26 }).notNull(),
     result: text("result").notNull(),
     reason: text("reason"),
-    retentionUntil: instant("retention_until"),
     beforeRedacted: jsonb("before_redacted"),
     afterRedacted: jsonb("after_redacted"),
+    retentionUntil: instant("retention_until"),
   },
   (table) => [
     index("audit_event_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),
