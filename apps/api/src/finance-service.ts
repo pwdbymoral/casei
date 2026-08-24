@@ -1020,20 +1020,27 @@ export class FinanceService {
               );
             }
           }
-          const updated = await client.query<{
-            id: string;
-            workspace_id: string;
-            name: string;
-            kind: "income" | "expense" | "both";
-            archived: boolean;
-            version: number;
-          }>(
-            `UPDATE finance_category
-                SET name = $3, kind = $4, version = version + 1, updated_at = now()
-              WHERE workspace_id = $1 AND id = $2 AND version = $5
-              RETURNING id, workspace_id, name, kind, archived, version`,
-            [scope.workspaceId, categoryId, nextName, nextKind, expectedVersion],
-          );
+          const updated = await client
+            .query<{
+              id: string;
+              workspace_id: string;
+              name: string;
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+              version: number;
+            }>(
+              `UPDATE finance_category
+                  SET name = $3, kind = $4, version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $5
+                RETURNING id, workspace_id, name, kind, archived, version`,
+              [scope.workspaceId, categoryId, nextName, nextKind, expectedVersion],
+            )
+            .catch((error: unknown) => {
+              if (isUniqueViolation(error)) {
+                throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+              }
+              throw error;
+            });
           const row = updated.rows[0];
           if (!row) throw new VersionConflictError(current.version);
           await this.recordCategoryAudit(client, scope, categoryId, "category.updated", {
@@ -1110,20 +1117,27 @@ export class FinanceService {
             throw new FinanceConflictError("A categoria já está ativa.");
           }
           const archived = action === "archive";
-          const updated = await client.query<{
-            id: string;
-            workspace_id: string;
-            name: string;
-            kind: "income" | "expense" | "both";
-            archived: boolean;
-            version: number;
-          }>(
-            `UPDATE finance_category
-                SET archived = $3, version = version + 1, updated_at = now()
-              WHERE workspace_id = $1 AND id = $2 AND version = $4
-              RETURNING id, workspace_id, name, kind, archived, version`,
-            [scope.workspaceId, categoryId, archived, expectedVersion],
-          );
+          const updated = await client
+            .query<{
+              id: string;
+              workspace_id: string;
+              name: string;
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+              version: number;
+            }>(
+              `UPDATE finance_category
+                  SET archived = $3, version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $4
+                RETURNING id, workspace_id, name, kind, archived, version`,
+              [scope.workspaceId, categoryId, archived, expectedVersion],
+            )
+            .catch((error: unknown) => {
+              if (isUniqueViolation(error)) {
+                throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+              }
+              throw error;
+            });
           const row = updated.rows[0];
           if (!row) throw new VersionConflictError(current.version);
           await this.recordCategoryAudit(client, scope, categoryId, `category.${action}`, {

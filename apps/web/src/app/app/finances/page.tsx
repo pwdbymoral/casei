@@ -884,7 +884,10 @@ function FinanceDashboard({
                   onChange={(event) => {
                     const nextType = event.target.value as "expense" | "income";
                     setTransactionType(nextType);
-                    if (nextType === "income") setTransactionCardId("");
+                    if (nextType === "income") {
+                      setTransactionCardId("");
+                      setTransactionCategoryId("");
+                    }
                   }}
                 >
                   <option value="expense">Despesa</option>

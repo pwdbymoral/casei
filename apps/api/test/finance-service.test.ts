@@ -37,6 +37,52 @@ describe("finance command guards", () => {
     ).rejects.toBeInstanceOf(FinanceConflictError);
   });
 
+  it("maps a concurrent category rename collision to a recoverable conflict", async () => {
+    const categoryId = "0190f3c8-2a10-7abc-8def-1234567890b0";
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-category-update" }] };
+        if (sql.includes("SELECT id, workspace_id, name, kind, archived, version"))
+          return {
+            rows: [
+              {
+                id: categoryId,
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                name: "Mercado",
+                kind: "expense",
+                archived: false,
+                version: 0,
+              },
+            ],
+          };
+        if (sql.includes("FROM finance_category") && sql.includes("lower(name)"))
+          return { rows: [] };
+        if (sql.includes("UPDATE finance_category")) throw { code: "23505" };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    await expect(
+      service.updateCategory(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "member",
+        },
+        categoryId,
+        { name: "Feira" },
+        "category-update-collision-001",
+        0,
+      ),
+    ).rejects.toBeInstanceOf(FinanceConflictError);
+  });
+
   it("updates a category atomically and records its redacted audit transition", async () => {
     const categoryId = "0190f3c8-2a10-7abc-8def-1234567890b0";
     const client = {
