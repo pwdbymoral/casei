@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   canWriteFinance,
+  clearTransactionQueryParams,
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
   createRequestGuard,
@@ -215,6 +216,15 @@ describe("finance adapter", () => {
     expect(shouldRetryIdempotentCommand(new FinanceAdapterError("invalid", 422))).toBe(false);
   });
 
+  it("clears every timeline filter, including a card filter, without touching other URL state", () => {
+    const params = clearTransactionQueryParams(
+      new URLSearchParams("tab=timeline&search=mercado&cardId=card-1&cursor=cursor-2"),
+    );
+
+    expect(params.toString()).toBe("tab=timeline");
+    expect(params.has("cardId")).toBe(false);
+  });
+
   it("keeps fixture writes in the same adapter for quick capture", async () => {
     const adapter = createFixtureFinanceAdapter();
     const before = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
@@ -354,6 +364,27 @@ describe("finance adapter", () => {
     expect(guard.isCurrent(second)).toBe(true);
     guard.invalidate();
     expect(guard.isCurrent(second)).toBe(false);
+  });
+
+  it("does not accept a stale timeline response after a newer request starts", async () => {
+    const guard = createRequestGuard();
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    const firstResponse = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondResponse = new Promise<void>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const firstRequest = guard.begin();
+    const firstAccepted = firstResponse.then(() => guard.isCurrent(firstRequest));
+    const secondRequest = guard.begin();
+    const secondAccepted = secondResponse.then(() => guard.isCurrent(secondRequest));
+
+    resolveFirst();
+    await expect(firstAccepted).resolves.toBe(false);
+    resolveSecond();
+    await expect(secondAccepted).resolves.toBe(true);
   });
 
   it("does not give canceled composition items a misleading financial sign", () => {

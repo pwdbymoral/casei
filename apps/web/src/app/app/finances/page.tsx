@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import {
   type CreditCard,
   canWriteFinance,
+  clearTransactionQueryParams,
   createRequestGuard,
   type FinanceAdapter,
   FinanceAdapterError,
@@ -122,6 +123,7 @@ function FinanceDashboard({
     statement: Statement;
   } | null>(null);
   const [statementItemsRequest] = useState(createRequestGuard);
+  const [timelineRequest] = useState(createRequestGuard);
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineFrom, setTimelineFrom] = useState("");
   const [timelineTo, setTimelineTo] = useState("");
@@ -180,6 +182,7 @@ function FinanceDashboard({
 
   const load = useCallback(
     async (append = false) => {
+      const request = timelineRequest.begin();
       setStatus("loading");
       setError(null);
       setViewingStatement(null);
@@ -192,6 +195,7 @@ function FinanceDashboard({
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
         ]);
+        if (!timelineRequest.isCurrent(request)) return;
         setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
         setTransactionsNextCursor(nextTransactions.nextCursor);
         setTransactionsHasMore(nextTransactions.hasMore);
@@ -199,13 +203,14 @@ function FinanceDashboard({
         setStatements(nextStatements);
         setStatus("success");
       } catch (cause) {
+        if (!timelineRequest.isCurrent(request)) return;
         setStatus("error");
         setError(
           cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.",
         );
       }
     },
-    [adapter, timelineQuery, workspaceId],
+    [adapter, timelineQuery, timelineRequest, workspaceId],
   );
 
   useEffect(() => {
@@ -296,7 +301,9 @@ function FinanceDashboard({
     setTimelineTo("");
     setTimelineState("");
     setTimelineKind("");
-    updateTimelineQuery({ search: "", from: "", to: "", state: "", kind: "" });
+    const params = clearTransactionQueryParams(new URLSearchParams(searchParams.toString()));
+    const query = params.toString();
+    router.replace(`/app/finances${query ? `?${query}` : ""}`, { scroll: false });
   }
 
   async function handleCardSubmit(event: React.FormEvent<HTMLFormElement>) {

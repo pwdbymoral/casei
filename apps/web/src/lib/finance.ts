@@ -99,6 +99,15 @@ export function transactionQueryFromSearchParams(params: URLSearchParams): Trans
   };
 }
 
+/** Removes timeline filters and pagination while preserving unrelated URL state. */
+export function clearTransactionQueryParams(params: URLSearchParams): URLSearchParams {
+  const next = new URLSearchParams(params);
+  for (const key of ["search", "from", "to", "state", "kind", "cardId", "cursor"]) {
+    next.delete(key);
+  }
+  return next;
+}
+
 /** Network/5xx failures leave a logical command safe to retry with its same key. */
 export function shouldRetryIdempotentCommand(error: unknown): boolean {
   if (!(error instanceof FinanceAdapterError)) return true;
