@@ -311,7 +311,10 @@ export function parseStockBulk(content: string): StockBulkDocument {
       rows: lines.map((line, index) => ({
         lineNumber: index + 1,
         values: { name: normalizeText(line) },
-        errors: [],
+        errors:
+          normalizeText(line).length > TEXT_LIMITS.name
+            ? [`O campo name excede ${TEXT_LIMITS.name} caracteres.`]
+            : [],
       })),
       fatalErrors: [],
     };

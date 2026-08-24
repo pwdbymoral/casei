@@ -30,6 +30,12 @@ describe("STOCK-004 parser de cadastro em lote", () => {
     expect(result.rows[2]?.values.name).toBe("Feijão");
   });
 
+  it("rejeita nome acima de 200 caracteres também no formato uma linha por produto", () => {
+    const result = parseStockBulk("A".repeat(201));
+
+    expect(result.rows[0]?.errors).toEqual([expect.stringContaining("200 caracteres")]);
+  });
+
   it("interpreta colagem tabular com cabeçalhos e valores localizados", () => {
     const result = parseStockBulk(
       "Nome\tUnidade\tQuantidade\tMínimo\tComprar automaticamente\nArroz\tkg\t2.500\t1\tsim",
