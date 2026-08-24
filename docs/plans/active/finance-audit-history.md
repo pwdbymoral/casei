@@ -1,6 +1,6 @@
 # Plano: histórico auditável financeiro por transação
 
-- Status: ativo
+- Status: implementação pronta para rebase após integrar AUTH e estoque
 - Spec associada: [financas.md](../../specs/financas.md#captura-rápida-e-linha-do-tempo)
 
 ## Objetivo
@@ -28,12 +28,12 @@ são criadas por `0005`; esta migration apenas reforça os grants de auditoria.
 
 ## Etapas
 
-- [ ] Atualizar spec/plano e criar testes red antes da implementação.
-- [ ] Migrar o schema de auditoria e cobrir grants/colunas em teste estrutural e integração quando disponível.
-- [ ] Implementar contratos, persistência, cursores e endpoints autenticados.
-- [ ] Implementar adaptador HTTP/fixture e histórico no detalhe acessível da transação.
-- [ ] Executar testes focados, lint, typecheck, build e validação de navegador quando disponível.
-- [ ] Atualizar documentação vigente, commit, push e PR sem merge.
+- [x] Atualizar spec/plano e criar testes red antes da implementação.
+- [x] Migrar o schema de auditoria e cobrir grants/colunas em teste estrutural e integração quando disponível.
+- [x] Implementar contratos, persistência, cursores e endpoints autenticados.
+- [x] Implementar adaptador HTTP/fixture e histórico no detalhe acessível da transação.
+- [x] Executar testes focados, lint e typecheck; build, navegador e integração PostgreSQL ficam para a validação da cadeia integrada.
+- [x] Atualizar documentação vigente, commit, push e PR sem merge.
 
 ## Rastreabilidade
 
@@ -45,7 +45,8 @@ a integração valida a leitura sob o role da aplicação quando `DATABASE_URL_T
 
 - Vazamento entre espaços ou transações: toda leitura filtra workspace e target e verifica a transação antes do evento.
 - Cursor manipulável: payload inclui ordenação/posição e é assinado com o segredo já usado pela timeline.
-- Dados sensíveis em auditoria: snapshots são produzidos por allowlist, sem valor ou descrição.
+- Dados sensíveis em auditoria: snapshots são produzidos por allowlist antes da persistência e
+  novamente na leitura, sem valor, descrição, e-mail, token ou objetos desconhecidos.
 - Ambiente sem PostgreSQL/browser: manter testes unitários/estruturais e registrar a validação ausente.
 
 ## Validação

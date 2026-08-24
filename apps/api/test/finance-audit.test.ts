@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FinanceService } from "../src/finance-service.js";
+import { FinanceService, redactFinanceAuditSnapshot } from "../src/finance-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
@@ -33,6 +33,32 @@ function fakePool(rows: Array<Record<string, unknown>>) {
 }
 
 describe("finance transaction audit history", () => {
+  it("redacts snapshots on both write and read boundaries", () => {
+    expect(
+      redactFinanceAuditSnapshot({
+        kind: "expense",
+        state: "posted",
+        categoryId: "0190f3c8-2a10-7abc-8def-1234567890ae",
+        cardId: null,
+        statementId: null,
+        version: 2,
+        amountMinor: "999999",
+        description: "segredo",
+        actorEmail: "private@example.test",
+        nested: { token: "secret" },
+      }),
+    ).toEqual({
+      kind: "expense",
+      state: "posted",
+      categoryId: "0190f3c8-2a10-7abc-8def-1234567890ae",
+      cardId: null,
+      statementId: null,
+      version: 2,
+    });
+    expect(redactFinanceAuditSnapshot(["not", "an", "object"])).toBeNull();
+    expect(redactFinanceAuditSnapshot({ version: "2", state: { secret: true } })).toEqual({});
+  });
+
   it("lists scoped audit events with a signed cursor and redacted snapshots", async () => {
     const fake = fakePool([
       {
@@ -67,7 +93,13 @@ describe("finance transaction audit history", () => {
     expect(page.items[0]).toMatchObject({
       id: auditId,
       transactionId,
+      category: "finance",
       action: "transaction.created",
+      actorId: "user-1",
+      origin: "api",
+      correlationId: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+      result: "success",
+      reason: null,
       before: null,
       after: { state: "posted", kind: "expense" },
     });
