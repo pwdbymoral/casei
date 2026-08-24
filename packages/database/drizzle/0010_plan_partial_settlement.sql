@@ -1,5 +1,4 @@
--- PLAN-001 placeholder. Renumber after the stock and audit migrations are integrated.
--- Partial settlements are append-only deltas and therefore may repeat for one transaction.
+-- Partial settlements are append-only deltas and may repeat for one transaction.
 DROP INDEX "ledger_event_transaction_type_unique";
 CREATE UNIQUE INDEX "ledger_event_transaction_type_unique"
   ON "ledger_event" ("transaction_id", "event_type")

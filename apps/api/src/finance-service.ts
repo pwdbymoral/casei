@@ -178,7 +178,6 @@ export function calculateSettlement({
     state: nextSettledMinor === plannedMinor ? "posted" : "partially_settled",
   };
 }
-
 type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const statementItemsCursorOrdering = "occurred_on,created_at,id";
 type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: string];
