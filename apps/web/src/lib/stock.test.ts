@@ -47,6 +47,7 @@ describe("stock adapter", () => {
       quantity: "1",
       minimum: null,
       markedMissing: false,
+      shoppingAuto: true,
       state: "ok",
       category: null,
       location: null,
@@ -57,7 +58,6 @@ describe("stock adapter", () => {
     expect(requests[0]?.headers.get("If-Match")).toBe('"v3"');
     expect(requests[0]?.headers.get("Idempotency-Key")).toMatch(/^stock-/);
   });
-
   it("reuses one operation-scoped idempotency key after a network retry", async () => {
     let attempts = 0;
     const keys: string[] = [];
@@ -102,6 +102,7 @@ describe("stock adapter", () => {
       quantity: "1",
       minimum: null,
       markedMissing: false,
+      shoppingAuto: true,
       state: "ok" as const,
       category: null,
       location: null,
@@ -154,5 +155,40 @@ describe("stock adapter", () => {
       if (previousStorage) Object.defineProperty(globalThis, "localStorage", previousStorage);
       else Reflect.deleteProperty(globalThis, "localStorage");
     }
+  });
+
+  it("keeps purchase confirmation explicit in the shopping adapter", async () => {
+    const requests: Request[] = [];
+    const adapter = createHttpStockAdapter({
+      baseUrl: "https://casei.test",
+      fetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(JSON.stringify({ item: {}, product: null, movement: null }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await adapter.purchaseShoppingItem(
+      workspaceA,
+      {
+        id: "019b5d9e-3c12-7a03-8d47-7b5b5dd7a203",
+        workspaceId: workspaceA,
+        productId: "019b5d9e-3c12-7a03-8d47-7b5b5dd7a204",
+        name: "Leite",
+        source: "automatic",
+        quantity: "2",
+        unit: "L",
+        unitLabel: null,
+        note: null,
+        purchased: false,
+        purchasedAt: null,
+        lastChangedBy: "user_fixture_marina",
+        version: 4,
+      },
+      { addToStock: true, quantity: "1.5" },
+    );
+    expect(requests[0]?.headers.get("If-Match")).toBe('"v4"');
+    expect(await requests[0]?.json()).toEqual({ addToStock: true, quantity: "1.5" });
   });
 });

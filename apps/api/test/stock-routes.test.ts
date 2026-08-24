@@ -1,7 +1,8 @@
-import type { Pool } from "@casei/database";
+import { IdempotencyConflictError, type Pool } from "@casei/database";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { IdentityService } from "../src/identity-service.js";
+import { stockErrorToHttp } from "../src/stock-routes.js";
 import { type StockService, StockVersionConflictError } from "../src/stock-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
@@ -21,6 +22,22 @@ const product = {
   location: null,
   note: null,
   archived: false,
+  version: 0,
+};
+
+const shoppingItem = {
+  id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+  workspaceId,
+  productId,
+  name: "Arroz",
+  source: "automatic" as const,
+  quantity: "1",
+  unit: "kg" as const,
+  unitLabel: null,
+  note: null,
+  purchased: false,
+  purchasedAt: null,
+  lastChangedBy: "user-1",
   version: 0,
 };
 
@@ -44,6 +61,11 @@ function appFor(service: StockService) {
 }
 
 describe("stock HTTP boundary", () => {
+  it("maps idempotency conflicts to a stable 409 API error", () => {
+    const error = stockErrorToHttp(new IdempotencyConflictError());
+    expect(error).toMatchObject({ status: 409, code: "idempotency_conflict" });
+  });
+
   it("requires idempotency for creation and scopes list to authenticated workspace", async () => {
     const service = {
       listProducts: async (scope: { workspaceId: string; role: string }) => {
@@ -108,5 +130,49 @@ describe("stock HTTP boundary", () => {
     await expect(conflict.json()).resolves.toMatchObject({
       error: { code: "version_conflict", currentVersion: 4 },
     });
+  });
+
+  it("lista compras e exige confirmação explícita para alterar estoque", async () => {
+    let purchaseInput: unknown;
+    const service = {
+      listShoppingItems: async () => [shoppingItem],
+      createShoppingItem: async () => ({ replayed: false, deduplicated: true, item: shoppingItem }),
+      purchaseShoppingItem: async (_scope: unknown, _id: string, input: unknown) => {
+        purchaseInput = input;
+        return {
+          replayed: false,
+          item: { ...shoppingItem, purchased: true, version: 1 },
+          product: null,
+          movement: null,
+        };
+      },
+    } as unknown as StockService;
+    const app = appFor(service);
+    const listed = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/stock/shopping`,
+    );
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toMatchObject({ items: [shoppingItem] });
+    const free = await app.request(`http://localhost/v1/workspaces/${workspaceId}/stock/shopping`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "shopping-free-0001" },
+      body: JSON.stringify({ name: "Saco reutilizável" }),
+    });
+    expect(free.status).toBe(200);
+    expect(free.headers.get("X-List-Deduplicated")).toBe("true");
+    const purchased = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/stock/shopping/${shoppingItem.id}/purchased`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "shopping-purchase-0001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ addToStock: false }),
+      },
+    );
+    expect(purchased.status).toBe(200);
+    expect(purchaseInput).toEqual({ addToStock: false });
   });
 });

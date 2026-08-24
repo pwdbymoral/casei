@@ -22,6 +22,8 @@ Aplicar defesa em camadas:
 8. toda mutação doméstica bloqueia a linha de `membership` do ator (`FOR UPDATE`) na mesma transação em que revalida papel, estado e capacidade antes de escrever. Remoção, downgrade e transferência de membership usam o mesmo lock. Isso serializa revogação com mutação mesmo sob o isolamento padrão `READ COMMITTED`;
 9. jobs persistem `actor_id`, `workspace_id` e `required_capability` e revalidam membership/capacidade, adquirindo o lock, antes de cada lote e transição de estado. Se a autorização deixou de existir, o job para sem aplicar o lote seguinte e registra cancelamento auditável.
 
+Mutações que envolvem mais de uma membership bloqueiam todas as linhas afetadas em ordem crescente de `user_id` antes de bloquear a linha do workspace. Mutações de um único ator mantêm o lock da membership do ator antes do lock do workspace. Essa ordem canônica impede que transferência, remoção, alteração de papel ou desativação segurem uma membership enquanto aguardam o lock do workspace de outra transação.
+
 Policies filtram `USING` e `WITH CHECK`. A autorização do caso de uso não é considerada válida até a leitura com lock da membership na mesma transação da mutação; o `WorkspaceScope` carrega a versão observada para detectar alterações concorrentes. Policy não faz subconsulta concorrente complexa quando uma claim/contexto já validado pode ser usado. O console administrativo acessa somente views/metadados próprios; não ganha bypass genérico.
 
 ## Consequências
