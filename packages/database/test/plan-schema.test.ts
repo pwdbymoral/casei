@@ -8,6 +8,10 @@ test("PLAN-001 migration permits repeated partial settlement events only", async
     fileURLToPath(new URL("../drizzle/0010_plan_partial_settlement.sql", import.meta.url)),
     "utf8",
   );
+  const rollback = await readFile(
+    fileURLToPath(new URL("../drizzle/0010_plan_partial_settlement.down.sql", import.meta.url)),
+    "utf8",
+  );
   const journal = await readFile(
     fileURLToPath(new URL("../drizzle/meta/_journal.json", import.meta.url)),
     "utf8",
@@ -21,4 +25,8 @@ test("PLAN-001 migration permits repeated partial settlement events only", async
   assert.match(migration, /event_type[^\n]*<> 'transaction\.partially_settled\.v1'/i);
   assert.match(journal, /"tag": "0010_plan_partial_settlement"/);
   assert.match(schema, /eventType[^\n]*<> 'transaction\.partially_settled\.v1'/i);
+  assert.match(rollback, /DO \$\$/i);
+  assert.match(rollback, /HAVING count\(\*\) > 1/i);
+  assert.match(rollback, /RAISE EXCEPTION[^;]*cannot rollback 0010_plan_partial_settlement/i);
+  assert.ok(rollback.indexOf("RAISE EXCEPTION") < rollback.indexOf("DROP INDEX"));
 });

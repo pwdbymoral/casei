@@ -154,6 +154,18 @@ export interface SettlementCalculation {
   state: "partially_settled" | "posted";
 }
 
+/** Variable recurrence occurrences need an explicit effective amount to settle. */
+export function assertVariableRecurrenceSettlementAllowed(
+  variable: boolean,
+  hasEffectiveAmount: boolean,
+): void {
+  if (variable && !hasEffectiveAmount) {
+    throw new FinanceConflictError(
+      "Uma ocorrência variável exige confirmar o valor efetivo antes da liquidação.",
+    );
+  }
+}
+
 /** Calculates one non-overlapping settlement delta before touching the ledger. */
 export function calculateSettlement({
   plannedMinor,
@@ -712,11 +724,10 @@ export class FinanceService {
               FOR SHARE`,
             [scope.workspaceId, id],
           );
-          if (recurrence.rows[0]?.variable) {
-            throw new FinanceConflictError(
-              "Uma ocorrência variável exige confirmar o valor efetivo antes da liquidação.",
-            );
-          }
+          assertVariableRecurrenceSettlementAllowed(
+            recurrence.rows[0]?.variable ?? false,
+            parsed.amount !== undefined,
+          );
         }
         if (parsed.amount && parsed.amount.currency !== row.currency_code) {
           throw new FinanceConflictError("A moeda da liquidação difere da transação.");

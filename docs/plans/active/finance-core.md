@@ -29,6 +29,7 @@ Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara 
 - `GOAL/INSIGHT`: persistência de metas/reservas, projeção/read models e UI ficam em fatias próprias; as funções puras de contribuição/valor seguro não persistem dados.
 - A UI financeira recebe `workspaceId` e `role` do shell autenticado; ela não escolhe escopo por `localStorage`, não concede papel padrão e desabilita escrita para `viewer`. Fixtures só ficam disponíveis com `CASEI_UI_FIXTURES=1`; sem origem explícita `NEXT_PUBLIC_CASEI_API_ORIGIN`, os adapters terminam em estado não autenticado.
 - A migration `0010_plan_partial_settlement` segue estoque `0008` e auditoria `0009`; se a sequência de migrations mudar antes do merge, ela deve ser renumerada para o próximo número livre sem aplicar duas vezes nem descartar dados.
+- O rollback de `0010_plan_partial_settlement` falha explicitamente se já houver múltiplos deltas parciais para a mesma transação; os eventos não são apagados nem mesclados para satisfazer a unicidade antiga. Nesse caso, preserve a migration aplicada ou faça uma migração de compensação explícita.
 
 Esses itens são incompletudes de implementação, não escolhas de produto. Não criar CRUD genérico sobre o ledger: eventos publicados continuam append-only e qualquer correção deve usar reversão/substituição atômica.
 
