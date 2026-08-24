@@ -183,6 +183,11 @@ if (!adminUrl) {
         relforcerowsecurity: true,
       });
 
+      const auditRedactionDownSql = await readFile(
+        fileURLToPath(new URL("../drizzle/0005_audit_redacted_fields.down.sql", import.meta.url)),
+        "utf8",
+      );
+      await pool.query(auditRedactionDownSql);
       const profileDownSql = await readFile(
         fileURLToPath(new URL("../drizzle/0004_profile_preferences.down.sql", import.meta.url)),
         "utf8",

@@ -84,15 +84,19 @@ devem rodar no PostgreSQL descartável do CI junto da migration `0003_identity_w
 
 ## AUTH-006
 
+`apps/api/test/auth.test.ts` executa o handler Better Auth real para mudança de e-mail, confirmando
+que a confirmação é enfileirada com callback na origem PWA allowlisted. O adapter exige as origens
+explícitas `NEXT_PUBLIC_CASEI_API_ORIGIN` e `NEXT_PUBLIC_CASEI_WEB_ORIGIN`; não há fallback local.
 `apps/api/test/identity-routes.test.ts` cobre o boundary de perfil/preferências, incluindo `If-Match`,
 ETag, papel sem permissão e workspace estrangeiro. `apps/web/src/lib/settings.test.ts` verifica o
 adapter HTTP, envio de ETag e mapeamento seguro de conflito/offline; a tela `app/settings` mantém os
 formulários com drafts durante erro e expõe os estados de carregamento, permissão, conflito e sem
-conexão. A migration `0004_profile_preferences.sql` tem companion down e o teste PostgreSQL de
-schema verifica a política RLS de `user_preference` e que o rollback não deixa a tabela. Quando
+conexão, além da prévia de consequências antes de salvar. As migrations `0004_profile_preferences.sql`
+e `0005_audit_redacted_fields.sql` têm companions down e o teste PostgreSQL de schema verifica a
+política RLS de `user_preference` e que o rollback não deixa as tabelas/colunas. Quando
 `DATABASE_URL_TEST` estiver disponível, a integração de identidade também comprova defaults `pt-BR`,
-ocultação de valores, auditoria sem valores sensíveis, versões e bloqueio server-side da moeda após
-um movimento financeiro.
+ocultação de valores, auditoria com estados redigidos sem valores sensíveis, versões, serialização da
+primeira preferência e bloqueio server-side da moeda após movimentos ou compromissos pendentes.
 
 ## Identidade
 

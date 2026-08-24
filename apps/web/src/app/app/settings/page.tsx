@@ -23,6 +23,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import {
   authenticatedSettingsAdapter,
+  preferenceChangeSummary,
   settingsErrorMessage,
   type UserProfile,
   type WorkspacePreferences,
@@ -62,6 +63,10 @@ export default function SettingsPage() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newEmail, setNewEmail] = useState("");
+  const [preferencesPreview, setPreferencesPreview] = useState<Omit<
+    WorkspacePreferences,
+    "workspaceId" | "version"
+  > | null>(null);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -202,17 +207,24 @@ export default function SettingsPage() {
   async function savePreferences(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!preferences || busy || !isOwner) return;
+    setMessage(null);
+    setPreferencesPreview({
+      name: workspaceName.trim(),
+      currency: currency.toUpperCase(),
+      timeZone: timeZone.trim(),
+      safetyMarginMinor: safetyMarginMinor.trim() || "0",
+    });
+  }
+
+  async function confirmPreferences() {
+    if (!preferences || !preferencesPreview || busy || !isOwner) return;
     await run("preferences", async () => {
       const next = await authenticatedSettingsAdapter.updateWorkspacePreferences(
         preferences.workspaceId,
-        {
-          name: workspaceName.trim(),
-          currency: currency.toUpperCase(),
-          timeZone: timeZone.trim(),
-          safetyMarginMinor: safetyMarginMinor.trim() || "0",
-        },
+        preferencesPreview,
         preferences.version,
       );
+      setPreferencesPreview(null);
       setPreferences(next);
       setWorkspaceName(next.name);
       setCurrency(next.currency);
@@ -518,73 +530,114 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           {preferences ? (
-            <form className="grid gap-4 sm:grid-cols-2" onSubmit={savePreferences}>
-              <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-name">
-                Nome do espaço
-                <Input
-                  id="workspace-name"
-                  value={workspaceName}
-                  minLength={2}
-                  maxLength={200}
-                  disabled={!isOwner || busy !== null}
-                  onChange={(event) => setWorkspaceName(event.target.value)}
-                  className="min-h-11"
-                />
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-currency">
-                Moeda
-                <Input
-                  id="workspace-currency"
-                  value={currency}
-                  maxLength={3}
-                  disabled={!isOwner || busy !== null}
-                  onChange={(event) => setCurrency(event.target.value.toUpperCase())}
-                  className="min-h-11 uppercase"
-                />
-                <span className="text-xs text-muted-foreground">
-                  Código ISO 4217, por exemplo BRL.
-                </span>
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-timezone">
-                Fuso horário (IANA)
-                <Input
-                  id="workspace-timezone"
-                  value={timeZone}
-                  disabled={!isOwner || busy !== null}
-                  onChange={(event) => setTimeZone(event.target.value)}
-                  placeholder="America/Fortaleza"
-                  className="min-h-11"
-                />
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-margin">
-                Margem de segurança (centavos)
-                <Input
-                  id="workspace-margin"
-                  inputMode="numeric"
-                  pattern="[0-9]+"
-                  value={safetyMarginMinor}
-                  disabled={!isOwner || busy !== null}
-                  onChange={(event) =>
-                    setSafetyMarginMinor(event.target.value.replace(/[^0-9]/g, ""))
-                  }
-                  className="min-h-11"
-                />
-                <span className="text-xs text-muted-foreground">
-                  Usada para preservar uma folga no orçamento.
-                </span>
-              </label>
-              {isOwner ? (
-                <div className="flex items-center gap-3 sm:col-span-2">
-                  <Button type="submit" disabled={busy !== null || !workspaceName.trim()}>
-                    <SaveIcon aria-hidden="true" />{" "}
-                    {busy === "preferences" ? "Salvando…" : "Salvar preferências"}
-                  </Button>
+            <>
+              <form className="grid gap-4 sm:grid-cols-2" onSubmit={savePreferences}>
+                <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-name">
+                  Nome do espaço
+                  <Input
+                    id="workspace-name"
+                    value={workspaceName}
+                    minLength={2}
+                    maxLength={200}
+                    disabled={!isOwner || busy !== null}
+                    onChange={(event) => setWorkspaceName(event.target.value)}
+                    className="min-h-11"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-currency">
+                  Moeda
+                  <Input
+                    id="workspace-currency"
+                    value={currency}
+                    maxLength={3}
+                    disabled={!isOwner || busy !== null}
+                    onChange={(event) => setCurrency(event.target.value.toUpperCase())}
+                    className="min-h-11 uppercase"
+                  />
                   <span className="text-xs text-muted-foreground">
-                    Versão atual: {preferences.version}
+                    Código ISO 4217, por exemplo BRL.
                   </span>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-timezone">
+                  Fuso horário (IANA)
+                  <Input
+                    id="workspace-timezone"
+                    value={timeZone}
+                    disabled={!isOwner || busy !== null}
+                    onChange={(event) => setTimeZone(event.target.value)}
+                    placeholder="America/Fortaleza"
+                    className="min-h-11"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium" htmlFor="workspace-margin">
+                  Margem de segurança (centavos)
+                  <Input
+                    id="workspace-margin"
+                    inputMode="numeric"
+                    pattern="[0-9]+"
+                    value={safetyMarginMinor}
+                    disabled={!isOwner || busy !== null}
+                    onChange={(event) =>
+                      setSafetyMarginMinor(event.target.value.replace(/[^0-9]/g, ""))
+                    }
+                    className="min-h-11"
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    Usada para preservar uma folga no orçamento.
+                  </span>
+                </label>
+                {isOwner ? (
+                  <div className="flex items-center gap-3 sm:col-span-2">
+                    <Button type="submit" disabled={busy !== null || !workspaceName.trim()}>
+                      <SaveIcon aria-hidden="true" />{" "}
+                      {busy === "preferences" ? "Salvando…" : "Salvar preferências"}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      Versão atual: {preferences.version}
+                    </span>
+                  </div>
+                ) : null}
+              </form>
+              {preferencesPreview ? (
+                <div
+                  className="mt-5 grid gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4"
+                  role="dialog"
+                  aria-labelledby="preferences-preview-title"
+                >
+                  <div>
+                    <p id="preferences-preview-title" className="font-medium">
+                      Revise antes de salvar
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Confirme as consequências para este espaço. O servidor ainda validará a versão
+                      e a regra da moeda.
+                    </p>
+                  </div>
+                  <ul className="grid gap-1 text-sm" aria-label="Alterações nas preferências">
+                    {preferenceChangeSummary(preferences, preferencesPreview).map((change) => (
+                      <li key={change}>• {change}</li>
+                    ))}
+                  </ul>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void confirmPreferences()}
+                    >
+                      {busy === "preferences" ? "Salvando…" : "Confirmar e salvar"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy !== null}
+                      onClick={() => setPreferencesPreview(null)}
+                    >
+                      Voltar e editar
+                    </Button>
+                  </div>
                 </div>
               ) : null}
-            </form>
+            </>
           ) : (
             <p className="text-sm text-muted-foreground">Carregando preferências…</p>
           )}

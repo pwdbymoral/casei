@@ -1,10 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { authenticatedSettingsAdapter, settingsErrorMessage } from "./settings";
+import {
+  authenticatedSettingsAdapter,
+  preferenceChangeSummary,
+  settingsErrorMessage,
+} from "./settings";
 import { WorkspaceManagementError } from "./workspaces";
 
 describe("settings HTTP boundary", () => {
-  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "http://localhost:3001");
+    vi.stubEnv("NEXT_PUBLIC_CASEI_WEB_ORIGIN", "http://localhost:3000");
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
 
   it("loads and updates profile/preferences with ETags", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -88,11 +99,48 @@ describe("settings HTTP boundary", () => {
     });
     expect(JSON.parse(requests[1]?.body ?? "{}")).toMatchObject({
       newEmail: "new@example.com",
-      callbackURL: "/app/settings",
+      callbackURL: "http://localhost:3000/app/settings",
     });
     expect(JSON.parse(requests[2]?.body ?? "{}")).toMatchObject({
       email: "owner@example.com",
-      callbackURL: "/app/settings",
+      callbackURL: "http://localhost:3000/app/settings",
     });
+  });
+
+  it("fails closed when the API or PWA origin is absent", async () => {
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "");
+    await expect(authenticatedSettingsAdapter.getProfile()).rejects.toThrow(
+      "NEXT_PUBLIC_CASEI_API_ORIGIN não está configurada",
+    );
+
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "http://localhost:3001");
+    vi.stubEnv("NEXT_PUBLIC_CASEI_WEB_ORIGIN", "");
+    expect(() => authenticatedSettingsAdapter.changeEmail("new@example.com")).toThrow(
+      "NEXT_PUBLIC_CASEI_WEB_ORIGIN não está configurada",
+    );
+  });
+
+  it("describes the consequences that the preferences preview must show", () => {
+    const current = {
+      workspaceId: "workspace-1",
+      name: "Casa",
+      currency: "BRL",
+      timeZone: "America/Fortaleza",
+      safetyMarginMinor: "0",
+      version: 2,
+    };
+    expect(
+      preferenceChangeSummary(current, {
+        name: "Casa nova",
+        currency: "USD",
+        timeZone: "America/Sao_Paulo",
+        safetyMarginMinor: "1200",
+      }),
+    ).toEqual([
+      "Nome: Casa → Casa nova",
+      "Moeda: BRL → USD (confirme que não há movimentos pendentes)",
+      "Fuso horário: America/Fortaleza → America/Sao_Paulo (datas futuras serão exibidas neste fuso)",
+      "Margem de segurança: 0 → 1200 centavos",
+    ]);
   });
 });

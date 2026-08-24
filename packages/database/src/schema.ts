@@ -223,6 +223,8 @@ export const auditEvent = pgTable(
     result: text("result").notNull(),
     reason: text("reason"),
     retentionUntil: instant("retention_until"),
+    beforeRedacted: jsonb("before_redacted"),
+    afterRedacted: jsonb("after_redacted"),
   },
   (table) => [
     index("audit_event_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),

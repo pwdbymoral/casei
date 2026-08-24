@@ -99,6 +99,25 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         hideValues: true,
         version: 1,
       });
+      const profileAudit = await pool.query<{
+        action: string;
+        reason: string;
+        before_redacted: Record<string, unknown>;
+        after_redacted: Record<string, unknown>;
+      }>(
+        `SELECT action, reason, before_redacted, after_redacted FROM audit_event
+          WHERE action = 'identity.profile_updated' AND target_id = $1
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [ownerId],
+      );
+      expect(profileAudit.rows[0]).toEqual({
+        action: "identity.profile_updated",
+        reason: "profile_fields_updated",
+        before_redacted: { display_name: "[redacted]", locale: "pt-BR", hide_values: false },
+        after_redacted: { display_name: "[redacted]", locale: "pt-BR", hide_values: true },
+      });
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("Owner Casei");
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("owner@example.test");
       await expect(
         service.updateProfile(
           owner,
@@ -107,6 +126,26 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           "01ARZ3NDEKTSV4RRQ69G5FAW",
         ),
       ).rejects.toMatchObject({ name: "IdentityVersionConflictError" });
+      const concurrentProfiles = await Promise.allSettled([
+        service.updateProfile(
+          owner,
+          { displayName: "Concorrente A", locale: "pt-BR", hideValues: true },
+          updatedProfile.version,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        ),
+        service.updateProfile(
+          owner,
+          { displayName: "Concorrente B", locale: "pt-BR", hideValues: false },
+          updatedProfile.version,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        ),
+      ]);
+      expect(concurrentProfiles.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const concurrentFailure = concurrentProfiles.find((result) => result.status === "rejected");
+      expect(concurrentFailure).toMatchObject({
+        status: "rejected",
+        reason: { name: "IdentityVersionConflictError" },
+      });
 
       const initialPreferences = await service.getWorkspacePreferences(scope);
       expect(initialPreferences).toMatchObject({
@@ -133,6 +172,35 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         safetyMarginMinor: "1200",
         version: 1,
       });
+      const preferenceAudit = await pool.query<{
+        action: string;
+        reason: string;
+        before_redacted: Record<string, unknown>;
+        after_redacted: Record<string, unknown>;
+      }>(
+        `SELECT action, reason, before_redacted, after_redacted FROM audit_event
+          WHERE action = 'workspace.preferences_updated' AND target_id = $1
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [workspaceId],
+      );
+      expect(preferenceAudit.rows[0]).toEqual({
+        action: "workspace.preferences_updated",
+        reason: "workspace_preference_fields_updated",
+        before_redacted: {
+          name: "[redacted]",
+          currency: "BRL",
+          time_zone: "America/Fortaleza",
+          safety_margin_minor: "[redacted]",
+        },
+        after_redacted: {
+          name: "[redacted]",
+          currency: "USD",
+          time_zone: "America/Sao_Paulo",
+          safety_margin_minor: "[redacted]",
+        },
+      });
+      expect(JSON.stringify(preferenceAudit.rows[0])).not.toContain("America/Sao_Paulo");
+      expect(JSON.stringify(preferenceAudit.rows[0])).not.toContain("USD");
       const noMovementPreferences = await service.updateWorkspacePreferences(
         scope,
         {
@@ -144,6 +212,30 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         updatedPreferences.version,
       );
       expect(noMovementPreferences.currency).toBe("EUR");
+      await pool.query(
+        `INSERT INTO finance_transaction
+          (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, description)
+         VALUES ($1, 'expense', 'planned', 'wallet', 100, 0, 'EUR', '2030-01-01', 'compromisso')`,
+        [workspaceId],
+      );
+      const plannedPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          plannedPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
+      await pool.query(
+        `DELETE FROM finance_transaction
+          WHERE workspace_id = $1 AND state = 'planned'`,
+        [workspaceId],
+      );
       await pool.query(
         `INSERT INTO finance_transaction
           (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, description)

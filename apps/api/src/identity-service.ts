@@ -276,11 +276,28 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
-        const current = await client.query<{ version: number }>(
-          `SELECT version FROM user_preference WHERE user_id = $1 FOR UPDATE`,
+        // Serialize the first preference row creation as well as normal updates.
+        // Without this lock, two v0 requests could both observe the missing row
+        // and the loser would surface a raw unique-constraint error instead of 412.
+        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [actor.userId]);
+        const current = await client.query<{
+          name: string;
+          locale: "pt-BR";
+          hide_values: boolean;
+          version: number | null;
+        }>(
+          `SELECT u.name,
+                  COALESCE(p.locale, 'pt-BR') AS locale,
+                  COALESCE(p.hide_values, false) AS hide_values,
+                  p.version
+             FROM "user" u
+             LEFT JOIN user_preference p ON p.user_id = u.id
+            WHERE u.id = $1`,
           [actor.userId],
         );
-        const currentVersion = Number(current.rows[0]?.version ?? 0);
+        const currentRow = current.rows[0];
+        if (!currentRow) throw new IdentityNotFoundError();
+        const currentVersion = Number(currentRow.version ?? 0);
         if (currentVersion !== expectedVersion)
           throw new IdentityVersionConflictError(currentVersion);
         await client.query(`UPDATE "user" SET name = $2, updated_at = now() WHERE id = $1`, [
@@ -304,6 +321,12 @@ export class IdentityService {
           targetId: actor.userId,
           targetType: "user",
           reason: "profile_fields_updated",
+          beforeRedacted: redactProfileState(currentRow),
+          afterRedacted: redactProfileState({
+            name: parsed.displayName,
+            locale: parsed.locale,
+            hide_values: parsed.hideValues,
+          }),
         });
         const result = await client.query<ProfileRow>(
           `SELECT u.id, u.name, u.email, u.email_verified,
@@ -363,8 +386,9 @@ export class IdentityService {
              SELECT 1 FROM ledger_event
               WHERE workspace_id = $1 AND status = 'published'
              UNION ALL
-             SELECT 1 FROM finance_transaction
-              WHERE workspace_id = $1 AND state IN ('posted', 'partially_settled')
+           SELECT 1 FROM finance_transaction
+              WHERE workspace_id = $1
+                AND state IN ('planned', 'partially_settled', 'posted')
            ) AS exists`,
           [scope.workspaceId],
         );
@@ -393,6 +417,13 @@ export class IdentityService {
         action: "workspace.preferences_updated",
         targetId: scope.workspaceId,
         reason: "workspace_preference_fields_updated",
+        beforeRedacted: redactWorkspacePreferenceState(row),
+        afterRedacted: redactWorkspacePreferenceState({
+          name: parsed.name,
+          currency_code: parsed.currency,
+          timezone: parsed.timeZone,
+          safety_margin_minor: BigInt(parsed.safetyMarginMinor),
+        }),
       });
       return toWorkspacePreferences({
         ...row,
@@ -1443,6 +1474,19 @@ interface WorkspacePreferencesRow {
   safety_margin_minor: bigint;
 }
 
+interface ProfileAuditState {
+  name: string;
+  locale: "pt-BR";
+  hide_values: boolean;
+}
+
+interface WorkspacePreferenceAuditState {
+  name: string;
+  currency_code: string;
+  timezone: string;
+  safety_margin_minor: bigint | string;
+}
+
 interface InvitationRow {
   id: string;
   workspace_id: string;
@@ -1504,6 +1548,23 @@ function toWorkspacePreferences(row: WorkspacePreferencesRow): WorkspacePreferen
     timeZone: row.timezone,
     safetyMarginMinor: row.safety_margin_minor.toString(),
     version: row.version,
+  };
+}
+
+function redactProfileState(state: ProfileAuditState): JsonObject {
+  return {
+    display_name: "[redacted]",
+    locale: state.locale,
+    hide_values: state.hide_values,
+  };
+}
+
+function redactWorkspacePreferenceState(state: WorkspacePreferenceAuditState): JsonObject {
+  return {
+    name: "[redacted]",
+    currency: state.currency_code,
+    time_zone: state.timezone,
+    safety_margin_minor: "[redacted]",
   };
 }
 
@@ -1599,12 +1660,14 @@ async function writeAudit(
     targetId?: string;
     targetType?: "workspace" | "user";
     reason?: string;
+    beforeRedacted?: JsonObject;
+    afterRedacted?: JsonObject;
   },
 ): Promise<void> {
   await client.query(
     `INSERT INTO audit_event
-      (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason, retention_until)
-     VALUES ('identity', $1, $2, $3, $4, $5, 'api', $6, 'success', $7, now() + interval '365 days')`,
+      (category, action, actor_id, workspace_id, target_type, target_id, origin, correlation_id, result, reason, before_redacted, after_redacted, retention_until)
+     VALUES ('identity', $1, $2, $3, $4, $5, 'api', $6, 'success', $7, $8::jsonb, $9::jsonb, now() + interval '365 days')`,
     [
       input.action,
       input.actorId,
@@ -1613,6 +1676,8 @@ async function writeAudit(
       input.targetId ?? input.workspaceId ?? input.actorId,
       input.correlationId || "01ARZ3NDEKTSV4RRFFQ69G5FAV",
       input.reason ?? null,
+      input.beforeRedacted ?? null,
+      input.afterRedacted ?? null,
     ],
   );
 }

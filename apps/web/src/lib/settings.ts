@@ -23,14 +23,65 @@ export type WorkspacePreferences = {
   version: number;
 };
 
-function apiOrigin(): string {
-  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
+export type WorkspacePreferencesDraft = Omit<WorkspacePreferences, "workspaceId" | "version">;
+
+export function preferenceChangeSummary(
+  current: WorkspacePreferences,
+  next: WorkspacePreferencesDraft,
+): string[] {
+  const changes: string[] = [];
+  if (current.name !== next.name) changes.push(`Nome: ${current.name} → ${next.name}`);
+  if (current.currency !== next.currency) {
+    changes.push(
+      `Moeda: ${current.currency} → ${next.currency} (confirme que não há movimentos pendentes)`,
+    );
+  }
+  if (current.timeZone !== next.timeZone) {
+    changes.push(
+      `Fuso horário: ${current.timeZone} → ${next.timeZone} (datas futuras serão exibidas neste fuso)`,
+    );
+  }
+  if (current.safetyMarginMinor !== next.safetyMarginMinor) {
+    changes.push(
+      `Margem de segurança: ${current.safetyMarginMinor} → ${next.safetyMarginMinor} centavos`,
+    );
+  }
+  return changes.length > 0 ? changes : ["Nenhuma alteração será feita."];
+}
+
+function requireOrigin(
+  name: "NEXT_PUBLIC_CASEI_API_ORIGIN" | "NEXT_PUBLIC_CASEI_WEB_ORIGIN",
+): string {
+  const configured = process.env[name];
+  if (!configured) throw new Error(`${name} não está configurada.`);
+  try {
+    const url = new URL(configured);
+    if (!(["http:", "https:"] as string[]).includes(url.protocol) || url.username || url.password) {
+      throw new Error("origem inválida");
+    }
+    return url.origin;
+  } catch {
+    throw new Error(`${name} deve ser uma origem HTTP(S) absoluta.`);
+  }
+}
+
+export function requireApiOrigin(): string {
+  return requireOrigin("NEXT_PUBLIC_CASEI_API_ORIGIN");
+}
+
+function requireWebOrigin(): string {
+  return requireOrigin("NEXT_PUBLIC_CASEI_WEB_ORIGIN");
+}
+
+function settingsCallbackUrl(): string {
+  return `${requireWebOrigin()}/app/settings`;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const origin = requireApiOrigin();
   let response: Response;
   try {
-    response = await fetch(`${apiOrigin()}${path}`, {
+    response = await fetch(`${origin}${path}`, {
       ...init,
       credentials: "include",
       headers: {
@@ -93,13 +144,13 @@ export const authenticatedSettingsAdapter = {
   changeEmail(newEmail: string) {
     return request<{ status: boolean; message?: string }>("/api/auth/change-email", {
       method: "POST",
-      body: JSON.stringify({ newEmail, callbackURL: "/app/settings" }),
+      body: JSON.stringify({ newEmail, callbackURL: settingsCallbackUrl() }),
     });
   },
   sendVerificationEmail(email: string) {
     return request<{ status: boolean }>("/api/auth/send-verification-email", {
       method: "POST",
-      body: JSON.stringify({ email, callbackURL: "/app/settings" }),
+      body: JSON.stringify({ email, callbackURL: settingsCallbackUrl() }),
     });
   },
 };
