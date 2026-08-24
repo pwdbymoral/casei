@@ -49,7 +49,9 @@ const scope = {
 const productId = "0190f3c8-2a10-7abc-8def-1234567890ac";
 const materializedItemId = "0190f3c8-2a10-7abc-8def-1234567890ad";
 
-function shoppingScenarioPool() {
+function shoppingScenarioPool(
+  expense: { kind: string; state: string } = { kind: "expense", state: "posted" },
+) {
   const statements: string[] = [];
   let productQuantity = 0n;
   let productVersion = 0;
@@ -88,6 +90,7 @@ function shoppingScenarioPool() {
     note: null,
     purchased: false,
     purchased_at: null,
+    expense_transaction_id: null,
     last_changed_by: null,
     version: productVersion,
   });
@@ -105,6 +108,9 @@ function shoppingScenarioPool() {
       }
       if (sql.includes("FROM workspace")) {
         return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM finance_transaction")) {
+        return { rows: [expense] as T[], rowCount: 1 };
       }
       if (sql.includes('INSERT INTO "idempotency_key"')) {
         return { rows: [{ id: "idempotency-1" }] as T[], rowCount: 1 };
@@ -216,6 +222,7 @@ function shoppingScenarioPool() {
           ...(item ?? derivedItem()),
           purchased: true,
           purchased_at: purchasedAt,
+          expense_transaction_id: values[2] ?? null,
           version: Number(item?.version ?? 0) + 1,
         };
         return { rows: [item as T], rowCount: 1 };
@@ -697,10 +704,12 @@ describe("StockService membership revalidation", () => {
       id: productId,
       productId,
       purchased: false,
+      expenseTransactionId: null,
       lastChangedBy: null,
     });
     if (!firstItem) throw new Error("expected a derived shopping item");
 
+    const beforePurchase = harness.statements.length;
     await service.purchaseShoppingItem(
       scope,
       firstItem.id,
@@ -709,6 +718,10 @@ describe("StockService membership revalidation", () => {
       firstItem.version,
     );
     await expect(service.listShoppingItems(scope)).resolves.toEqual([]);
+    expect(readStatements.some((sql) => /finance_transaction/i.test(sql))).toBe(false);
+    expect(
+      harness.statements.slice(beforePurchase).some((sql) => /finance_transaction/i.test(sql)),
+    ).toBe(false);
 
     await service.createMovement(
       scope,
@@ -720,6 +733,45 @@ describe("StockService membership revalidation", () => {
     const afterMovement = await service.listShoppingItems(scope);
     expect(afterMovement).toHaveLength(1);
     expect(afterMovement[0]).toMatchObject({ productId, purchased: false });
+  });
+
+  it("links only an explicitly selected existing expense when completing a purchase", async () => {
+    const harness = shoppingScenarioPool();
+    const service = new StockService(harness.pool as never);
+    const item = (await service.listShoppingItems(scope))[0];
+    if (!item) throw new Error("expected a derived shopping item");
+    const expenseTransactionId = "0190f3c8-2a10-7abc-8def-1234567890af";
+
+    const result = await service.purchaseShoppingItem(
+      scope,
+      item.id,
+      { addToStock: false, expenseTransactionId },
+      "shopping-expense-link-001",
+      item.version,
+    );
+    expect(result.item.expenseTransactionId).toBe(expenseTransactionId);
+    expect(harness.statements.some((sql) => /FROM finance_transaction/i.test(sql))).toBe(true);
+  });
+
+  it("rejects a link to a non-expense without changing the purchase", async () => {
+    const harness = shoppingScenarioPool({ kind: "income", state: "posted" });
+    const service = new StockService(harness.pool as never);
+    const item = (await service.listShoppingItems(scope))[0];
+    if (!item) throw new Error("expected a derived shopping item");
+
+    await expect(
+      service.purchaseShoppingItem(
+        scope,
+        item.id,
+        {
+          addToStock: false,
+          expenseTransactionId: "0190f3c8-2a10-7abc-8def-1234567890af",
+        },
+        "shopping-expense-link-invalid-001",
+        item.version,
+      ),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(harness.statements.some((sql) => /SET purchased = true/i.test(sql))).toBe(false);
   });
 
   it("reprocesses automatic sync after an in-stock purchase that remains low", async () => {

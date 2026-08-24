@@ -48,6 +48,7 @@ export type StockShoppingItem = {
   note: string | null;
   purchased: boolean;
   purchasedAt: string | null;
+  expenseTransactionId: string | null;
   lastChangedBy: string | null;
   version: number;
 };
@@ -129,7 +130,11 @@ export interface StockAdapter {
   purchaseShoppingItem(
     workspaceId: string,
     item: StockShoppingItem,
-    input: { addToStock: boolean; quantity?: string | null },
+    input: {
+      addToStock: boolean;
+      quantity?: string | null;
+      expenseTransactionId?: string | null;
+    },
   ): Promise<{
     item: StockShoppingItem;
     product: StockProduct | null;
@@ -653,6 +658,7 @@ export function createFixtureStockAdapter(): StockAdapter {
           note: product.note,
           purchased: false,
           purchasedAt: null,
+          expenseTransactionId: null,
           lastChangedBy: null,
           version: 0,
         });
@@ -692,6 +698,7 @@ export function createFixtureStockAdapter(): StockAdapter {
         note: null,
         purchased: false,
         purchasedAt: null,
+        expenseTransactionId: null,
         lastChangedBy: "user_fixture_marina",
         version: 0,
       };
@@ -732,6 +739,7 @@ export function createFixtureStockAdapter(): StockAdapter {
       }
       current.purchased = true;
       current.purchasedAt = new Date().toISOString();
+      current.expenseTransactionId = input.expenseTransactionId ?? null;
       current.lastChangedBy = "user_fixture_marina";
       current.version += 1;
       return { item: { ...current }, product: product ? { ...product } : null, movement };

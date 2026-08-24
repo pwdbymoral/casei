@@ -151,7 +151,9 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
   rejeição de cursor adulterado; esta fatia não altera a ordenação/contrato já publicado do STOCK-002.
 - [x] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
 - [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
-- [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
+- [x] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
+  `expenseTransactionId` referencia explicitamente uma despesa existente do mesmo espaço; não cria,
+  escolhe nem distribui lançamentos financeiros automaticamente.
 
 **Gate 6:** quantidade e histórico reconciliam; concorrência não duplica lista; jornada no mercado passa em telefone e teclado.
 

@@ -92,6 +92,13 @@
       "when": 1787561600000,
       "tag": "0012_recurrence_engine",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1787565200000,
+      "tag": "0014_stock_purchase_finance_link",
+      "breakpoints": true
     }
   ]
 }

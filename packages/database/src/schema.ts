@@ -297,6 +297,7 @@ export const shoppingItem = pgTable(
     purchased: boolean("purchased").notNull().default(false),
     purchasedAt: instant("purchased_at"),
     purchasedBy: text("purchased_by").references(() => user.id, { onDelete: "restrict" }),
+    expenseTransactionId: uuid("expense_transaction_id"),
     lastChangedBy: text("last_changed_by")
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),

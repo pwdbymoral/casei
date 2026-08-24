@@ -309,6 +309,8 @@ export const stockShoppingItemSchema = z.object({
   note: z.string().trim().max(500).nullable(),
   purchased: z.boolean(),
   purchasedAt: z.string().datetime({ offset: true }).nullable(),
+  /** Optional explicit link to the expense that paid for this completed purchase. */
+  expenseTransactionId: domainIdSchema.nullable(),
   lastChangedBy: userIdSchema.nullable(),
   version: versionSchema,
 });
@@ -337,6 +339,8 @@ export const purchaseStockShoppingItemSchema = z.object({
   /** This explicit flag is the only way a purchase can create a stock entry. */
   addToStock: z.boolean().default(false),
   quantity: stockQuantitySchema.nullable().optional(),
+  /** Linking an existing expense is explicit; omitting it never creates one. */
+  expenseTransactionId: domainIdSchema.nullable().optional(),
 });
 export type PurchaseStockShoppingItemInput = z.infer<typeof purchaseStockShoppingItemSchema>;
 
