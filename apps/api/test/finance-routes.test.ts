@@ -337,6 +337,7 @@ describe("finance HTTP composition", () => {
   });
 
   it("lists cards and statements and closes an open statement with a version", async () => {
+    let receivedCardUpdate: { input: unknown; expectedVersion: number } | undefined;
     const fakeService = {
       listCards: async () => [
         {
@@ -367,6 +368,45 @@ describe("finance HTTP composition", () => {
           version: 0,
         },
       ],
+      updateCard: async (
+        _scope: unknown,
+        _id: string,
+        input: unknown,
+        _key: string,
+        expectedVersion: number,
+      ) => {
+        receivedCardUpdate = { input, expectedVersion };
+        return {
+          replayed: false,
+          card: {
+            id: cardId,
+            workspaceId,
+            name: "Nubank atualizado",
+            closingDay: 31,
+            dueDay: 5,
+            holder: "Marina",
+            lastFour: "1234",
+            limit: { currency: "BRL", minor: "100000" },
+            archived: false,
+            version: 1,
+          },
+        };
+      },
+      archiveCard: async () => ({
+        replayed: false,
+        card: {
+          id: cardId,
+          workspaceId,
+          name: "Nubank atualizado",
+          closingDay: 31,
+          dueDay: 5,
+          holder: "Marina",
+          lastFour: "1234",
+          limit: { currency: "BRL", minor: "100000" },
+          archived: true,
+          version: 2,
+        },
+      }),
       closeStatement: async () => ({
         id: statementId,
         workspaceId,
@@ -402,6 +442,53 @@ describe("finance HTTP composition", () => {
       items: [expect.objectContaining({ id: cardId, name: "Nubank" })],
       page: { nextCursor: null, hasMore: false },
     });
+
+    const missingCardVersion = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/cards/${cardId}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "card-update-route-002",
+        },
+        body: JSON.stringify({ closingDay: 31 }),
+      },
+    );
+    expect(missingCardVersion.status).toBe(428);
+
+    const updatedCard = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/cards/${cardId}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "card-update-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ closingDay: 31, dueDay: 5, holder: "Marina" }),
+      },
+    );
+    expect(updatedCard.status).toBe(200);
+    expect(receivedCardUpdate).toEqual({
+      input: { closingDay: 31, dueDay: 5, holder: "Marina" },
+      expectedVersion: 0,
+    });
+    expect(updatedCard.headers.get("etag")).toBe('"v1"');
+    await expect(updatedCard.json()).resolves.toMatchObject({ name: "Nubank atualizado" });
+
+    const archivedCard = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/cards/${cardId}/archive`,
+      {
+        method: "POST",
+        headers: {
+          "idempotency-key": "card-archive-route-001",
+          "if-match": '"v1"',
+        },
+      },
+    );
+    expect(archivedCard.status).toBe(200);
+    expect(archivedCard.headers.get("etag")).toBe('"v2"');
+    await expect(archivedCard.json()).resolves.toMatchObject({ archived: true });
 
     const statements = await app.request(
       `http://localhost/v1/workspaces/${workspaceId}/statements?cardId=${cardId}`,
