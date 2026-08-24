@@ -184,6 +184,71 @@ describe("finance adapter", () => {
     ).resolves.toMatchObject({ id: "transaction-reversed", state: "canceled" });
   });
 
+  it("updates card configuration with an If-Match precondition", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe("/v1/workspaces/workspace/cards/card-1");
+      expect(init?.method).toBe("PATCH");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^web-/);
+      expect(JSON.parse(String(init?.body))).toEqual({ closingDay: 12 });
+      return Response.json({
+        id: "card-1",
+        workspaceId: "workspace",
+        name: "Principal",
+        closingDay: 12,
+        dueDay: 17,
+        holder: null,
+        lastFour: null,
+        limit: null,
+        archived: false,
+        version: 4,
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const card = {
+      id: "card-1",
+      workspaceId: "workspace",
+      name: "Principal",
+      closingDay: 10,
+      dueDay: 17,
+      holder: null,
+      lastFour: null,
+      limit: null,
+      archived: false,
+      version: 3,
+    } satisfies import("./finance").CreditCard;
+
+    await expect(adapter.updateCard("workspace", card, { closingDay: 12 })).resolves.toMatchObject({
+      closingDay: 12,
+      version: 4,
+    });
+  });
+
+  it("archives cards through the versioned command endpoint", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe("/v1/workspaces/workspace/cards/card-1/archive");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v4"');
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^web-/);
+      return Response.json({ id: "card-1", archived: true, version: 5 });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    await expect(
+      adapter.archiveCard("workspace", {
+        id: "card-1",
+        workspaceId: "workspace",
+        name: "Principal",
+        closingDay: 10,
+        dueDay: 17,
+        holder: null,
+        lastFour: null,
+        limit: null,
+        archived: false,
+        version: 4,
+      }),
+    ).resolves.toMatchObject({ archived: true, version: 5 });
+  });
+
   it("serializes timeline filters and cursor in the API request", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       expect(input).toBe(
@@ -284,6 +349,40 @@ describe("finance adapter", () => {
     await expect(
       adapter.reverseTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", created),
     ).resolves.toMatchObject({ id: created.id, state: "canceled" });
+  });
+
+  it("preserves omitted card fields and enforces fixture archive conflicts", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const [card] = await adapter.listCards(workspaceId);
+    if (!card) throw new Error("fixture card missing");
+
+    await expect(adapter.updateCard(workspaceId, card, { closingDay: 12 })).resolves.toMatchObject({
+      id: card.id,
+      name: card.name,
+      dueDay: card.dueDay,
+      closingDay: 12,
+      holder: card.holder,
+      version: card.version + 1,
+    });
+    await expect(adapter.updateCard(workspaceId, card, { name: "stale" })).rejects.toMatchObject({
+      status: 412,
+      currentVersion: card.version + 1,
+    });
+    const updated = (await adapter.listCards(workspaceId)).find((value) => value.id === card.id);
+    if (!updated) throw new Error("updated fixture card missing");
+    await expect(adapter.archiveCard(workspaceId, updated)).rejects.toMatchObject({ status: 409 });
+
+    const cleanWorkspace = "workspace-without-statement";
+    const cleanCard = await adapter.createCard(cleanWorkspace, {
+      name: "Reserva",
+      closingDay: 5,
+      dueDay: 12,
+    });
+    await expect(adapter.archiveCard(cleanWorkspace, cleanCard)).resolves.toMatchObject({
+      archived: true,
+      version: 1,
+    });
   });
 
   it("reuses an explicit reverse key and updates the fixture invoice totals", async () => {

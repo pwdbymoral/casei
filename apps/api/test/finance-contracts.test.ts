@@ -7,6 +7,7 @@ import {
   safeToSpendQuerySchema,
   settleTransactionSchema,
   transactionListQuerySchema,
+  updateCreditCardSchema,
 } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 
@@ -102,5 +103,18 @@ describe("finance contracts", () => {
     expect(() =>
       insightWindowQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
     ).toThrow();
+  });
+
+  it("accepts partial card configuration updates and preserves explicit clearing", () => {
+    expect(updateCreditCardSchema.parse({ closingDay: 31, holder: null, limit: null })).toEqual({
+      closingDay: 31,
+      holder: null,
+      limit: null,
+    });
+    expect(() => updateCreditCardSchema.parse({})).toThrow();
+    expect(() => updateCreditCardSchema.parse({ lastFour: "123" })).toThrow();
+    expect(() => updateCreditCardSchema.parse({ limit: { currency: "BRL", minor: "-1" } })).toThrow(
+      "greater than or equal to zero",
+    );
   });
 });
