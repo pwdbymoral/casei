@@ -322,6 +322,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
                     value={draft.initialBalanceMinor}
                     onChange={(initialBalanceMinor) => updateDraft({ initialBalanceMinor })}
                     error={errors.initialBalanceMinor}
+                    currency={draft.currency}
                   />
                 ) : null}
               </FieldGroup>

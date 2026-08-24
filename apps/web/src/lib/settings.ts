@@ -26,6 +26,13 @@ export type WorkspacePreferences = {
 
 export type WorkspacePreferencesDraft = Omit<WorkspacePreferences, "workspaceId" | "version">;
 
+export type PreferencesPreviewState = {
+  /** The exact values rendered in the confirmation summary and sent on confirm. */
+  payload: WorkspacePreferencesDraft;
+  /** Preview is a modal-like confirmation state: draft fields must not be edited. */
+  fieldsDisabled: true;
+};
+
 /** Captures the exact values shown in the confirmation preview. */
 export function snapshotPreferencesDraft(
   draft: WorkspacePreferencesDraft,
@@ -36,6 +43,30 @@ export function snapshotPreferencesDraft(
     timeZone: draft.timeZone,
     safetyMarginMinor: draft.safetyMarginMinor,
   };
+}
+
+export function createPreferencesPreviewState(
+  draft: WorkspacePreferencesDraft,
+): PreferencesPreviewState {
+  return {
+    payload: snapshotPreferencesDraft(draft),
+    fieldsDisabled: true,
+  };
+}
+
+export function preferencesFormFieldsDisabled(
+  isOwner: boolean,
+  busy: boolean,
+  preview: PreferencesPreviewState | null,
+): boolean {
+  return !isOwner || busy || preview !== null;
+}
+
+/** Clones the reviewed values so confirm cannot observe later draft mutations. */
+export function confirmedPreferencesPayload(
+  preview: PreferencesPreviewState,
+): WorkspacePreferencesDraft {
+  return snapshotPreferencesDraft(preview.payload);
 }
 
 export function preferenceChangeSummary(

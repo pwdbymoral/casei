@@ -58,6 +58,7 @@ export interface WorkspaceSummaryView {
   role: WorkspaceRole;
   locale: "pt-BR";
   timeZone: string;
+  currency: string;
   status: "active" | "deletion_pending" | "deactivated";
   version: number;
 }
@@ -200,7 +201,7 @@ export class IdentityService {
         const userRow = user.rows[0];
         if (!userRow) throw new IdentityNotFoundError();
         const memberships = await client.query<WorkspaceSummaryRow>(
-          `SELECT w.id, w.name, w.status, w.version, m.role, p.timezone
+          `SELECT w.id, w.name, w.status, w.version, m.role, p.timezone, p.currency_code
              FROM membership m
              JOIN workspace w ON w.id = m.workspace_id
              JOIN workspace_preference p ON p.workspace_id = w.id
@@ -550,7 +551,7 @@ export class IdentityService {
               actor.userId,
             ]);
             const existing = await client.query<WorkspaceSummaryRow>(
-              `SELECT w.id, w.name, w.status, w.version, m.role, p.timezone
+              `SELECT w.id, w.name, w.status, w.version, m.role, p.timezone, p.currency_code
                  FROM membership m
                  JOIN workspace w ON w.id = m.workspace_id
                  JOIN workspace_preference p ON p.workspace_id = w.id
@@ -608,6 +609,7 @@ export class IdentityService {
                 status: row.status,
                 role: "owner",
                 timezone: parsed.timeZone,
+                currency_code: parsed.currency,
                 version: row.version,
               },
             };
@@ -624,6 +626,7 @@ export class IdentityService {
         role: "owner",
         locale: "pt-BR",
         timeZone: String(result.response.timezone),
+        currency: String(result.response.currency_code),
       },
     };
   }
@@ -762,9 +765,10 @@ export class IdentityService {
             workspace_status: string;
             workspace_version: number;
             timezone: string;
+            currency_code: string;
           }
         >(
-          `SELECT i.*, w.name AS workspace_name, w.status AS workspace_status, w.version AS workspace_version, p.timezone
+          `SELECT i.*, w.name AS workspace_name, w.status AS workspace_status, w.version AS workspace_version, p.timezone, p.currency_code
              FROM workspace_invitation i
              JOIN workspace w ON w.id = i.workspace_id
              JOIN workspace_preference p ON p.workspace_id = w.id
@@ -783,6 +787,7 @@ export class IdentityService {
                 status: invite.workspace_status,
                 role: invite.role,
                 timezone: invite.timezone,
+                currency_code: invite.currency_code,
                 version: invite.workspace_version,
               }),
             };
@@ -843,6 +848,7 @@ export class IdentityService {
             status: invite.workspace_status,
             role: invite.role,
             timezone: invite.timezone,
+            currency_code: invite.currency_code,
             version: invite.workspace_version,
           }),
         };
@@ -1452,6 +1458,7 @@ interface WorkspaceSummaryRow {
   status: string;
   role: WorkspaceRole;
   timezone: string;
+  currency_code: string;
   version: number;
 }
 
@@ -1523,6 +1530,7 @@ function toWorkspaceSummary(row: WorkspaceSummaryRow): WorkspaceSummaryView {
     role: row.role,
     locale: "pt-BR",
     timeZone: row.timezone,
+    currency: row.currency_code,
     status: row.status as WorkspaceSummaryView["status"],
     version: row.version,
   };

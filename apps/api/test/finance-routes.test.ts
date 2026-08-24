@@ -136,6 +136,53 @@ describe("finance HTTP composition", () => {
     expect(missingVersion.status).toBe(428);
   });
 
+  it("passes timeline filters and cursor through the scoped route", async () => {
+    let receivedQuery: unknown;
+    const fakeService = {
+      listTransactions: async (_scope: unknown, query: unknown) => {
+        receivedQuery = query;
+        return {
+          items: [],
+          nextCursor: "next-cursor",
+          hasMore: true,
+        };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions?search=mercado&from=2026-08-01&to=2026-08-31&state=posted&kind=expense&limit=25&cursor=cursor-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(receivedQuery).toEqual({
+      search: "mercado",
+      from: "2026-08-01",
+      to: "2026-08-31",
+      state: "posted",
+      kind: "expense",
+      limit: 25,
+      cursor: "cursor-1",
+    });
+    await expect(response.json()).resolves.toEqual({
+      items: [],
+      page: { nextCursor: "next-cursor", hasMore: true },
+    });
+  });
+
   it("lists cards and statements and closes an open statement with a version", async () => {
     const fakeService = {
       listCards: async () => [

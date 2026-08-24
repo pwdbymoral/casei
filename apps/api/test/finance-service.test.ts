@@ -107,4 +107,91 @@ describe("finance command guards", () => {
     expect(itemQuery).toContain("t.created_at > $4::timestamptz");
     expect(itemQuery).toContain("LIMIT $6");
   });
+
+  it("filters and pages the timeline with a stable descending cursor", async () => {
+    const transactionOne = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ac",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      kind: "expense",
+      state: "posted",
+      amount_minor: "100",
+      settled_minor: "100",
+      currency_code: "BRL",
+      occurred_on: "2026-08-23",
+      due_on: null,
+      posted_on: new Date("2026-08-23T12:00:00.000Z"),
+      description: "Mercado",
+      category_id: null,
+      card_id: null,
+      statement_id: null,
+      recurrence_id: null,
+      created_at: new Date("2026-08-23T12:00:00.000Z"),
+      version: 0,
+    };
+    const transactionTwo = {
+      ...transactionOne,
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      description: "Mercado 2",
+      created_at: new Date("2026-08-23T12:01:00.000Z"),
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("SELECT id, workspace_id, kind")) {
+          return { rows: [transactionTwo, transactionOne] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const pool = { connect: vi.fn(async () => client) };
+    const service = new FinanceService(pool as never, {
+      cursorSecret: "test-secret-that-is-long-enough",
+    });
+    const scope = {
+      workspaceId: transactionOne.workspace_id,
+      actorId: "user-1",
+      correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      role: "member" as const,
+    };
+
+    const first = await service.listTransactions(scope, {
+      search: "mercado",
+      from: "2026-08-01",
+      to: "2026-08-31",
+      kind: "expense",
+      limit: 1,
+    });
+
+    expect(first.items).toHaveLength(1);
+    expect(first.items[0]?.description).toBe("Mercado 2");
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).not.toBeNull();
+    const firstQuery = client.query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => typeof sql === "string" && sql.includes("ORDER BY occurred_on DESC"));
+    expect(firstQuery).toContain("t.description ILIKE");
+    expect(firstQuery).toContain("t.occurred_on >=");
+    expect(firstQuery).toContain("t.kind =");
+
+    client.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT id, workspace_id, kind")) return { rows: [transactionOne] };
+      return { rows: [] };
+    });
+    const second = await service.listTransactions(scope, {
+      search: "mercado",
+      from: "2026-08-01",
+      to: "2026-08-31",
+      kind: "expense",
+      limit: 1,
+      cursor: first.nextCursor ?? undefined,
+    });
+    expect(second.items[0]?.description).toBe("Mercado");
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeNull();
+    const secondQuery = client.query.mock.calls
+      .map(([sql]) => sql)
+      .filter((sql) => typeof sql === "string" && sql.includes("ORDER BY occurred_on DESC"))
+      .at(-1);
+    expect(secondQuery).toContain("t.created_at <");
+  });
 });

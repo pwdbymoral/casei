@@ -1,6 +1,6 @@
 import { headers } from "next/headers";
 import { configuredApiOrigin } from "./api-origin";
-import type { WorkspaceSession } from "./workspaces";
+import { normalizeWorkspaceSession, type WorkspaceSession } from "./workspaces";
 
 /** Server guard: forwards only the incoming session cookie to the API boundary. */
 export async function getServerWorkspaceSession(): Promise<WorkspaceSession | null> {
@@ -16,11 +16,8 @@ export async function getServerWorkspaceSession(): Promise<WorkspaceSession | nu
     });
     if (!response.ok) return null;
     const body = (await response.json()) as Omit<WorkspaceSession, "activeWorkspaceId">;
-    const normalizedWorkspaces = body.workspaces.map((workspace) => ({
-      ...workspace,
-      status: workspace.status ?? "active",
-      version: workspace.version ?? 0,
-    }));
+    const normalized = normalizeWorkspaceSession(body);
+    const normalizedWorkspaces = normalized.workspaces;
     const activeWorkspaceId =
       normalizedWorkspaces.find(({ status }) => status === "active")?.id ??
       normalizedWorkspaces[0]?.id ??

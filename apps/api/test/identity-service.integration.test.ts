@@ -535,6 +535,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
             id: workspaceId,
             status: "deletion_pending",
             role: "owner",
+            currency: "BRL",
           }),
         ]),
       );

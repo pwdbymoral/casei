@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   authenticatedSettingsAdapter,
+  confirmedPreferencesPayload,
+  createPreferencesPreviewState,
   preferenceChangeSummary,
+  preferencesFormFieldsDisabled,
   settingsErrorMessage,
   snapshotPreferencesDraft,
 } from "./settings";
@@ -160,6 +163,44 @@ describe("settings HTTP boundary", () => {
       currency: "BRL",
       timeZone: "America/Fortaleza",
       safetyMarginMinor: "0",
+    });
+  });
+
+  it("locks preference fields in preview and confirms the exact reviewed payload", () => {
+    const current = {
+      workspaceId: "workspace-1",
+      name: "Casa",
+      currency: "BRL",
+      timeZone: "America/Fortaleza",
+      safetyMarginMinor: "0",
+      version: 2,
+    };
+    const draft = {
+      name: "Casa nova",
+      currency: "USD",
+      timeZone: "America/Sao_Paulo",
+      safetyMarginMinor: "1200",
+    };
+    const preview = createPreferencesPreviewState(draft);
+
+    expect(preview.fieldsDisabled).toBe(true);
+    expect(preferencesFormFieldsDisabled(true, false, preview)).toBe(true);
+    expect(preferencesFormFieldsDisabled(true, false, null)).toBe(false);
+    expect(preferenceChangeSummary(current, preview.payload)).toEqual([
+      "Nome: Casa → Casa nova",
+      "Moeda: BRL → USD (confirme que não há movimentos pendentes)",
+      "Fuso horário: America/Fortaleza → America/Sao_Paulo (datas futuras serão exibidas neste fuso)",
+      "Margem de segurança: 0 → 1200 centavos",
+    ]);
+    expect(confirmedPreferencesPayload(preview)).toEqual(preview.payload);
+
+    draft.name = "Rascunho alterado depois da prévia";
+    draft.currency = "EUR";
+    expect(confirmedPreferencesPayload(preview)).toEqual({
+      name: "Casa nova",
+      currency: "USD",
+      timeZone: "America/Sao_Paulo",
+      safetyMarginMinor: "1200",
     });
   });
 });
