@@ -37,6 +37,7 @@ const shoppingItem = {
   note: null,
   purchased: false,
   purchasedAt: null,
+  expenseTransactionId: null,
   lastChangedBy: "user-1",
   version: 0,
 };
@@ -169,11 +170,17 @@ describe("stock HTTP boundary", () => {
           "idempotency-key": "shopping-purchase-0001",
           "if-match": '"v0"',
         },
-        body: JSON.stringify({ addToStock: false }),
+        body: JSON.stringify({
+          addToStock: false,
+          expenseTransactionId: "0190f3c8-2a10-7abc-8def-1234567890af",
+        }),
       },
     );
     expect(purchased.status).toBe(200);
-    expect(purchaseInput).toEqual({ addToStock: false });
+    expect(purchaseInput).toEqual({
+      addToStock: false,
+      expenseTransactionId: "0190f3c8-2a10-7abc-8def-1234567890af",
+    });
   });
 
   it("expõe preview e confirmação do cadastro em lote com modo explícito", async () => {

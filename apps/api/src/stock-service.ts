@@ -80,6 +80,7 @@ export interface StockShoppingItemView {
   note: string | null;
   purchased: boolean;
   purchasedAt: string | null;
+  expenseTransactionId: string | null;
   lastChangedBy: string | null;
   version: number;
 }
@@ -181,6 +182,7 @@ interface ShoppingItemRow {
   note: string | null;
   purchased: boolean;
   purchased_at: Date | string | null;
+  expense_transaction_id: string | null;
   last_changed_by: string | null;
   version: number;
 }
@@ -666,7 +668,8 @@ export class StockService {
                  END AS effective_quantity_milli,
                  COALESCE(p.unit, i.unit) AS unit,
                  COALESCE(p.unit_label, i.unit_label) AS unit_label,
-                 i.note, i.purchased, i.purchased_at, i.last_changed_by, i.version
+                 i.note, i.purchased, i.purchased_at, i.expense_transaction_id,
+                 i.last_changed_by, i.version
             FROM shopping_item i
             LEFT JOIN stock_product p
               ON p.workspace_id = i.workspace_id AND p.id = i.product_id
@@ -686,6 +689,7 @@ export class StockService {
                  END AS effective_quantity_milli,
                  p.unit, p.unit_label, p.note,
                  false AS purchased, NULL::timestamptz AS purchased_at,
+                 NULL::uuid AS expense_transaction_id,
                  NULL::text AS last_changed_by, p.version
             FROM stock_product p
            WHERE p.workspace_id = $1 AND p.archived = false AND p.shopping_auto = true
@@ -715,7 +719,8 @@ export class StockService {
         SELECT shopping.id, shopping.workspace_id, shopping.product_id, shopping.name,
                shopping.source, shopping.quantity_milli, shopping.effective_quantity_milli,
                shopping.unit, shopping.unit_label, shopping.note, shopping.purchased,
-               shopping.purchased_at, shopping.last_changed_by, shopping.version
+               shopping.purchased_at, shopping.expense_transaction_id,
+               shopping.last_changed_by, shopping.version
           FROM (
             SELECT * FROM visible_items
             UNION ALL
@@ -774,7 +779,7 @@ export class StockService {
              ON CONFLICT (workspace_id, name_normalized) WHERE purchased = false DO NOTHING
              RETURNING id, workspace_id, product_id, name, source, quantity_milli,
                        quantity_milli AS effective_quantity_milli, unit, unit_label, note,
-                       purchased, purchased_at, last_changed_by, version`,
+                       purchased, purchased_at, expense_transaction_id, last_changed_by, version`,
             [
               scope.workspaceId,
               normalized.display,
@@ -842,6 +847,10 @@ export class StockService {
           assertExpectedVersion(current.version, expectedVersion);
           if (current.purchased)
             throw new StockConflictError("Este item já foi marcado como comprado.");
+          const expenseTransactionId = parsed.expenseTransactionId ?? null;
+          if (expenseTransactionId) {
+            await assertPurchasableExpense(client, scope, expenseTransactionId);
+          }
           const automaticProduct =
             current.source === "automatic" && current.product_id
               ? await lockProduct(client, scope, current.product_id)
@@ -905,19 +914,20 @@ export class StockService {
           }
           const updated = await client.query<ShoppingItemRow>(
             `UPDATE shopping_item
-                SET purchased = true, purchased_at = now(), purchased_by = $3,
-                    last_changed_by = $3, version = version + 1, updated_at = now()
-              WHERE workspace_id = $1 AND id = $2 AND version = $4
+                SET purchased = true, purchased_at = now(), expense_transaction_id = $3,
+                    purchased_by = $4, last_changed_by = $4, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $5
               RETURNING id, workspace_id, product_id, name, source, quantity_milli,
                         quantity_milli AS effective_quantity_milli, unit, unit_label, note,
-                        purchased, purchased_at, last_changed_by, version`,
-            [scope.workspaceId, current.id, scope.actorId, expectedVersion],
+                        purchased, purchased_at, expense_transaction_id, last_changed_by, version`,
+            [scope.workspaceId, current.id, expenseTransactionId, scope.actorId, expectedVersion],
           );
           const row = updated.rows[0];
           if (!row) throw new StockVersionConflictError(current.version);
           await insertShoppingEvent(client, scope, current.id, "purchased", {
             addToStock: parsed.addToStock,
             quantity: parsed.quantity ?? null,
+            expenseTransactionId,
           });
           if (parsed.addToStock && productId)
             await syncAutomaticShoppingItems(client, scope, productId);
@@ -1046,6 +1056,31 @@ async function lockProduct(
   return row;
 }
 
+/**
+ * A purchase may reference an existing expense only when the caller makes
+ * that choice explicitly. This validation intentionally does not create,
+ * mutate, or infer any finance transaction.
+ */
+async function assertPurchasableExpense(
+  client: PoolClient,
+  scope: StockScope,
+  transactionId: string,
+): Promise<void> {
+  const result = await client.query<{ kind: string; state: string }>(
+    `SELECT kind, state
+       FROM finance_transaction
+      WHERE workspace_id = $1 AND id = $2
+      FOR SHARE`,
+    [scope.workspaceId, transactionId],
+  );
+  const row = result.rows[0];
+  if (row?.kind !== "expense" || row.state === "canceled") {
+    throw new StockConflictError(
+      "Vincule uma despesa financeira ativa deste espaço para concluir a compra.",
+    );
+  }
+}
+
 async function syncAutomaticShoppingItems(
   client: PoolClient,
   scope: StockScope,
@@ -1123,7 +1158,8 @@ async function findActiveShoppingItem(
     `SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
             i.quantity_milli, i.quantity_milli AS effective_quantity_milli,
             COALESCE(p.unit, i.unit) AS unit, COALESCE(p.unit_label, i.unit_label) AS unit_label,
-            i.note, i.purchased, i.purchased_at, i.last_changed_by, i.version
+            i.note, i.purchased, i.purchased_at, i.expense_transaction_id,
+            i.last_changed_by, i.version
        FROM shopping_item i
        LEFT JOIN stock_product p ON p.workspace_id = i.workspace_id AND p.id = i.product_id
       WHERE i.workspace_id = $1 AND i.name_normalized = $2 AND i.purchased = false
@@ -1195,7 +1231,8 @@ async function queryShoppingItem(
     `SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
             i.quantity_milli, i.quantity_milli AS effective_quantity_milli,
             COALESCE(p.unit, i.unit) AS unit, COALESCE(p.unit_label, i.unit_label) AS unit_label,
-            i.note, i.purchased, i.purchased_at, i.last_changed_by, i.version
+            i.note, i.purchased, i.purchased_at, i.expense_transaction_id,
+            i.last_changed_by, i.version
        FROM shopping_item i
        LEFT JOIN stock_product p ON p.workspace_id = i.workspace_id AND p.id = i.product_id
       WHERE i.workspace_id = $1 AND i.id = $2
@@ -1242,7 +1279,7 @@ async function lockOrMaterializeAutomaticItem(
      ON CONFLICT (workspace_id, name_normalized) WHERE purchased = false DO NOTHING
      RETURNING id, workspace_id, product_id, name, source, quantity_milli,
                quantity_milli AS effective_quantity_milli, unit, unit_label, note,
-               purchased, purchased_at, last_changed_by, version`,
+               purchased, purchased_at, expense_transaction_id, last_changed_by, version`,
     [
       scope.workspaceId,
       product.id,
@@ -1562,6 +1599,7 @@ function toShoppingItemView(row: ShoppingItemRow): StockShoppingItemView {
     note: row.note,
     purchased: row.purchased,
     purchasedAt,
+    expenseTransactionId: row.expense_transaction_id,
     lastChangedBy: row.last_changed_by,
     version: row.version,
   };

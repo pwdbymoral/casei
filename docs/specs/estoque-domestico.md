@@ -70,6 +70,17 @@ atual, enquanto `null` limpa campos anuláveis explicitamente. Uma projeção au
 foi materializada não possui autoria de lista; nesse caso `lastChangedBy` é `null`, e nunca o usuário
 que apenas fez a leitura.
 
+### Contrato da implementação STOCK-006
+
+`POST /stock/shopping/:itemId/purchased` aceita `expenseTransactionId` opcional. Quando informado,
+o comando valida, na mesma transação da conclusão, uma transação `expense` não cancelada do mesmo
+espaço e grava somente a referência. O Casei não cria, altera, estorna ou escolhe uma despesa
+automaticamente, não compara o valor da despesa com os itens e não distribui o valor por produto.
+O vínculo é exposto como `expenseTransactionId` na linha concluída e não pode ser alterado por uma
+segunda conclusão; reprocessamentos usam a idempotência do comando. Sem o campo (ou com `null`), a
+conclusão não consulta nem cria lançamentos financeiros. A chave estrangeira composta impede vínculo
+entre espaços e o purge autorizado do espaço remove a referência antes da cascata.
+
 ## Busca e uso no mercado
 
 - Busca por nome tolera caixa e acentos e retorna primeiro faltantes/itens da lista.

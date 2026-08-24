@@ -1271,6 +1271,14 @@ export class IdentityService {
           workspaceId,
         ]);
         await this.deleteInvitationEmailArtifacts(client, workspaceId);
+        // Shopping purchase links are historical references to finance
+        // transactions. Clear the reverse reference before the workspace
+        // cascade so the scoped RESTRICT FK does not block authorized purge.
+        await client.query(
+          `UPDATE shopping_item SET expense_transaction_id = NULL
+             WHERE workspace_id = $1 AND expense_transaction_id IS NOT NULL`,
+          [workspaceId],
+        );
         await client.query(`SELECT app.purge_workspace_goals($1)::int`, [workspaceId]);
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
