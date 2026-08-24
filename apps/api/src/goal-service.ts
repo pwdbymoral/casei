@@ -1,5 +1,6 @@
 import {
   createGoalSchema,
+  domainIdSchema,
   goalAllocateSchema,
   goalReleaseSchema,
   goalSpendSchema,
@@ -26,9 +27,11 @@ import {
   type FinanceScope,
   VersionConflictError,
 } from "./finance-service.js";
+import { decodeCursor, encodeCursor, InvalidCursorError } from "./http/cursor.js";
 
 export interface GoalServiceOptions {
   applicationRole?: string;
+  cursorSecret?: string;
 }
 
 export interface GoalView {
@@ -72,6 +75,7 @@ interface GoalRow {
   status: GoalView["status"];
   note: string | null;
   version: number;
+  created_at: string | Date;
 }
 
 interface GoalTotals {
@@ -89,16 +93,23 @@ interface GoalMovementRow {
   transaction_id: string | null;
   occurred_on: string;
   note: string | null;
+  created_at: string | Date;
 }
 
 export class GoalService {
   private readonly applicationRole: string;
+  private readonly cursorSecret: string;
 
   constructor(
     private readonly pool: Pool,
     options: GoalServiceOptions = {},
   ) {
     this.applicationRole = options.applicationRole ?? "casei_app";
+    const cursorSecret = options.cursorSecret ?? process.env.CASEI_CURSOR_SECRET;
+    if (process.env.NODE_ENV === "production" && !cursorSecret) {
+      throw new Error("CASEI_CURSOR_SECRET is required in production");
+    }
+    this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
   }
 
   async createGoal(
@@ -144,28 +155,49 @@ export class GoalService {
   async listGoals(
     scope: FinanceScope,
     input: unknown = {},
-  ): Promise<{ items: GoalView[]; nextCursor: null; hasMore: boolean }> {
+  ): Promise<{ items: GoalView[]; nextCursor: string | null; hasMore: boolean }> {
     const parsed = paginationQuerySchema.parse(input);
     return this.withScopedClient(scope, async (client) => {
+      const values: unknown[] = [scope.workspaceId];
+      const conditions = ["g.workspace_id = $1"];
+      const cursor = parsed.cursor ? decodeGoalCursor(parsed.cursor, this.cursorSecret) : null;
+      if (cursor) {
+        values.push(cursor[0], cursor[1]);
+        conditions.push(
+          `(g.created_at < $${values.length - 1}::timestamptz OR (g.created_at = $${values.length - 1}::timestamptz AND g.id < $${values.length}::uuid))`,
+        );
+      }
+      values.push(parsed.limit + 1);
       const result = await client.query<GoalRow & GoalTotals>(
         `SELECT g.id, g.workspace_id, g.name, g.target_minor, g.currency_code, g.deadline,
-                g.priority, g.status, g.note, g.version,
+                g.priority, g.status, g.note, g.version, g.created_at,
                 COALESCE(SUM(CASE WHEN m.kind = 'allocate' THEN m.amount_minor ELSE 0 END), 0) AS allocated_minor,
                 COALESCE(SUM(CASE WHEN m.kind = 'release' THEN m.amount_minor ELSE 0 END), 0) AS released_minor,
                 COALESCE(SUM(CASE WHEN m.kind = 'spend' THEN m.amount_minor ELSE 0 END), 0) AS spent_minor
            FROM goal g LEFT JOIN goal_reservation_movement m ON m.workspace_id = g.workspace_id AND m.goal_id = g.id
-          WHERE g.workspace_id = $1
+          WHERE ${conditions.join(" AND ")}
           GROUP BY g.id
-          ORDER BY g.status, g.deadline NULLS LAST, g.created_at DESC, g.id DESC
-          LIMIT $2`,
-        [scope.workspaceId, parsed.limit + 1],
+          ORDER BY g.created_at DESC, g.id DESC
+          LIMIT $${values.length}`,
+        values,
       );
       const hasMore = result.rows.length > parsed.limit;
       const rows = hasMore ? result.rows.slice(0, parsed.limit) : result.rows;
       const walletBalance = await this.walletBalance(client, scope.workspaceId);
+      const last = rows.at(-1);
+      const nextCursor =
+        hasMore && last?.created_at
+          ? encodeCursor(
+              {
+                ordering: goalCursorOrdering,
+                position: [new Date(last.created_at).toISOString(), last.id],
+              },
+              this.cursorSecret,
+            )
+          : null;
       return {
         items: rows.map((row) => toGoalView(row, row, walletBalance)),
-        nextCursor: null,
+        nextCursor,
         hasMore,
       };
     });
@@ -181,20 +213,43 @@ export class GoalService {
     scope: FinanceScope,
     goalId: string,
     input: unknown = {},
-  ): Promise<{ items: GoalMovementView[]; nextCursor: null; hasMore: boolean }> {
+  ): Promise<{ items: GoalMovementView[]; nextCursor: string | null; hasMore: boolean }> {
     const parsed = paginationQuerySchema.parse(input);
     return this.withScopedClient(scope, async (client) => {
       await this.requireGoal(client, scope.workspaceId, goalId);
+      const values: unknown[] = [scope.workspaceId, goalId];
+      const conditions = ["workspace_id = $1", "goal_id = $2"];
+      const cursor = parsed.cursor
+        ? decodeGoalMovementCursor(parsed.cursor, this.cursorSecret)
+        : null;
+      if (cursor) {
+        values.push(cursor[0], cursor[1], cursor[2]);
+        conditions.push(
+          `(occurred_on < $${values.length - 2}::date OR (occurred_on = $${values.length - 2}::date AND created_at < $${values.length - 1}::timestamptz) OR (occurred_on = $${values.length - 2}::date AND created_at = $${values.length - 1}::timestamptz AND id < $${values.length}::uuid))`,
+        );
+      }
+      values.push(parsed.limit + 1);
       const result = await client.query<GoalMovementRow>(
-        `SELECT id, goal_id, kind, amount_minor, currency_code, transaction_id, occurred_on, note
+        `SELECT id, goal_id, kind, amount_minor, currency_code, transaction_id, occurred_on, note, created_at
            FROM goal_reservation_movement
-          WHERE workspace_id = $1 AND goal_id = $2
-          ORDER BY occurred_on DESC, created_at DESC, id DESC LIMIT $3`,
-        [scope.workspaceId, goalId, parsed.limit + 1],
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY occurred_on DESC, created_at DESC, id DESC LIMIT $${values.length}`,
+        values,
       );
       const hasMore = result.rows.length > parsed.limit;
       const rows = hasMore ? result.rows.slice(0, parsed.limit) : result.rows;
-      return { items: rows.map(toMovementView), nextCursor: null, hasMore };
+      const last = rows.at(-1);
+      const nextCursor =
+        hasMore && last?.created_at
+          ? encodeCursor(
+              {
+                ordering: goalMovementCursorOrdering,
+                position: [last.occurred_on, new Date(last.created_at).toISOString(), last.id],
+              },
+              this.cursorSecret,
+            )
+          : null;
+      return { items: rows.map(toMovementView), nextCursor, hasMore };
     });
   }
 
@@ -213,10 +268,12 @@ export class GoalService {
         key: idempotencyKey,
         request: { input: parsed, expectedVersion },
         execute: async () => {
+          const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
           const current = await this.lockGoal(client, scope.workspaceId, goalId);
           if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
           if (current.status === "canceled")
             throw new FinanceConflictError("Uma meta cancelada não pode ser editada.");
+          assertCurrency(current.currency_code, workspaceCurrency);
           if (parsed.target) assertCurrency(parsed.target.currency, current.currency_code);
           const fields: string[] = [];
           const values: unknown[] = [scope.workspaceId, goalId];
@@ -318,10 +375,12 @@ export class GoalService {
         key: idempotencyKey,
         request: { input: parsed, expectedVersion },
         execute: async () => {
+          const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
           const current = await this.lockGoal(client, scope.workspaceId, goalId);
           if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
           if (current.status === "paused" || current.status === "canceled")
             throw new FinanceConflictError("Esta meta não aceita gastos no estado atual.");
+          assertCurrency(current.currency_code, workspaceCurrency);
           assertCurrency(parsed.amount.currency, current.currency_code);
           const totals = await this.goalTotals(client, scope.workspaceId, goalId);
           const reserved = reservedFromTotals(totals);
@@ -475,6 +534,7 @@ export class GoalService {
         key: idempotencyKey,
         request: { amountInput, occurredOnInput, note, allowUncovered, expectedVersion },
         execute: async () => {
+          const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
           const current = await this.lockGoal(client, scope.workspaceId, goalId);
           if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
           if (
@@ -483,6 +543,7 @@ export class GoalService {
             (kind === "allocate" && current.status === "completed")
           )
             throw new FinanceConflictError("A meta não aceita esta reserva no estado atual.");
+          assertCurrency(current.currency_code, workspaceCurrency);
           assertCurrency(amountInput.currency, current.currency_code);
           const totals = await this.goalTotals(client, scope.workspaceId, goalId);
           const reserved = reservedFromTotals(totals);
@@ -490,9 +551,10 @@ export class GoalService {
           const occurredOn =
             occurredOnInput ?? (await this.workspaceToday(client, scope.workspaceId));
           if (kind === "allocate") {
+            const workspaceReserved = await this.workspaceReserved(client, scope.workspaceId);
             const walletBalance = await this.walletBalance(client, scope.workspaceId);
             goalAllocation({
-              reservedMinor: reserved,
+              reservedMinor: workspaceReserved,
               walletBalanceMinor: walletBalance,
               amountMinor: amount,
               allowUncovered,
@@ -599,9 +661,28 @@ export class GoalService {
     return BigInt(result.rows[0]?.balance_minor ?? 0);
   }
 
+  private async workspaceReserved(client: PoolClient, workspaceId: string): Promise<bigint> {
+    const result = await client.query<{ reserved_minor: string | bigint | null }>(
+      `SELECT COALESCE(SUM(CASE WHEN kind = 'allocate' THEN amount_minor
+                               WHEN kind IN ('release', 'spend') THEN -amount_minor
+                               ELSE 0 END), 0) AS reserved_minor
+         FROM goal_reservation_movement
+        WHERE workspace_id = $1`,
+      [workspaceId],
+    );
+    const reserved = BigInt(result.rows[0]?.reserved_minor ?? 0);
+    if (reserved < 0n)
+      throw new FinanceConflictError("As reservas do espaço estão inconsistentes.");
+    return reserved;
+  }
+
   private async workspaceCurrency(client: PoolClient, workspaceId: string): Promise<string> {
     const result = await client.query<{ currency_code: string }>(
-      `SELECT currency_code FROM workspace_preference WHERE workspace_id = $1 FOR UPDATE`,
+      `SELECT p.currency_code
+         FROM workspace_preference p
+         JOIN workspace w ON w.id = p.workspace_id
+        WHERE p.workspace_id = $1
+        FOR UPDATE OF w, p`,
       [workspaceId],
     );
     return result.rows[0]?.currency_code ?? "BRL";
@@ -766,6 +847,49 @@ export class GoalService {
 
 function assertCurrency(actual: string, expected: string): void {
   if (actual !== expected) throw new FinanceConflictError("A moeda deve ser a mesma do espaço.");
+}
+
+const goalCursorOrdering = "created_at,id";
+const goalMovementCursorOrdering = "occurred_on,created_at,id";
+
+function decodeGoalCursor(cursor: string, secret: string): [string, string] {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== goalCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 2 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [createdAt, id] = position as [string, string];
+  if (Number.isNaN(Date.parse(createdAt)) || !domainIdSchema.safeParse(id).success) {
+    throw new InvalidCursorError();
+  }
+  return [createdAt, id];
+}
+
+function decodeGoalMovementCursor(cursor: string, secret: string): [string, string, string] {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== goalMovementCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 3 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [occurredOn, createdAt, id] = position as [string, string, string];
+  if (
+    !parseLocalDate(occurredOn).ok ||
+    Number.isNaN(Date.parse(createdAt)) ||
+    !domainIdSchema.safeParse(id).success
+  ) {
+    throw new InvalidCursorError();
+  }
+  return [occurredOn, createdAt, id];
 }
 
 function reservedFromTotals(totals: GoalTotals): bigint {

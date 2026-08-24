@@ -19,10 +19,11 @@ Uma meta possui nome, valor-alvo maior que zero, prazo opcional, prioridade, est
 - Excluir meta com histórico não apaga contribuições; cancela e preserva o histórico.
 
 No backend, `allocate`, `release` e `spend` são movimentos append-only. Reservar e retirar exigem
-versão e idempotência; reservar acima do saldo calculado exige `allowUncovered: true` e expõe o
-valor sem cobertura. Gastar exige reserva suficiente e publica uma despesa `wallet` vinculada à
-meta junto com o movimento `spend`, na mesma transação. O saldo reservado é sempre reconstruído
-pela soma dos movimentos, nunca por um cache mutável.
+versão e idempotência; a cobertura de uma nova alocação soma as reservas de todas as metas do
+espaço e usa o lock do espaço para serializar concorrência. Reservar acima do saldo calculado
+exige `allowUncovered: true` e expõe o valor sem cobertura. Gastar exige reserva suficiente e
+publica uma despesa `wallet` vinculada à meta junto com o movimento `spend`, na mesma transação.
+O saldo reservado é sempre reconstruído pela soma dos movimentos, nunca por um cache mutável.
 
 ## Ritmo e sugestão de contribuição
 

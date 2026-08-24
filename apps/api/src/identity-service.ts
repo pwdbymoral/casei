@@ -393,12 +393,18 @@ export class IdentityService {
               UNION ALL
            SELECT 1 FROM credit_card
               WHERE workspace_id = $1
+           UNION ALL
+           SELECT 1 FROM goal
+              WHERE workspace_id = $1
+           UNION ALL
+           SELECT 1 FROM goal_reservation_movement
+              WHERE workspace_id = $1
            ) AS exists`,
           [scope.workspaceId],
         );
         if (movement.rows[0]?.exists) {
           throw new IdentityConflictError(
-            "A moeda não pode ser alterada após registrar movimentações, compromissos ou cartões.",
+            "A moeda não pode ser alterada após registrar movimentações, compromissos, cartões ou metas.",
           );
         }
       }

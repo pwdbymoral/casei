@@ -211,6 +211,33 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         updatedPreferences.version,
       );
       expect(noMovementPreferences.currency).toBe("EUR");
+      const goal = await pool.query<{ id: string }>(
+        `INSERT INTO goal (workspace_id, name, target_minor, currency_code)
+         VALUES ($1, 'Meta de teste', 100, 'EUR') RETURNING id`,
+        [workspaceId],
+      );
+      const goalId = goal.rows[0]?.id;
+      expect(goalId).toBeTruthy();
+      if (!goalId) throw new Error("goal was not created");
+      await pool.query(
+        `INSERT INTO goal_reservation_movement
+          (workspace_id, goal_id, kind, amount_minor, currency_code, occurred_on)
+         VALUES ($1, $2, 'allocate', 100, 'EUR', '2030-01-01')`,
+        [workspaceId, goalId],
+      );
+      const goalPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          goalPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
       await pool.query(
         `INSERT INTO credit_card
           (workspace_id, name, closing_day, due_day, currency_code)

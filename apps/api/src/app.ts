@@ -138,6 +138,7 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
         options.finance.goalService ??
         new GoalService(options.finance.pool, {
           applicationRole: options.finance.applicationRole,
+          cursorSecret: options.finance.cursorSecret,
         }),
       scopeMiddleware: async (context, next) => {
         if (!actorMiddleware || !scopeMiddleware)

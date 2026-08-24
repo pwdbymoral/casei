@@ -41,6 +41,25 @@ describe("goal reservation subledger", () => {
     });
   });
 
+  it("uses the workspace aggregate when sequential goals compete for coverage", () => {
+    let workspaceReserved = 0n;
+    workspaceReserved = goalAllocation({
+      reservedMinor: workspaceReserved,
+      walletBalanceMinor: 100n,
+      amountMinor: 60n,
+      allowUncovered: false,
+    }).reservedMinor;
+    expect(workspaceReserved).toBe(60n);
+    expect(() =>
+      goalAllocation({
+        reservedMinor: workspaceReserved,
+        walletBalanceMinor: 100n,
+        amountMinor: 60n,
+        allowUncovered: false,
+      }),
+    ).toThrow(/cobertura/i);
+  });
+
   it("keeps coverage bounded and transitions completion from the target", () => {
     expect(calculateGoalCoverage(500n, 100n)).toEqual({ coveredMinor: 100n, uncoveredMinor: 400n });
     expect(calculateGoalCoverage(500n, -100n)).toEqual({ coveredMinor: 0n, uncoveredMinor: 500n });
