@@ -207,6 +207,34 @@ describe("finance adapter", () => {
     ).resolves.toEqual({ items: [], nextCursor: null, hasMore: false });
   });
 
+  it("loads transaction audit list and detail through scoped API paths", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      if (String(input).includes("/audit/")) {
+        return Response.json({
+          id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+          transactionId: "0190f3c8-2a10-7abc-8def-1234567890ac",
+          action: "transaction.created",
+          consequences: { ledgerEvents: [] },
+        });
+      }
+      expect(input).toBe(
+        "/v1/workspaces/workspace/transactions/transaction/audit?cursor=cursor-1&limit=10",
+      );
+      return Response.json({ items: [], page: { nextCursor: "next", hasMore: true } });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+
+    await expect(
+      adapter.listTransactionAudit("workspace", "transaction", {
+        cursor: "cursor-1",
+        limit: 10,
+      }),
+    ).resolves.toEqual({ items: [], nextCursor: "next", hasMore: true });
+    await expect(
+      adapter.getTransactionAudit("workspace", "transaction", "audit"),
+    ).resolves.toMatchObject({ action: "transaction.created" });
+  });
+
   it("keeps timeline filters in URL parameters and appends the next page", () => {
     const query = transactionQueryFromSearchParams(
       new URLSearchParams(

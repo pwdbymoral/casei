@@ -107,10 +107,46 @@ export interface StatementItemsPage {
   hasMore: boolean;
 }
 
+export interface FinanceAuditEventView {
+  id: string;
+  transactionId: string;
+  category: string;
+  action: string;
+  actorId: string | null;
+  occurredAt: string;
+  origin: string;
+  correlationId: string;
+  result: string;
+  reason: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
+
+export interface FinanceAuditLedgerEventView {
+  id: string;
+  eventType: string;
+  status: string;
+  occurredOn: string;
+  publishedAt: string | null;
+  reversedEventId: string | null;
+}
+
+export interface FinanceAuditDetailView extends FinanceAuditEventView {
+  consequences: { ledgerEvents: FinanceAuditLedgerEventView[] };
+}
+
+export interface FinanceAuditPage {
+  items: FinanceAuditEventView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
 type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const statementItemsCursorOrdering = "occurred_on,created_at,id";
 type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const transactionCursorOrdering = "occurred_on,created_at,id:desc";
+type FinanceAuditCursorPosition = [occurredAt: string, id: string];
+const financeAuditCursorOrdering = "occurred_at,id:desc";
 
 interface TransactionRow {
   id: string;
@@ -130,6 +166,21 @@ interface TransactionRow {
   recurrence_id: string | null;
   created_at?: Date | string;
   version: number;
+}
+
+interface FinanceAuditRow {
+  id: string;
+  transaction_id: string;
+  category: string;
+  action: string;
+  actor_id: string | null;
+  occurred_at: Date | string;
+  origin: string;
+  correlation_id: string;
+  result: string;
+  reason: string | null;
+  before_redacted: unknown;
+  after_redacted: unknown;
 }
 
 export class FinanceService {
@@ -248,6 +299,115 @@ export class FinanceService {
         [scope.workspaceId, id],
       );
       return result.rows[0] ? toTransactionView(result.rows[0]) : null;
+    });
+  }
+
+  async listTransactionAudit(
+    scope: FinanceScope,
+    transactionId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<FinanceAuditPage> {
+    return this.withScopedClient(scope, async (client) => {
+      const transaction = await client.query<{ id: string }>(
+        `SELECT id FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, transactionId],
+      );
+      if (!transaction.rows[0]) throw new FinanceNotFoundError();
+
+      const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+      const cursor = options.cursor
+        ? decodeFinanceAuditCursor(options.cursor, this.cursorSecret)
+        : null;
+      const values: unknown[] = [scope.workspaceId, transactionId];
+      const conditions = [
+        "workspace_id = $1",
+        "target_type = 'finance_transaction'",
+        "target_id = $2",
+      ];
+      if (cursor) {
+        values.push(cursor[0], cursor[1]);
+        conditions.push(
+          `(occurred_at < $${values.length - 1}::timestamptz OR (occurred_at = $${values.length - 1}::timestamptz AND id < $${values.length}::uuid))`,
+        );
+      }
+      values.push(limit + 1);
+      const result = await client.query<FinanceAuditRow>(
+        `SELECT id, target_id AS transaction_id, category, action, actor_id, occurred_at,
+                origin, correlation_id, result, reason, before_redacted, after_redacted
+           FROM audit_event
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY occurred_at DESC, id DESC
+          LIMIT $${values.length}`,
+        values,
+      );
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+      const last = rows.at(-1);
+      return {
+        items: rows.map(toFinanceAuditEventView),
+        nextCursor:
+          hasMore && last
+            ? encodeCursor(
+                {
+                  ordering: financeAuditCursorOrdering,
+                  position: [new Date(last.occurred_at).toISOString(), last.id],
+                },
+                this.cursorSecret,
+              )
+            : null,
+        hasMore,
+      };
+    });
+  }
+
+  async getTransactionAudit(
+    scope: FinanceScope,
+    transactionId: string,
+    auditId: string,
+  ): Promise<FinanceAuditDetailView> {
+    return this.withScopedClient(scope, async (client) => {
+      const transaction = await client.query<{ id: string }>(
+        `SELECT id FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, transactionId],
+      );
+      if (!transaction.rows[0]) throw new FinanceNotFoundError();
+      const event = await client.query<FinanceAuditRow>(
+        `SELECT id, target_id AS transaction_id, category, action, actor_id, occurred_at,
+                origin, correlation_id, result, reason, before_redacted, after_redacted
+           FROM audit_event
+          WHERE workspace_id = $1 AND target_type = 'finance_transaction'
+            AND target_id = $2 AND id = $3`,
+        [scope.workspaceId, transactionId, auditId],
+      );
+      const row = event.rows[0];
+      if (!row) throw new FinanceNotFoundError();
+      const consequences = await client.query<{
+        id: string;
+        event_type: string;
+        status: string;
+        occurred_on: string;
+        published_at: Date | string | null;
+        reversed_event_id: string | null;
+      }>(
+        `SELECT id, event_type, status, occurred_on, published_at, reversed_event_id
+           FROM ledger_event
+          WHERE workspace_id = $1 AND transaction_id = $2
+          ORDER BY occurred_on ASC, created_at ASC, id ASC`,
+        [scope.workspaceId, transactionId],
+      );
+      return {
+        ...toFinanceAuditEventView(row),
+        consequences: {
+          ledgerEvents: consequences.rows.map((value) => ({
+            id: value.id,
+            eventType: value.event_type,
+            status: value.status,
+            occurredOn: value.occurred_on,
+            publishedAt: value.published_at ? new Date(value.published_at).toISOString() : null,
+            reversedEventId: value.reversed_event_id,
+          })),
+        },
+      };
     });
   }
 
@@ -523,6 +683,14 @@ export class FinanceService {
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
+        await this.recordTransactionAudit(
+          client,
+          scope,
+          id,
+          "transaction.posted",
+          { state: row.state, version: row.version },
+          { state: result.rows[0].state, version: result.rows[0].version },
+        );
         return toTransactionView(result.rows[0]);
       },
     );
@@ -651,7 +819,14 @@ export class FinanceService {
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
-        await this.recordTransactionAudit(client, scope, id, "transaction.reversed");
+        await this.recordTransactionAudit(
+          client,
+          scope,
+          id,
+          "transaction.reversed",
+          { state: row.state, version: row.version },
+          { state: result.rows[0].state, version: result.rows[0].version },
+        );
         return toTransactionView(result.rows[0]);
       },
     );
@@ -810,6 +985,14 @@ export class FinanceService {
             `UPDATE credit_statement SET paid_minor = $1, state = CASE WHEN $1 >= total_minor THEN 'paid' ELSE 'partially_paid' END, version = version + 1, updated_at = now() WHERE id = $2`,
             [paid, statementId],
           );
+          await this.recordTransactionAudit(client, scope, txId, "transaction.created", null, {
+            kind: "transfer",
+            state: "posted",
+            categoryId: null,
+            cardId: null,
+            statementId,
+            version: 0,
+          });
           return {
             statusCode: 201,
             response: {
@@ -874,6 +1057,21 @@ export class FinanceService {
             );
             const installmentId = installment.rows[0]?.id;
             if (!installmentId) throw new Error("installment insert failed");
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              transactionId,
+              "transaction.created",
+              null,
+              {
+                kind: "expense",
+                state: "planned",
+                categoryId: null,
+                cardId: null,
+                statementId: null,
+                version: 0,
+              },
+            );
             installments.push({
               id: installmentId,
               number: index + 1,
@@ -948,6 +1146,21 @@ export class FinanceService {
             );
             const transactionId = transaction.rows[0]?.id;
             if (!transactionId) throw new Error("recurrence transaction insert failed");
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              transactionId,
+              "transaction.created",
+              null,
+              {
+                kind: parsed.kind,
+                state: "planned",
+                categoryId: null,
+                cardId: null,
+                statementId: null,
+                version: 0,
+              },
+            );
             await client.query(
               `INSERT INTO recurrence_occurrence (workspace_id, recurrence_id, transaction_id, occurrence_on) VALUES ($1, $2, $3, $4) ON CONFLICT (recurrence_id, occurrence_on) DO NOTHING`,
               [scope.workspaceId, recurrenceId, transactionId, date],
@@ -1046,8 +1259,25 @@ export class FinanceService {
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, row.id],
       );
-      return refreshed.rows[0] ? toTransactionView(refreshed.rows[0]) : toTransactionView(row);
+      const value = refreshed.rows[0] ?? row;
+      await this.recordTransactionAudit(
+        client,
+        scope,
+        row.id,
+        "transaction.created",
+        null,
+        transactionAuditSnapshot(value),
+      );
+      return toTransactionView(value);
     }
+    await this.recordTransactionAudit(
+      client,
+      scope,
+      row.id,
+      "transaction.created",
+      null,
+      transactionAuditSnapshot(row),
+    );
     return toTransactionView(row);
   }
 
@@ -1250,14 +1480,24 @@ export class FinanceService {
     client: PgPoolClient,
     scope: FinanceScope,
     transactionId: string,
-    action: "transaction.reversed",
+    action: string,
+    before: Record<string, unknown> | null = null,
+    after: Record<string, unknown> | null = null,
   ): Promise<void> {
     await client.query(
       `INSERT INTO audit_event
          (category, action, actor_id, workspace_id, target_type, target_id,
-          origin, correlation_id, result)
-       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, 'api', $5, 'success')`,
-      [action, scope.actorId, scope.workspaceId, transactionId, scope.correlationId],
+          origin, correlation_id, result, before_redacted, after_redacted)
+       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
+      [
+        action,
+        scope.actorId,
+        scope.workspaceId,
+        transactionId,
+        scope.correlationId,
+        before ? JSON.stringify(before) : null,
+        after ? JSON.stringify(after) : null,
+      ],
     );
   }
 
@@ -1433,6 +1673,24 @@ function decodeTransactionCursor(cursor: string, secret: string): TransactionCur
   return [occurredOn, createdAt, id];
 }
 
+function decodeFinanceAuditCursor(cursor: string, secret: string): FinanceAuditCursorPosition {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== financeAuditCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 2 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [occurredAt, id] = position as [string, string];
+  if (Number.isNaN(Date.parse(occurredAt)) || !domainIdSchema.safeParse(id).success) {
+    throw new InvalidCursorError();
+  }
+  return [occurredAt, id];
+}
+
 async function setFinanceScope(client: PgPoolClient, scope: FinanceScope, applicationRole: string) {
   // Read-only helpers do not use withUnitOfWork, so they must apply the same
   // least-privilege role before setting the transaction-local RLS context.
@@ -1458,6 +1716,45 @@ function toTransactionView(row: TransactionRow): TransactionView {
     dueOn: row.due_on,
     postedOn: row.posted_on ? new Date(row.posted_on).toISOString() : null,
     description: row.description,
+    categoryId: row.category_id,
+    cardId: row.card_id,
+    statementId: row.statement_id,
+    version: row.version,
+  };
+}
+
+function asAuditSnapshot(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function toFinanceAuditEventView(row: FinanceAuditRow): FinanceAuditEventView {
+  return {
+    id: row.id,
+    transactionId: row.transaction_id,
+    category: row.category,
+    action: row.action,
+    actorId: row.actor_id,
+    occurredAt: new Date(row.occurred_at).toISOString(),
+    origin: row.origin,
+    correlationId: row.correlation_id,
+    result: row.result,
+    reason: row.reason,
+    before: asAuditSnapshot(row.before_redacted),
+    after: asAuditSnapshot(row.after_redacted),
+  };
+}
+
+/** Snapshot allowlist deliberately excludes amount, description and identity secrets. */
+function transactionAuditSnapshot(
+  row: Pick<
+    TransactionRow,
+    "kind" | "state" | "category_id" | "card_id" | "statement_id" | "version"
+  >,
+): Record<string, unknown> {
+  return {
+    kind: row.kind,
+    state: row.state,
     categoryId: row.category_id,
     cardId: row.card_id,
     statementId: row.statement_id,

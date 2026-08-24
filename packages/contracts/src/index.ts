@@ -246,6 +246,37 @@ export const transactionListQuerySchema = paginationQuerySchema
 
 export type TransactionListQuery = z.infer<typeof transactionListQuerySchema>;
 
+/** Audit snapshots are allowlisted server-side and intentionally opaque to clients. */
+export const auditSnapshotSchema = z.record(z.string(), z.unknown());
+export const financeAuditEventSchema = z.object({
+  id: domainIdSchema,
+  transactionId: domainIdSchema,
+  category: z.string().min(1).max(80),
+  action: z.string().min(1).max(120),
+  actorId: userIdSchema.nullable(),
+  occurredAt: z.string().datetime({ offset: true }),
+  origin: z.string().min(1).max(80),
+  correlationId: z.string().min(1).max(26),
+  result: z.string().min(1).max(80),
+  reason: z.string().max(500).nullable(),
+  before: auditSnapshotSchema.nullable(),
+  after: auditSnapshotSchema.nullable(),
+});
+export type FinanceAuditEventContract = z.infer<typeof financeAuditEventSchema>;
+
+export const financeAuditLedgerEventSchema = z.object({
+  id: domainIdSchema,
+  eventType: z.string().min(1).max(120),
+  status: z.string().min(1).max(40),
+  occurredOn: civilDateSchema,
+  publishedAt: z.string().datetime({ offset: true }).nullable(),
+  reversedEventId: domainIdSchema.nullable(),
+});
+export const financeAuditDetailSchema = financeAuditEventSchema.extend({
+  consequences: z.object({ ledgerEvents: z.array(financeAuditLedgerEventSchema) }),
+});
+export type FinanceAuditDetailContract = z.infer<typeof financeAuditDetailSchema>;
+
 export const categoryKindSchema = z.enum(["income", "expense", "both"]);
 export const categorySchema = z.object({
   id: domainIdSchema,

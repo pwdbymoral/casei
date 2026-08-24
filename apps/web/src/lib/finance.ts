@@ -74,6 +74,45 @@ export type TransactionPage = {
   hasMore: boolean;
 };
 
+export type FinanceAuditEvent = {
+  id: string;
+  transactionId: string;
+  category: string;
+  action: string;
+  actorId: string | null;
+  occurredAt: string;
+  origin: string;
+  correlationId: string;
+  result: string;
+  reason: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+};
+
+export type FinanceAuditLedgerEvent = {
+  id: string;
+  eventType: string;
+  status: string;
+  occurredOn: string;
+  publishedAt: string | null;
+  reversedEventId: string | null;
+};
+
+export type FinanceAuditDetail = FinanceAuditEvent & {
+  consequences: { ledgerEvents: FinanceAuditLedgerEvent[] };
+};
+
+export type FinanceAuditPage = {
+  items: FinanceAuditEvent[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type FinanceAuditQuery = {
+  cursor?: string | null;
+  limit?: number;
+};
+
 export type TransactionQuery = {
   cursor?: string | null;
   limit?: number;
@@ -194,6 +233,16 @@ export type CreateTransactionInput = {
 
 export type FinanceAdapter = {
   listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
+  listTransactionAudit(
+    workspaceId: string,
+    transactionId: string,
+    query?: FinanceAuditQuery,
+  ): Promise<FinanceAuditPage>;
+  getTransactionAudit(
+    workspaceId: string,
+    transactionId: string,
+    auditId: string,
+  ): Promise<FinanceAuditDetail>;
   createTransaction(
     workspaceId: string,
     input: CreateTransactionInput,
@@ -277,6 +326,8 @@ const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> 
 /** Safe default for environments without an explicit authenticated API origin. */
 export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   listTransactions: unavailableFinanceOperation,
+  listTransactionAudit: unavailableFinanceOperation,
+  getTransactionAudit: unavailableFinanceOperation,
   createTransaction: unavailableFinanceOperation,
   reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
@@ -354,6 +405,23 @@ export function createHttpFinanceAdapter(
         hasMore: response.page.hasMore,
       }));
     },
+    listTransactionAudit: (workspaceId, transactionId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const search = params.toString();
+      return listPage<FinanceAuditEvent>(
+        `/workspaces/${workspaceId}/transactions/${transactionId}/audit${search ? `?${search}` : ""}`,
+      ).then((response) => ({
+        items: response.items,
+        nextCursor: response.page.nextCursor,
+        hasMore: response.page.hasMore,
+      }));
+    },
+    getTransactionAudit: (workspaceId, transactionId, auditId) =>
+      call<FinanceAuditDetail>(
+        `/workspaces/${workspaceId}/transactions/${transactionId}/audit/${auditId}`,
+      ),
     createTransaction: async (workspaceId, input, commandKey) =>
       call<Transaction>(`/workspaces/${workspaceId}/transactions`, {
         method: "POST",
@@ -454,6 +522,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     transactions: Transaction[];
     cards: CreditCard[];
     statements: Statement[];
+    transactionAudit: Map<string, FinanceAuditEvent[]>;
     transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
     reverseCommands: Map<
       string,
@@ -503,6 +572,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       transactions: [],
       cards,
       statements,
+      transactionAudit: new Map(),
       transactionCommands: new Map(),
       reverseCommands: new Map(),
     };
@@ -587,6 +657,28 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         version: 0,
       };
       state.transactions.unshift(value);
+      const event: FinanceAuditEvent = {
+        id: fixtureId(50 + state.transactionAudit.size),
+        transactionId: value.id,
+        category: "finance",
+        action: "transaction.created",
+        actorId: "fixture-user",
+        occurredAt: new Date().toISOString(),
+        origin: "fixture",
+        correlationId: "fixture-correlation",
+        result: "success",
+        reason: null,
+        before: null,
+        after: {
+          kind: value.kind,
+          state: value.state,
+          categoryId: value.categoryId,
+          cardId: value.cardId,
+          statementId: value.statementId,
+          version: value.version,
+        },
+      };
+      state.transactionAudit.set(value.id, [event]);
       if (input.cardId) {
         const statement = state.statements.find(
           (item) => item.cardId === input.cardId && item.state === "open",
@@ -601,6 +693,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           value.statementId = statement.id;
         }
       }
+      event.after = { ...event.after, statementId: value.statementId };
       if (commandKey)
         state.transactionCommands.set(commandKey, { fingerprint, transaction: value });
       return value;
@@ -622,6 +715,22 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       if (current.state === "canceled") return current;
       const value = { ...current, state: "canceled" as const, version: current.version + 1 };
       state.transactions[state.transactions.indexOf(current)] = value;
+      const events = state.transactionAudit.get(value.id) ?? [];
+      events.unshift({
+        id: fixtureId(50 + state.transactionAudit.size + events.length),
+        transactionId: value.id,
+        category: "finance",
+        action: "transaction.reversed",
+        actorId: "fixture-user",
+        occurredAt: new Date().toISOString(),
+        origin: "fixture",
+        correlationId: "fixture-correlation",
+        result: "success",
+        reason: null,
+        before: { state: current.state, version: current.version },
+        after: { state: value.state, version: value.version },
+      });
+      state.transactionAudit.set(value.id, events);
       if (value.statementId && value.kind === "expense") {
         const statement = state.statements.find((item) => item.id === value.statementId);
         if (statement) {
@@ -642,6 +751,24 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         });
       }
       return value;
+    },
+    listTransactionAudit: async (workspaceId, transactionId, query = {}) => {
+      const all = stateFor(workspaceId).transactionAudit.get(transactionId) ?? [];
+      const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+      const offset = query.cursor?.startsWith("fixture:")
+        ? Number.parseInt(query.cursor.slice("fixture:".length), 10)
+        : 0;
+      const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+      const items = all.slice(start, start + limit);
+      const hasMore = start + limit < all.length;
+      return { items, nextCursor: hasMore ? `fixture:${start + limit}` : null, hasMore };
+    },
+    getTransactionAudit: async (workspaceId, transactionId, auditId) => {
+      const event = (stateFor(workspaceId).transactionAudit.get(transactionId) ?? []).find(
+        (item) => item.id === auditId,
+      );
+      if (!event) throw new FinanceAdapterError("Evento de auditoria não encontrado.", 404);
+      return { ...event, consequences: { ledgerEvents: [] } };
     },
     listCategories: async () => [],
     listCards: async (workspaceId) => [...stateFor(workspaceId).cards],
