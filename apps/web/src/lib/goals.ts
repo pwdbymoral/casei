@@ -243,6 +243,34 @@ function fixtureGoalId(workspaceId: string, index: number): string {
   return `${workspaceId.slice(0, 18)}-goal-${index}`;
 }
 
+function fixtureContributionPeriods(deadline: string | null): number | null {
+  if (!deadline) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  if (deadline < today) return 0;
+  const [todayYear, todayMonth, todayDay] = today.split("-").map(Number);
+  const [deadlineYear, deadlineMonth, deadlineDay] = deadline.split("-").map(Number);
+  let periods = (deadlineYear - todayYear) * 12 + (deadlineMonth - todayMonth);
+  if (deadlineDay < todayDay) periods -= 1;
+  return Math.max(1, periods);
+}
+
+function fixturePlanning(targetMinor: string, reservedMinor: string, deadline: string | null) {
+  const target = BigInt(targetMinor);
+  const reserved = BigInt(reservedMinor);
+  const remaining = target > reserved ? target - reserved : BigInt(0);
+  const contributionPeriodsRemaining = fixtureContributionPeriods(deadline);
+  const requiredContribution =
+    remaining > BigInt(0) && contributionPeriodsRemaining && contributionPeriodsRemaining > 0
+      ? (remaining + BigInt(contributionPeriodsRemaining) - BigInt(1)) /
+        BigInt(contributionPeriodsRemaining)
+      : null;
+  return {
+    remaining: remaining.toString(),
+    contributionPeriodsRemaining,
+    requiredContribution: requiredContribution?.toString() ?? null,
+  };
+}
+
 export function createFixtureGoalsAdapter(): GoalsAdapter {
   const goalsByWorkspace = new Map<string, Goal[]>([
     [
@@ -299,16 +327,24 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
       throw new GoalsAdapterError("A moeda não corresponde à do espaço.", 422);
     const current = BigInt(goal.reserved.minor);
     const delta = BigInt(amount.minor);
-    if (delta <= BigInt(0) || (kind === "release" && delta > current))
+    if (delta <= BigInt(0) || ((kind === "release" || kind === "spend") && delta > current))
       throw new GoalsAdapterError("O valor não pode ser aplicado à reserva.", 409);
     const reserved = kind === "allocate" ? current + delta : current - delta;
-    const remaining =
-      BigInt(goal.target.minor) > reserved ? BigInt(goal.target.minor) - reserved : BigInt(0);
+    const planning = fixturePlanning(goal.target.minor, reserved.toString(), goal.deadline);
     const next: Goal = {
       ...goal,
       reserved: { ...goal.reserved, minor: reserved.toString() },
-      remaining: { ...goal.remaining, minor: remaining.toString() },
-      status: reserved >= BigInt(goal.target.minor) ? "completed" : goal.status,
+      remaining: { ...goal.remaining, minor: planning.remaining },
+      contributionPeriodsRemaining: planning.contributionPeriodsRemaining,
+      requiredContribution: planning.requiredContribution
+        ? { ...goal.target, minor: planning.requiredContribution }
+        : null,
+      status:
+        reserved >= BigInt(goal.target.minor)
+          ? "completed"
+          : goal.status === "completed"
+            ? "active"
+            : goal.status,
       version: goal.version + 1,
     };
     update(workspaceId, goal, next);
@@ -341,6 +377,8 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
       };
     },
     async createGoal(workspaceId, input) {
+      const deadline = input.deadline ?? null;
+      const planning = fixturePlanning(input.target.minor, "0", deadline);
       const goal: Goal = {
         id: fixtureGoalId(workspaceId, list(workspaceId).length + 1),
         workspaceId,
@@ -348,10 +386,12 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
         target: input.target,
         reserved: { ...input.target, minor: "0" },
         uncovered: { ...input.target, minor: "0" },
-        remaining: { ...input.target },
-        contributionPeriodsRemaining: null,
-        requiredContribution: null,
-        deadline: input.deadline ?? null,
+        remaining: { ...input.target, minor: planning.remaining },
+        contributionPeriodsRemaining: planning.contributionPeriodsRemaining,
+        requiredContribution: planning.requiredContribution
+          ? { ...input.target, minor: planning.requiredContribution }
+          : null,
+        deadline,
         priority: input.priority ?? "normal",
         status: "active",
         note: input.note ?? null,
@@ -361,23 +401,25 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
       return { ...goal };
     },
     async updateGoal(workspaceId, goal, input) {
+      const target = input.target ?? goal.target;
+      const deadline = input.deadline !== undefined ? (input.deadline ?? null) : goal.deadline;
+      const planning = fixturePlanning(target.minor, goal.reserved.minor, deadline);
       return update(workspaceId, goal, {
         ...goal,
         ...input,
-        target: input.target ?? goal.target,
-        remaining: input.target
-          ? {
-              ...input.target,
-              minor: (BigInt(input.target.minor) > BigInt(goal.reserved.minor)
-                ? BigInt(input.target.minor) - BigInt(goal.reserved.minor)
-                : BigInt(0)
-              ).toString(),
-            }
-          : goal.remaining,
+        target,
+        deadline,
+        remaining: { ...target, minor: planning.remaining },
+        contributionPeriodsRemaining: planning.contributionPeriodsRemaining,
+        requiredContribution: planning.requiredContribution
+          ? { ...target, minor: planning.requiredContribution }
+          : null,
         status:
-          input.target && BigInt(goal.reserved.minor) >= BigInt(input.target.minor)
+          BigInt(goal.reserved.minor) >= BigInt(target.minor)
             ? "completed"
-            : goal.status,
+            : goal.status === "completed"
+              ? "active"
+              : goal.status,
         version: goal.version + 1,
       });
     },

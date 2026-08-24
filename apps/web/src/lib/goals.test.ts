@@ -99,6 +99,11 @@ describe("goals adapter", () => {
 
     expect(spent.goal.reserved.minor).toBe("2500");
     expect(spent.goal.remaining.minor).toBe("7500");
+    await expect(
+      adapter.spend("workspace-new", spent.goal, {
+        amount: { currency: "BRL", minor: "3000" },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
     const movements = await adapter.listMovements("workspace-new", created.id);
     expect(movements.items).toEqual(
       expect.arrayContaining([

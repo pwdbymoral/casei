@@ -310,6 +310,12 @@ export default function GoalsPage() {
     return (remaining + contribution - BigInt(1)) / contribution;
   }, [simulationGoal, simulationMinor]);
 
+  const simulationBeyondDeadline = useMemo(() => {
+    if (!simulationGoal || simulationPeriods === null) return false;
+    const deadlinePeriods = simulationGoal.contributionPeriodsRemaining;
+    return deadlinePeriods !== null && simulationPeriods > BigInt(deadlinePeriods);
+  }, [simulationGoal, simulationPeriods]);
+
   function resetCreateForm() {
     setName("");
     setTargetMinor("0");
@@ -379,21 +385,19 @@ export default function GoalsPage() {
     setFormError(null);
     try {
       const input = { amount: { currency, minor: amount.toString() }, note: note || null };
-      const result =
-        action.kind === "allocate"
-          ? await adapter.allocate(workspaceId, action.goal, {
+      await (action.kind === "allocate"
+        ? adapter.allocate(workspaceId, action.goal, {
+            ...input,
+            allowUncovered: allowUncoveredConfirmation,
+          })
+        : action.kind === "release"
+          ? adapter.release(workspaceId, action.goal, input)
+          : adapter.spend(workspaceId, action.goal, {
               ...input,
-              allowUncovered: allowUncoveredConfirmation,
-            })
-          : action.kind === "release"
-            ? await adapter.release(workspaceId, action.goal, input)
-            : await adapter.spend(workspaceId, action.goal, {
-                ...input,
-                description: note || "Gasto da meta",
-              });
-      setGoals((current) =>
-        current.map((goal) => (goal.id === result.goal.id ? result.goal : goal)),
-      );
+              description: note || "Gasto da meta",
+            }));
+      // Um gasto reduz a carteira compartilhada e pode descobrir outras metas.
+      await load();
       setAction(null);
       setNotice(
         action.kind === "allocate"
@@ -806,6 +810,21 @@ export default function GoalsPage() {
                     <p className="font-medium">
                       Você atingiria o valor restante em {simulationPeriods.toString()} mês(es).
                     </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Fórmula: teto de (valor restante ÷ contribuição mensal) = teto de (
+                      {formatMoneyMinor(simulationGoal.remaining.minor, currency)} ÷{" "}
+                      {formatMoneyMinor(simulationMinor, currency)}).
+                    </p>
+                    {simulationBeyondDeadline ? (
+                      <Alert className="mt-3">
+                        <CircleAlertIcon aria-hidden="true" />
+                        <AlertTitle>Esse ritmo ultrapassa o prazo</AlertTitle>
+                        <AlertDescription>
+                          Aumente a contribuição ou revise o prazo antes de reservar. A simulação
+                          não altera sua meta.
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
                     <p className="mt-2 text-muted-foreground">
                       Faltam {formatMoneyMinor(simulationGoal.remaining.minor, currency)}. O prazo
                       da meta é{" "}
