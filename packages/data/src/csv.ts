@@ -178,6 +178,10 @@ function parseCsvRows(
   let columnNumber = 1;
   let atFieldStart = true;
   let justClosedQuote = false;
+  // A quoted empty field (`""`) and a delimiter-only record are real CSV
+  // records even though their normalized cells are empty. Keep that physical
+  // presence separate from the cell contents so preflight can report it.
+  let rowHasContent = false;
   const encoder = new TextEncoder();
   let cellByteLength = 0;
 
@@ -216,10 +220,10 @@ function parseCsvRows(
     }
   };
 
-  const finishRow = (): void => {
+  const finishRow = (preserveEmptyRecord = false): void => {
     finishCell();
     const isBlank = cells.every((value) => value.trim() === "");
-    if (!isBlank || rows.length === 0) {
+    if (!isBlank || rowHasContent || preserveEmptyRecord || rows.length === 0) {
       if (rows.length > limits.maxRows) {
         throw new CsvImportError("row_limit_exceeded", "A planilha excede o limite de linhas.", {
           rowNumber,
@@ -232,6 +236,7 @@ function parseCsvRows(
     columnNumber = 1;
     atFieldStart = true;
     justClosedQuote = false;
+    rowHasContent = false;
   };
 
   for (let index = 0; index < text.length; index += 1) {
@@ -261,6 +266,7 @@ function parseCsvRows(
         });
       }
       inQuotes = true;
+      rowHasContent = true;
       atFieldStart = false;
       justClosedQuote = false;
       continue;
@@ -278,6 +284,7 @@ function parseCsvRows(
     }
 
     if (character === delimiter) {
+      rowHasContent = true;
       finishCell();
       atFieldStart = true;
       justClosedQuote = false;
@@ -285,11 +292,14 @@ function parseCsvRows(
     }
 
     if (character === "\r" || character === "\n") {
-      finishRow();
+      const isPhysicalEmptyRecord =
+        rows.length > 0 && cells.length === 0 && cell.length === 0 && !rowHasContent;
+      finishRow(isPhysicalEmptyRecord);
       if (character === "\r" && text[index + 1] === "\n") index += 1;
       continue;
     }
 
+    rowHasContent = true;
     appendToCell(character);
     atFieldStart = false;
     justClosedQuote = false;
@@ -306,7 +316,7 @@ function parseCsvRows(
     );
   }
 
-  if (cell.length > 0 || cells.length > 0 || text.length === 0) finishRow();
+  if (cell.length > 0 || cells.length > 0 || rowHasContent || text.length === 0) finishRow();
   return rows;
 }
 
@@ -665,6 +675,9 @@ export interface CsvFingerprintOptions {
   readonly workspaceId?: string;
 }
 
+/** Values accepted by the duplicate-suggestion fingerprint contract. */
+export type FingerprintScalar = string | number | bigint | boolean | null | undefined;
+
 export interface CsvPreflightOptions {
   readonly locale?: CsvLocale;
   readonly explicitMapping?: Readonly<Record<string, string>>;
@@ -752,10 +765,24 @@ export function preflightCsvImport<T>(
 
     let fingerprint: string | undefined;
     if (options.fingerprint !== undefined && errors.length === 0) {
-      fingerprint = fingerprintImportRow(options.fingerprint.domain, values, {
-        fields: options.fingerprint.fields,
-        workspaceId: options.fingerprint.workspaceId,
-      });
+      try {
+        fingerprint = fingerprintImportRow(
+          options.fingerprint.domain,
+          values as Readonly<Record<string, FingerprintScalar>>,
+          {
+            fields: options.fingerprint.fields,
+            workspaceId: options.fingerprint.workspaceId,
+          },
+        );
+      } catch (error) {
+        errors.push({
+          code: "invalid_value",
+          message:
+            error instanceof TypeError
+              ? "O fingerprint aceita somente valores escalares."
+              : "O fingerprint não pôde ser calculado.",
+        });
+      }
     }
     let status: CsvRowStatus = errors.length > 0 ? "invalid" : "valid";
     if (status === "valid" && fingerprint !== undefined && seen.has(fingerprint)) {
@@ -794,7 +821,7 @@ export function preflightCsvImport<T>(
   };
 }
 
-function canonicalFingerprintPart(value: unknown): string {
+function canonicalFingerprintPart(value: FingerprintScalar): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "bigint") return value.toString(10);
   if (typeof value === "string") {
@@ -804,13 +831,13 @@ function canonicalFingerprintPart(value: unknown): string {
     );
   }
   if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(value) ?? String(value);
+  throw new TypeError("O fingerprint aceita somente valores escalares.");
 }
 
 /** Produces a stable SHA-256 fingerprint for external-row duplicate suggestions. */
 export function fingerprintImportRow(
   domain: string,
-  row: Readonly<Record<string, unknown>>,
+  row: Readonly<Record<string, FingerprintScalar>>,
   options: { readonly fields?: readonly string[]; readonly workspaceId?: string } = {},
 ): string {
   const fields = [...(options.fields ?? Object.keys(row))].sort();

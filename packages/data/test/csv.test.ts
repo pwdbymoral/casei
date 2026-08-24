@@ -78,6 +78,39 @@ describe("parser CSV seguro", () => {
       expect.objectContaining({ code: "duplicate_header" }),
     );
   });
+
+  it("preserva um registro explicitamente vazio para o preflight reportar erro por linha", () => {
+    const parsed = parseCsv('amount\n""');
+
+    expect(parsed.rows).toEqual([{ rowNumber: 2, cells: [""] }]);
+
+    const result = preflightCsvImport(parsed, [
+      { key: "amount", aliases: ["amount"], required: true, parse: (value: string) => value },
+    ]);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      rowNumber: 2,
+      status: "invalid",
+      errors: [expect.objectContaining({ code: "required" })],
+    });
+  });
+
+  it("preserva uma linha fisicamente vazia como registro CSV de campo vazio", () => {
+    const parsed = parseCsv("amount\n\n");
+
+    expect(parsed.rows).toEqual([{ rowNumber: 2, cells: [""] }]);
+
+    const result = preflightCsvImport(parsed, [
+      { key: "amount", aliases: ["amount"], required: true, parse: (value: string) => value },
+    ]);
+
+    expect(result.rows[0]).toMatchObject({
+      rowNumber: 2,
+      status: "invalid",
+      errors: [expect.objectContaining({ code: "required" })],
+    });
+  });
 });
 
 describe("normalização localizada e mapeamento", () => {
@@ -179,6 +212,31 @@ describe("normalização localizada e mapeamento", () => {
         { fields: ["amount", "description", "occurredOn"] },
       ),
     ).toBe(first);
+  });
+
+  it("rejeita objetos e arrays para manter fingerprint restrito a valores escalares", () => {
+    expect(() =>
+      fingerprintImportRow("transactions", {
+        metadata: { source: "bank" },
+      } as unknown as Record<string, string>),
+    ).toThrowError(/valores escalares/);
+
+    const parsed = parseCsv("value\nx");
+    const result = preflightCsvImport(
+      parsed,
+      [
+        {
+          key: "value",
+          aliases: ["value"],
+          parse: () => ({ source: "bank" }),
+        },
+      ],
+      { fingerprint: { domain: "transactions", fields: ["value"] } },
+    );
+    expect(result.rows[0]).toMatchObject({
+      status: "invalid",
+      errors: [expect.objectContaining({ code: "invalid_value" })],
+    });
   });
 });
 
