@@ -1,4 +1,5 @@
 import { DomainError } from "./errors.js";
+import { parseLocalDate } from "./time.js";
 
 export type GoalStatus = "active" | "completed" | "paused" | "canceled";
 
@@ -6,6 +7,22 @@ export interface GoalReservationTotals {
   allocatedMinor: bigint;
   releasedMinor: bigint;
   spentMinor: bigint;
+}
+
+/** Number of monthly contribution windows from today through a future deadline. */
+export function goalContributionPeriods(today: string, deadline: string | null): number | null {
+  if (deadline === null) return null;
+  const parsedToday = parseLocalDate(today);
+  const parsedDeadline = parseLocalDate(deadline);
+  if (!parsedToday.ok || !parsedDeadline.ok) {
+    throw new DomainError("invalid_local_date", "O prazo da meta deve ser uma data civil válida.");
+  }
+  if (deadline < today) return 0;
+  const [todayYear = 0, todayMonth = 0, todayDay = 0] = today.split("-").map(Number);
+  const [deadlineYear = 0, deadlineMonth = 0, deadlineDay = 0] = deadline.split("-").map(Number);
+  let periods = (deadlineYear - todayYear) * 12 + (deadlineMonth - todayMonth);
+  if (deadlineDay < todayDay) periods -= 1;
+  return Math.max(1, periods);
 }
 
 /** The virtual reserve is reconstructed from its append-only movement totals. */
