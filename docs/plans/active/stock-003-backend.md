@@ -18,6 +18,8 @@ uma colisão com item livre deve ser um conflito recuperável antes de qualquer 
    a mesma colisão segue a mesma regra.
 3. A unicidade continua por espaço e somente para itens não comprados; itens comprados não
    bloqueiam uma nova solicitação.
+4. `PATCH` preserva campos omitidos e permite limpar campos anuláveis somente quando `null` é
+   enviado; uma projeção automática não atribui autoria ao leitor e retorna `lastChangedBy: null`.
 
 Cada critério terá regressão no teste de serviço, seguida da validação das suítes API, contratos,
 domínio, lint e typecheck.

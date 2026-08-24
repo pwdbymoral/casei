@@ -88,7 +88,7 @@ function shoppingScenarioPool() {
     note: null,
     purchased: false,
     purchased_at: null,
-    last_changed_by: scope.actorId,
+    last_changed_by: null,
     version: productVersion,
   });
 
@@ -145,6 +145,7 @@ function shoppingScenarioPool() {
           item = {
             ...derivedItem(),
             id: materializedItemId,
+            last_changed_by: scope.actorId,
             version: sql.includes("p.version") ? productVersion : 0,
           };
           return { rows: [{ id: materializedItemId } as T], rowCount: 1 };
@@ -166,6 +167,7 @@ function shoppingScenarioPool() {
         item = {
           ...derivedItem(),
           id: materializedItemId,
+          last_changed_by: scope.actorId,
           version: productVersion,
         };
         return { rows: [item as T], rowCount: 1 };
@@ -461,6 +463,74 @@ function productRenameSyncPool() {
   };
 }
 
+function partialProductUpdatePool() {
+  const statements: string[] = [];
+  let updateValues: unknown[] | null = null;
+  const currentProduct = {
+    id: productId,
+    workspace_id: scope.workspaceId,
+    name: "Arroz",
+    unit: "package" as const,
+    unit_label: "saco",
+    quantity_milli: "2000",
+    minimum_milli: "1000",
+    marked_missing: false,
+    shopping_auto: false,
+    category: "Grãos",
+    location: "Despensa",
+    note: "Preferir integral",
+    archived: false,
+    version: 0,
+  };
+  const client = {
+    async query<T>(sql: string, values: unknown[] = []): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM membership")) {
+        return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM workspace")) {
+        return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
+        return { rows: [currentProduct as T], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE stock_product")) {
+        updateValues = values;
+        return {
+          rows: [
+            {
+              ...currentProduct,
+              name: values[2],
+              unit: values[4],
+              unit_label: values[5],
+              minimum_milli: values[6],
+              category: values[7],
+              location: values[8],
+              note: values[9],
+              shopping_auto: values[10],
+              version: 1,
+            } as T,
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  return {
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+    get updateValues() {
+      return updateValues;
+    },
+  };
+}
+
 describe("StockService membership revalidation", () => {
   it("locks and checks the current membership even for a read unit of work", async () => {
     const harness = poolFor({ role: "viewer" });
@@ -551,6 +621,33 @@ describe("StockService membership revalidation", () => {
     ).toBe(true);
   });
 
+  it("preserves omitted product fields in a partial update", async () => {
+    const harness = partialProductUpdatePool();
+    const service = new StockService(harness.pool as never);
+
+    const updated = await service.updateProduct(scope, productId, { name: "Arroz integral" }, 0);
+
+    expect(updated).toMatchObject({
+      name: "Arroz integral",
+      unit: "package",
+      unitLabel: "saco",
+      minimum: "1",
+      shoppingAuto: false,
+      category: "Grãos",
+      location: "Despensa",
+      note: "Preferir integral",
+    });
+    expect(harness.updateValues?.slice(4, 11)).toEqual([
+      "package",
+      "saco",
+      1000n,
+      "Grãos",
+      "Despensa",
+      "Preferir integral",
+      false,
+    ]);
+  });
+
   it("derives, purchases, suppresses, and releases an automatic item across reads and movement", async () => {
     const harness = shoppingScenarioPool();
     const service = new StockService(harness.pool as never);
@@ -560,9 +657,15 @@ describe("StockService membership revalidation", () => {
     const readStatements = harness.statements.slice(beforeRead);
     expect(readStatements.some((sql) => /INSERT INTO shopping_item/i.test(sql))).toBe(false);
     expect(readStatements.some((sql) => /shopping_item_event/i.test(sql))).toBe(false);
+    expect(readStatements.some((sql) => /\$2::text AS last_changed_by/i.test(sql))).toBe(false);
     expect(first).toHaveLength(1);
     const firstItem = first[0];
-    expect(firstItem).toMatchObject({ id: productId, productId, purchased: false });
+    expect(firstItem).toMatchObject({
+      id: productId,
+      productId,
+      purchased: false,
+      lastChangedBy: null,
+    });
     if (!firstItem) throw new Error("expected a derived shopping item");
 
     await service.purchaseShoppingItem(

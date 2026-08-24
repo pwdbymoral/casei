@@ -80,7 +80,7 @@ export interface StockShoppingItemView {
   note: string | null;
   purchased: boolean;
   purchasedAt: string | null;
-  lastChangedBy: string;
+  lastChangedBy: string | null;
   version: number;
 }
 
@@ -181,7 +181,7 @@ interface ShoppingItemRow {
   note: string | null;
   purchased: boolean;
   purchased_at: Date | string | null;
-  last_changed_by: string;
+  last_changed_by: string | null;
   version: number;
 }
 
@@ -306,13 +306,16 @@ export class StockService {
     expectedVersion: number,
   ): Promise<StockProductView> {
     const parsed = updateStockProductSchema.parse(input);
-    const normalized = normalizeProductName(parsed.name);
-    const values = normalizeUpdateInput(parsed);
     return this.withUnitOfWork(
       scope,
       async ({ client }) => {
         const current = await lockProduct(client, scope, productId);
         assertExpectedVersion(current.version, expectedVersion);
+        const normalized = normalizeProductName(parsed.name ?? current.name);
+        const values = normalizeUpdateInput(parsed, current);
+        if (values.unit === "other" && !values.unitLabel) {
+          throw new StockConflictError("Informe o rótulo da unidade.");
+        }
         if (normalizeProductName(current.name).key !== normalized.key) {
           await assertNoFreeShoppingNameCollision(client, scope, normalized.key);
         }
@@ -677,7 +680,7 @@ export class StockService {
                  END AS effective_quantity_milli,
                  p.unit, p.unit_label, p.note,
                  false AS purchased, NULL::timestamptz AS purchased_at,
-                 $2::text AS last_changed_by, p.version
+                 NULL::text AS last_changed_by, p.version
             FROM stock_product p
            WHERE p.workspace_id = $1 AND p.archived = false AND p.shopping_auto = true
              AND (p.marked_missing OR p.quantity_milli = 0
@@ -712,10 +715,10 @@ export class StockService {
             UNION ALL
             SELECT * FROM derived_items
           ) shopping
-         WHERE $3::boolean OR shopping.purchased = false
+         WHERE $2::boolean OR shopping.purchased = false
          ORDER BY shopping.purchased ASC, shopping.source ASC, lower(shopping.name), shopping.id
-         LIMIT $4`,
-        [scope.workspaceId, scope.actorId, parsed.includePurchased, parsed.limit],
+         LIMIT $3`,
+        [scope.workspaceId, parsed.includePurchased, parsed.limit],
       );
       return result.rows.map(toShoppingItemView);
     });
@@ -1540,18 +1543,20 @@ function normalizeStockInput(input: CreateStockProductInput) {
   };
 }
 
-function normalizeUpdateInput(input: UpdateStockProductInput) {
+function normalizeUpdateInput(input: UpdateStockProductInput, current: StockProductRow) {
   return {
-    unit: input.unit,
-    unitLabel: input.unitLabel ?? null,
+    unit: input.unit ?? current.unit,
+    unitLabel: input.unitLabel === undefined ? current.unit_label : input.unitLabel,
     minimumMilli:
-      input.minimum === undefined || input.minimum === null
-        ? null
-        : parseStockQuantity(input.minimum, { allowZero: true }),
-    shoppingAuto: input.shoppingAuto ?? true,
-    category: input.category ?? null,
-    location: input.location ?? null,
-    note: input.note ?? null,
+      input.minimum === undefined
+        ? normalizeStockValue(current.minimum_milli)
+        : input.minimum === null
+          ? null
+          : parseStockQuantity(input.minimum, { allowZero: true }),
+    shoppingAuto: input.shoppingAuto ?? current.shopping_auto,
+    category: input.category === undefined ? current.category : input.category,
+    location: input.location === undefined ? current.location : input.location,
+    note: input.note === undefined ? current.note : input.note,
   };
 }
 

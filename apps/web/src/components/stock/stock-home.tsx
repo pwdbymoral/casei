@@ -557,7 +557,9 @@ export function StockHome() {
                           {item.source === "automatic" ? " · do estoque" : " · item livre"}
                         </p>
                       </div>
-                      <span className="sr-only">Alterado por {item.lastChangedBy}</span>
+                      {item.lastChangedBy ? (
+                        <span className="sr-only">Alterado por {item.lastChangedBy}</span>
+                      ) : null}
                     </CardContent>
                   </Card>
                 );

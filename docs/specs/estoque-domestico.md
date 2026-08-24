@@ -65,6 +65,10 @@ rótulo e versão. Se o novo nome colidir com um item livre ativo, a edição re
 recuperável antes de alterar o produto, pois o MVP não possui merge silencioso de linhas.
 O mesmo bloqueio se aplica ao restauro de um produto arquivado cujo nome já esteja em um item livre
 ativo; concluir ou remover a solicitação livre é a forma explícita de resolver a colisão.
+`PATCH /stock/products/:productId` aceita atualização parcial: campos omitidos preservam o valor
+atual, enquanto `null` limpa campos anuláveis explicitamente. Uma projeção automática que ainda não
+foi materializada não possui autoria de lista; nesse caso `lastChangedBy` é `null`, e nunca o usuário
+que apenas fez a leitura.
 
 ## Busca e uso no mercado
 

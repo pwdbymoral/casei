@@ -48,7 +48,7 @@ export type StockShoppingItem = {
   note: string | null;
   purchased: boolean;
   purchasedAt: string | null;
-  lastChangedBy: string;
+  lastChangedBy: string | null;
   version: number;
 };
 
@@ -560,15 +560,16 @@ export function createFixtureStockAdapter(): StockAdapter {
       if (!current) throw new StockAdapterError("Produto não encontrado.", 404);
       if (current.version !== product.version)
         throw new StockAdapterError("O produto foi alterado.", 412, current.version);
-      Object.assign(current, {
-        ...input,
-        unitLabel: input.unitLabel ?? null,
-        minimum: input.minimum ?? null,
-        category: input.category ?? null,
-        location: input.location ?? null,
-        note: input.note ?? null,
-        version: current.version + 1,
-      });
+      if (input.name !== undefined) current.name = input.name;
+      if (input.unit !== undefined) current.unit = input.unit;
+      if (input.unitLabel !== undefined) current.unitLabel = input.unitLabel;
+      if (input.minimum !== undefined) current.minimum = input.minimum;
+      if (input.shoppingAuto !== undefined) current.shoppingAuto = input.shoppingAuto;
+      if (input.category !== undefined) current.category = input.category;
+      if (input.location !== undefined) current.location = input.location;
+      if (input.note !== undefined) current.note = input.note;
+      current.state = deriveFixtureState(current.quantity, current.minimum, current.markedMissing);
+      current.version += 1;
       return { ...current };
     },
     async createMovement(_workspaceId, product, input) {
