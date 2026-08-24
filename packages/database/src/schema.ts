@@ -204,6 +204,8 @@ export const auditEvent = pgTable(
     correlationId: varchar("correlation_id", { length: 26 }).notNull(),
     result: text("result").notNull(),
     reason: text("reason"),
+    beforeRedacted: jsonb("before_redacted"),
+    afterRedacted: jsonb("after_redacted"),
     retentionUntil: instant("retention_until"),
   },
   (table) => [

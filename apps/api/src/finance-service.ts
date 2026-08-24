@@ -1728,7 +1728,13 @@ function toTransactionView(row: TransactionRow): TransactionView {
 
 function asAuditSnapshot(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
+  const source = value as Record<string, unknown>;
+  const allowedKeys = ["kind", "state", "categoryId", "cardId", "statementId", "version"];
+  const snapshot: Record<string, unknown> = {};
+  for (const key of allowedKeys) {
+    if (Object.hasOwn(source, key)) snapshot[key] = source[key];
+  }
+  return snapshot;
 }
 
 function toFinanceAuditEventView(row: FinanceAuditRow): FinanceAuditEventView {

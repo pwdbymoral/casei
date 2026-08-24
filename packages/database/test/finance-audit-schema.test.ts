@@ -16,4 +16,11 @@ test("finance audit history migration stores redacted snapshots and is journaled
   assert.match(migration, /ADD COLUMN "after_redacted" jsonb/i);
   assert.match(migration, /REVOKE UPDATE, DELETE ON TABLE ["']?audit_event/i);
   assert.match(journal, /"tag": "0008_finance_audit_history"/);
+
+  const schema = await readFile(
+    fileURLToPath(new URL("../src/schema.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.match(schema, /beforeRedacted: jsonb\("before_redacted"\)/);
+  assert.match(schema, /afterRedacted: jsonb\("after_redacted"\)/);
 });

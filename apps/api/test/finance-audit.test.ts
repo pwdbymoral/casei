@@ -47,7 +47,7 @@ describe("finance transaction audit history", () => {
         result: "success",
         reason: null,
         before_redacted: null,
-        after_redacted: { state: "posted", kind: "expense" },
+        after_redacted: { state: "posted", kind: "expense", amountMinor: "999999" },
       },
     ]);
     const cursorSecret = "test-secret-that-is-long-enough";
@@ -74,6 +74,44 @@ describe("finance transaction audit history", () => {
     expect(page.nextCursor).toBeNull();
     expect(fake.queries.join("\n")).toContain("target_type = 'finance_transaction'");
     expect(fake.queries.join("\n")).toContain("ORDER BY occurred_at DESC, id DESC");
+  });
+
+  it("reapplies the redaction allowlist when reading persisted snapshots", async () => {
+    const fake = fakePool([
+      {
+        id: auditId,
+        transaction_id: transactionId,
+        category: "finance",
+        action: "transaction.created",
+        actor_id: "user-1",
+        occurred_at: new Date("2026-08-23T12:00:00.000Z"),
+        origin: "api",
+        correlation_id: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        result: "success",
+        reason: null,
+        before_redacted: { description: "segredo", amountMinor: "1000" },
+        after_redacted: { state: "posted", amountMinor: "1000", cardId: null },
+      },
+    ]);
+    const service = new FinanceService(fake.pool as never, {
+      cursorSecret: "test-secret-that-is-long-enough",
+    });
+
+    await expect(
+      service.getTransactionAudit(
+        {
+          workspaceId,
+          actorId: "user-1",
+          correlationId: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+          role: "viewer",
+        },
+        transactionId,
+        auditId,
+      ),
+    ).resolves.toMatchObject({
+      before: {},
+      after: { state: "posted", cardId: null },
+    });
   });
 
   it("returns one event with only same-transaction ledger consequences", async () => {
