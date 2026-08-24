@@ -1,3 +1,5 @@
+import { requireApiOrigin } from "./api-origin";
+
 export type WorkspaceRole = "owner" | "member" | "viewer";
 
 export type WorkspaceSummary = {
@@ -119,14 +121,10 @@ export const unauthenticatedWorkspaceAdapter: WorkspaceAdapter = {
   },
 };
 
-function apiOrigin(): string {
-  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
-}
-
 async function workspaceRequest(): Promise<WorkspaceSession> {
   let response: Response;
   try {
-    response = await fetch(`${apiOrigin()}/v1/me/workspaces`, {
+    response = await fetch(`${requireApiOrigin()}/v1/me/workspaces`, {
       credentials: "include",
       cache: "no-store",
       headers: { Accept: "application/json" },
@@ -165,7 +163,7 @@ export const authenticatedWorkspaceAdapter: WorkspaceAdapter = {
     return { ...session, activeWorkspaceId: workspaceId };
   },
   async signOut() {
-    const response = await fetch(`${apiOrigin()}/api/auth/sign-out`, {
+    const response = await fetch(`${requireApiOrigin()}/api/auth/sign-out`, {
       method: "POST",
       credentials: "include",
       headers: { Accept: "application/json" },
@@ -179,7 +177,7 @@ export const authenticatedWorkspaceAdapter: WorkspaceAdapter = {
 async function managementRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${apiOrigin()}${path}`, {
+    response = await fetch(`${requireApiOrigin()}${path}`, {
       ...init,
       credentials: "include",
       headers: {

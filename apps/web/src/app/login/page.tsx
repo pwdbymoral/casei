@@ -8,11 +8,8 @@ import { AsyncState } from "@/components/primitives";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { requireApiOrigin } from "@/lib/api-origin";
 import { cn } from "@/lib/utils";
-
-function apiOrigin(): string {
-  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
-}
 
 function LoginForm() {
   const router = useRouter();
@@ -44,7 +41,7 @@ function LoginForm() {
             callbackURL: `${window.location.origin}/login?verified=1${inviteToken ? `&invite=${encodeURIComponent(inviteToken)}` : ""}`,
           };
     try {
-      const response = await fetch(`${apiOrigin()}/api/auth/${path}`, {
+      const response = await fetch(`${requireApiOrigin()}/api/auth/${path}`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },

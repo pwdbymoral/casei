@@ -1,3 +1,4 @@
+import { configuredApiOrigin } from "./api-origin";
 import type { WorkspaceRole } from "./workspaces";
 
 export type Money = { currency: string; minor: string };
@@ -152,6 +153,29 @@ export class FinanceAdapterError extends Error {
     this.name = "FinanceAdapterError";
   }
 }
+
+const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> => {
+  throw new FinanceAdapterError(
+    "Sua sessão financeira não está disponível. Entre novamente para continuar.",
+    401,
+  );
+};
+
+/** Safe default for environments without an explicit authenticated API origin. */
+export const unauthenticatedFinanceAdapter: FinanceAdapter = {
+  listTransactions: unavailableFinanceOperation,
+  createTransaction: unavailableFinanceOperation,
+  listCategories: unavailableFinanceOperation,
+  listCards: unavailableFinanceOperation,
+  createCard: unavailableFinanceOperation,
+  listStatements: unavailableFinanceOperation,
+  listStatementItems: unavailableFinanceOperation,
+  closeStatement: unavailableFinanceOperation,
+  reopenStatement: unavailableFinanceOperation,
+  payStatement: unavailableFinanceOperation,
+  createRecurrence: unavailableFinanceOperation,
+  createInstallmentPlan: unavailableFinanceOperation,
+};
 
 type JsonResponse<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
 
@@ -442,10 +466,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
   };
 }
 
-export function financeAdapterForEnvironment(): FinanceAdapter {
-  return process.env.NODE_ENV === "production"
-    ? createHttpFinanceAdapter({ baseUrl: process.env.NEXT_PUBLIC_API_URL ?? "" })
-    : createFixtureFinanceAdapter();
+export function financeAdapterForEnvironment(options: { fixtures?: boolean } = {}): FinanceAdapter {
+  if (
+    process.env.NODE_ENV !== "production" &&
+    (options.fixtures === true || process.env.CASEI_UI_FIXTURES === "1")
+  ) {
+    return createFixtureFinanceAdapter();
+  }
+  const origin = configuredApiOrigin();
+  return origin ? createHttpFinanceAdapter({ baseUrl: origin }) : unauthenticatedFinanceAdapter;
 }
 
 export function canWriteFinance(role: WorkspaceRole): boolean {

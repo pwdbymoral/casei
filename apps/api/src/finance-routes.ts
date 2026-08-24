@@ -30,11 +30,26 @@ export interface FinanceRoutesOptions {
   scopeMiddleware: MiddlewareHandler<ApiEnv>;
 }
 
-/** Mounts the financial vertical below /v1. Scope resolution remains owned by AUTH-004. */
+/** Mounts the financial vertical below /v1. The app composition supplies AUTH-004 actor/scope middleware. */
 export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRoutesOptions): void {
   const { service } = options;
   router.onError((error, context) => errorResponse(context, financeErrorToHttp(error)));
-  router.use("/workspaces/:workspaceId/*", options.scopeMiddleware);
+  for (const path of [
+    "/workspaces/:workspaceId/transactions",
+    "/workspaces/:workspaceId/transactions/*",
+    "/workspaces/:workspaceId/categories",
+    "/workspaces/:workspaceId/categories/*",
+    "/workspaces/:workspaceId/cards",
+    "/workspaces/:workspaceId/cards/*",
+    "/workspaces/:workspaceId/statements",
+    "/workspaces/:workspaceId/statements/*",
+    "/workspaces/:workspaceId/recurrences",
+    "/workspaces/:workspaceId/recurrences/*",
+    "/workspaces/:workspaceId/installments",
+    "/workspaces/:workspaceId/installments/*",
+  ]) {
+    router.use(path, options.scopeMiddleware);
+  }
 
   router.post("/workspaces/:workspaceId/transactions", async (context) => {
     const input = await parseJsonBody(context, createTransactionSchema);

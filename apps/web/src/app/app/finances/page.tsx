@@ -14,6 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { MoneyInput } from "@/components/primitives";
+import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,17 +44,9 @@ import {
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
 
-const fixtureWorkspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
-const activeWorkspaceStorageKey = "casei:active-workspace:v1";
-
 function today(): string {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function activeWorkspaceId(): string {
-  if (typeof window === "undefined") return fixtureWorkspaceId;
-  return window.localStorage.getItem(activeWorkspaceStorageKey) ?? fixtureWorkspaceId;
 }
 
 function transactionLabel(transaction: Transaction): string {
@@ -77,19 +70,20 @@ function statementLabel(statement: Statement): string {
 
 type FinanceDashboardProps = {
   adapter?: FinanceAdapter;
-  workspaceId?: string;
-  role?: WorkspaceRole;
+  fixtureMode?: boolean;
+  workspaceId: string;
+  role: WorkspaceRole;
 };
 
 function FinanceDashboard({
   adapter: providedAdapter,
-  workspaceId: providedWorkspaceId,
-  role = "owner",
-}: FinanceDashboardProps = {}) {
+  fixtureMode = false,
+  workspaceId,
+  role,
+}: FinanceDashboardProps) {
   const [adapter] = useState<FinanceAdapter>(
-    () => providedAdapter ?? financeAdapterForEnvironment(),
+    () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
-  const [workspaceId, setWorkspaceId] = useState(providedWorkspaceId ?? fixtureWorkspaceId);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
@@ -124,6 +118,10 @@ function FinanceDashboard({
   const load = useCallback(async () => {
     setStatus("loading");
     setError(null);
+    setViewingStatement(null);
+    setStatementItems([]);
+    setStatementItemsNextCursor(null);
+    setStatementItemsHasMore(false);
     try {
       const [nextTransactions, nextCards, nextStatements] = await Promise.all([
         adapter.listTransactions(workspaceId),
@@ -139,10 +137,6 @@ function FinanceDashboard({
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.");
     }
   }, [adapter, workspaceId]);
-
-  useEffect(() => {
-    if (!providedWorkspaceId) setWorkspaceId(activeWorkspaceId());
-  }, [providedWorkspaceId]);
 
   useEffect(() => {
     void load();
@@ -851,5 +845,6 @@ function FinanceDashboard({
 }
 
 export default function FinancesPage() {
-  return <FinanceDashboard />;
+  const { workspaceId, role, fixtureMode } = useAuthenticatedWorkspace();
+  return <FinanceDashboard workspaceId={workspaceId} role={role} fixtureMode={fixtureMode} />;
 }

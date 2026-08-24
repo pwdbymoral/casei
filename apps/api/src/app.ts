@@ -45,7 +45,8 @@ export interface IdentityAppOptions {
 
 export interface FinanceAppOptions {
   pool: Pool;
-  scopeMiddleware: MiddlewareHandler<ApiEnv>;
+  /** Injectable service boundary for app-composition tests; production uses the pool-backed service. */
+  service?: FinanceService;
   /** PostgreSQL role used by every finance command and query. */
   applicationRole?: string;
   /** Secret used to sign private finance list cursors. */
@@ -95,29 +96,50 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
 
   app.get("/health", (context) => context.json({ service: "casei-api", status: "ok" }));
   configureV1?.(v1);
+
+  const identityPool = options.identity?.pool ?? options.finance?.pool;
+  const identityService =
+    options.identity?.service ??
+    (identityPool
+      ? new IdentityService(identityPool, {
+          applicationRole: options.identity?.applicationRole ?? options.finance?.applicationRole,
+          webOrigin: options.identity?.webOrigin,
+        })
+      : undefined);
+  const actorResolver = options.identity?.actorResolver ?? defaultActorResolver;
+  const actorMiddleware = identityService ? createActorMiddleware(actorResolver) : undefined;
+  const scopeMiddleware = identityService
+    ? createWorkspaceScopeMiddleware(async ({ actor, workspaceId, context }) =>
+        identityService.resolveScope(actor, workspaceId, context.get("correlationId")),
+      )
+    : undefined;
+
   if (options.finance) {
     configureFinanceRoutes(v1, {
-      service: new FinanceService(options.finance.pool, {
-        applicationRole: options.finance.applicationRole,
-        cursorSecret: options.finance.cursorSecret,
-      }),
-      scopeMiddleware: options.finance.scopeMiddleware,
+      service:
+        options.finance.service ??
+        new FinanceService(options.finance.pool, {
+          applicationRole: options.finance.applicationRole,
+          cursorSecret: options.finance.cursorSecret,
+        }),
+      scopeMiddleware: async (context, next) => {
+        if (!actorMiddleware || !scopeMiddleware)
+          throw new Error("Finance auth boundary is unavailable");
+        await actorMiddleware(context, async () => {
+          await scopeMiddleware(context, next);
+        });
+      },
     });
   }
   if (options.identity) {
-    const service =
-      options.identity.service ??
-      new IdentityService(options.identity.pool, {
-        applicationRole: options.identity.applicationRole,
-        webOrigin: options.identity.webOrigin,
-      });
-    const actorResolver = options.identity.actorResolver ?? defaultActorResolver;
-    const actorMiddleware = createActorMiddleware(actorResolver);
-    const scopeMiddleware = createWorkspaceScopeMiddleware(
-      async ({ actor, workspaceId, context }) =>
-        service.resolveScope(actor, workspaceId, context.get("correlationId")),
-    );
-    configureIdentityRoutes(v1, { service, actorMiddleware, scopeMiddleware });
+    if (!identityService || !actorMiddleware || !scopeMiddleware) {
+      throw new Error("Identity auth boundary is unavailable");
+    }
+    configureIdentityRoutes(v1, {
+      service: identityService,
+      actorMiddleware,
+      scopeMiddleware,
+    });
   }
   app.route("/v1", v1);
 
@@ -136,4 +158,8 @@ async function defaultActorResolver(context: Parameters<MiddlewareHandler<ApiEnv
   };
 }
 
-export const app = createApp(undefined, { identity: { pool: getDatabasePool() } });
+const appPool = getDatabasePool();
+export const app = createApp(undefined, {
+  identity: { pool: appPool },
+  finance: { pool: appPool },
+});

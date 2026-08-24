@@ -1,9 +1,10 @@
+import type { Pool } from "@casei/database";
 import { describe, expect, it } from "vitest";
-
 import { createApp } from "../src/app.js";
 import { configureFinanceRoutes } from "../src/finance-routes.js";
 import type { FinanceService } from "../src/finance-service.js";
 import { createActorMiddleware, createWorkspaceScopeMiddleware } from "../src/http/middleware.js";
+import type { IdentityService } from "../src/identity-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
@@ -12,6 +13,51 @@ const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
 const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
 
 describe("finance HTTP composition", () => {
+  it("wires finance through createApp's authenticated actor and workspace scope", async () => {
+    let receivedActor: unknown;
+    let receivedWorkspaceId: string | undefined;
+    let receivedRole: string | undefined;
+    const identityService = {
+      resolveScope: async (actor: unknown, id: string) => {
+        receivedActor = actor;
+        receivedWorkspaceId = id;
+        receivedRole = "member";
+        return {
+          actor: actor as { userId: string },
+          workspaceId: id,
+          role: "member" as const,
+          correlationId: "correlation-from-request",
+        };
+      },
+    } as unknown as IdentityService;
+    const financeService = {
+      listCards: async (scope: { workspaceId: string; role: string }) => {
+        expect(scope.workspaceId).toBe(workspaceId);
+        expect(scope.role).toBe("member");
+        return [];
+      },
+    } as unknown as FinanceService;
+    const app = createApp(undefined, {
+      identity: {
+        pool: {} as Pool,
+        service: identityService,
+        actorResolver: async () => ({ userId: "auth-user-1", email: "auth@example.com" }),
+      },
+      finance: { pool: {} as Pool, service: financeService },
+    });
+
+    const response = await app.request(`http://localhost/v1/workspaces/${workspaceId}/cards`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      items: [],
+      page: { nextCursor: null, hasMore: false },
+    });
+    expect(receivedActor).toEqual({ userId: "auth-user-1", email: "auth@example.com" });
+    expect(receivedWorkspaceId).toBe(workspaceId);
+    expect(receivedRole).toBe("member");
+  });
+
   it("mounts the scoped transaction command below /v1", async () => {
     const fakeService = {
       createTransaction: async () => ({

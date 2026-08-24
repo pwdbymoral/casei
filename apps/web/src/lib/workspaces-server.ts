@@ -1,18 +1,16 @@
 import { headers } from "next/headers";
-
+import { configuredApiOrigin } from "./api-origin";
 import type { WorkspaceSession } from "./workspaces";
-
-function apiOrigin(): string {
-  return (process.env.CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
-}
 
 /** Server guard: forwards only the incoming session cookie to the API boundary. */
 export async function getServerWorkspaceSession(): Promise<WorkspaceSession | null> {
   const incoming = await headers();
   const cookie = incoming.get("cookie");
   if (!cookie) return null;
+  const origin = configuredApiOrigin();
+  if (!origin) return null;
   try {
-    const response = await fetch(`${apiOrigin()}/v1/me/workspaces`, {
+    const response = await fetch(`${origin}/v1/me/workspaces`, {
       headers: { Accept: "application/json", Cookie: cookie },
       cache: "no-store",
     });

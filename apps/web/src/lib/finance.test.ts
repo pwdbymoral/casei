@@ -1,13 +1,57 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  canWriteFinance,
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
   createRequestGuard,
+  financeAdapterForEnvironment,
   statementItemAmountPrefix,
+  unauthenticatedFinanceAdapter,
 } from "./finance";
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
 describe("finance adapter", () => {
+  it("uses fixtures only when explicitly enabled and otherwise denies without an API origin", async () => {
+    vi.stubEnv("CASEI_UI_FIXTURES", "");
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "");
+    expect(financeAdapterForEnvironment()).toBe(unauthenticatedFinanceAdapter);
+    await expect(financeAdapterForEnvironment().listCards("workspace")).rejects.toMatchObject({
+      status: 401,
+    });
+
+    vi.stubEnv("CASEI_UI_FIXTURES", "1");
+    expect(
+      await financeAdapterForEnvironment().listCards("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201"),
+    ).toEqual(expect.any(Array));
+  });
+
+  it("uses the canonical API origin for authenticated finance requests", async () => {
+    vi.stubEnv("CASEI_UI_FIXTURES", "");
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "https://api.example.test/");
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      expect(input).toBe("https://api.example.test/v1/workspaces/workspace/cards");
+      return Response.json({ items: [], page: { nextCursor: null, hasMore: false } });
+    });
+    // The environment-selected adapter is HTTP; replace the global boundary only for this test.
+    vi.stubGlobal("fetch", fetch);
+    const adapter = financeAdapterForEnvironment();
+    await expect(adapter.listCards("workspace")).resolves.toEqual([]);
+  });
+
+  it.each([
+    ["owner", true],
+    ["member", true],
+    ["viewer", false],
+  ] as const)("maps the %s workspace role to finance write access", (role, allowed) => {
+    // Keep this assertion close to the adapter contract consumed by the authenticated shell.
+    expect(canWriteFinance(role)).toBe(allowed);
+  });
+
   it("sends idempotent transaction commands to the versioned API", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
       expect(init?.credentials).toBe("include");

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   authenticatedWorkspaceAdapter,
@@ -26,7 +26,11 @@ const session: WorkspaceSession = {
 };
 
 describe("workspace shell boundary", () => {
-  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "http://localhost:3001"));
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
   it("resolves only the active workspace from the session", () => {
     expect(getActiveWorkspace(session)?.name).toBe("Casa");
     expect(getActiveWorkspace({ ...session, activeWorkspaceId: "unknown" })).toBeNull();
@@ -67,6 +71,13 @@ describe("workspace shell boundary", () => {
     );
     await expect(authenticatedWorkspaceAdapter.getSession()).rejects.toMatchObject({
       code: "unauthenticated",
+    });
+  });
+
+  it("fails closed when the API origin is not configured", async () => {
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "");
+    await expect(authenticatedWorkspaceAdapter.getSession()).rejects.toMatchObject({
+      code: "offline",
     });
   });
 
