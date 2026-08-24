@@ -675,18 +675,41 @@ export const payStatementSchema = z.object({
   allowCredit: z.boolean().default(false),
 });
 
-export const createRecurrenceSchema = z.object({
-  kind: z.enum(["income", "expense"]),
-  amount: positiveMoneySchema,
-  frequency: z.enum(["weekly", "monthly", "annual"]),
-  interval: z.number().int().min(1).max(12).default(1),
-  startOn: civilDateSchema,
-  endOn: civilDateSchema.nullable().optional(),
-  maxOccurrences: z.number().int().min(1).max(120).nullable().optional(),
-  variable: z.boolean().default(false),
-  estimatedAmount: positiveMoneySchema.nullable().optional(),
-  description: z.string().trim().max(500).default(""),
+export const createRecurrenceSchema = z
+  .object({
+    kind: z.enum(["income", "expense"]),
+    amount: positiveMoneySchema,
+    frequency: z.enum(["weekly", "monthly", "annual"]),
+    interval: z.number().int().min(1).max(12).default(1),
+    startOn: civilDateSchema,
+    endOn: civilDateSchema.nullable().optional(),
+    maxOccurrences: z.number().int().min(1).max(120).nullable().optional(),
+    variable: z.boolean().default(false),
+    estimatedAmount: positiveMoneySchema.nullable().optional(),
+    description: z.string().trim().max(500).default(""),
+  })
+  .superRefine((value, context) => {
+    if (value.endOn && value.endOn < value.startOn) {
+      context.addIssue({
+        code: "custom",
+        path: ["endOn"],
+        message: "O fim da recorrência deve ser posterior ao início.",
+      });
+    }
+    if (!value.variable && value.estimatedAmount) {
+      context.addIssue({
+        code: "custom",
+        path: ["estimatedAmount"],
+        message: "A estimativa só se aplica a recorrência variável.",
+      });
+    }
+  });
+
+export const recurrenceTransitionSchema = z.object({
+  /** Pause takes effect on this civil date; omitted means today in the workspace. */
+  effectiveOn: civilDateSchema.optional(),
 });
+export type RecurrenceTransitionInput = z.infer<typeof recurrenceTransitionSchema>;
 
 export const createInstallmentPlanSchema = z.object({
   total: positiveMoneySchema,

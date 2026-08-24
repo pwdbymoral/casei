@@ -703,6 +703,9 @@ export const financeTransaction = pgTable(
     ),
     check("finance_transaction_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
     uniqueIndex("finance_transaction_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("finance_transaction_recurrence_date_unique")
+      .on(table.workspaceId, table.recurrenceId, table.occurredOn)
+      .where(sql`${table.recurrenceId} is not null`),
   ],
 );
 
@@ -807,6 +810,11 @@ export const recurrenceRule = pgTable(
     maxOccurrences: integer("max_occurrences"),
     variable: boolean("variable").notNull().default(false),
     estimatedMinor: bigint("estimated_minor", { mode: "bigint" }),
+    kind: text("kind").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    description: text("description").notNull().default(""),
+    status: text("status").notNull().default("active"),
+    invalidReason: text("invalid_reason"),
     pausedOn: date("paused_on"),
     version: integer("version").notNull().default(0),
     createdAt: instant("created_at").defaultNow().notNull(),
@@ -815,6 +823,16 @@ export const recurrenceRule = pgTable(
   (table) => [
     check("recurrence_frequency_check", sql`${table.frequency} in ('weekly', 'monthly', 'annual')`),
     check("recurrence_interval_check", sql`${table.interval} > 0`),
+    check("recurrence_status_check", sql`${table.status} in ('active', 'archived')`),
+    check(
+      "recurrence_kind_check",
+      sql`${table.status} = 'archived' or ${table.kind} in ('income', 'expense')`,
+    ),
+    check("recurrence_amount_check", sql`${table.status} = 'archived' or ${table.amountMinor} > 0`),
+    check(
+      "recurrence_date_order_check",
+      sql`${table.status} = 'archived' or ${table.endOn} is null or ${table.endOn} >= ${table.startOn}`,
+    ),
   ],
 );
 

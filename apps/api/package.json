@@ -9,7 +9,9 @@
     "worker:dev": "tsx src/auth-email-worker.ts",
     "worker:workspace": "node dist/workspace-worker.js",
     "worker:workspace:dev": "tsx src/workspace-worker.ts",
-    "build": "tsup src/server.ts src/auth-email-worker.ts src/workspace-worker.ts --format esm --target node24 --out-dir dist",
+    "worker:recurrence": "node dist/recurrence-worker.js",
+    "worker:recurrence:dev": "tsx src/recurrence-worker.ts",
+    "build": "tsup src/server.ts src/auth-email-worker.ts src/workspace-worker.ts src/recurrence-worker.ts --format esm --target node24 --out-dir dist",
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
