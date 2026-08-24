@@ -519,11 +519,6 @@ async function assertStockMembership(
   client: PoolClient,
   scope: StockScope,
 ): Promise<{ role: StockScope["role"] }> {
-  const workspace = await client.query<{ status: string }>(
-    `SELECT status FROM workspace WHERE id = $1 FOR UPDATE`,
-    [scope.workspaceId],
-  );
-  if (workspace.rows[0]?.status !== "active") throw new StockPermissionError();
   const result = await client.query<{ role: StockScope["role"]; status: string }>(
     `SELECT role, status
        FROM membership
@@ -533,6 +528,12 @@ async function assertStockMembership(
   );
   const membership = result.rows[0];
   if (membership?.status !== "active") throw new StockPermissionError();
+  // Keep the same membership -> workspace order used by IdentityService.withScoped.
+  const workspace = await client.query<{ status: string }>(
+    `SELECT status FROM workspace WHERE id = $1 FOR UPDATE`,
+    [scope.workspaceId],
+  );
+  if (workspace.rows[0]?.status !== "active") throw new StockPermissionError();
   return membership;
 }
 
