@@ -44,6 +44,7 @@ BEGIN
   -- selected, removes entries before events, and restores the guards on every
   -- path. Audit events remain detached by the caller and are not deleted here.
   ALTER TABLE "ledger_entry" DISABLE TRIGGER "ledger_entry_immutable_guard";
+  ALTER TABLE "ledger_entry" DISABLE TRIGGER "ledger_event_balance_on_entry";
   ALTER TABLE "ledger_event" DISABLE TRIGGER "ledger_event_immutable_guard";
 
   DELETE FROM "ledger_entry"
@@ -65,10 +66,12 @@ BEGIN
   GET DIAGNOSTICS removed_events = ROW_COUNT;
 
   ALTER TABLE "ledger_event" ENABLE TRIGGER "ledger_event_immutable_guard";
+  ALTER TABLE "ledger_entry" ENABLE TRIGGER "ledger_event_balance_on_entry";
   ALTER TABLE "ledger_entry" ENABLE TRIGGER "ledger_entry_immutable_guard";
   RETURN removed_entries + removed_events;
 EXCEPTION WHEN OTHERS THEN
   ALTER TABLE "ledger_event" ENABLE TRIGGER "ledger_event_immutable_guard";
+  ALTER TABLE "ledger_entry" ENABLE TRIGGER "ledger_event_balance_on_entry";
   ALTER TABLE "ledger_entry" ENABLE TRIGGER "ledger_entry_immutable_guard";
   RAISE;
 END;
