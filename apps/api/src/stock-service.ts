@@ -314,22 +314,7 @@ export class StockService {
         const current = await lockProduct(client, scope, productId);
         assertExpectedVersion(current.version, expectedVersion);
         if (normalizeProductName(current.name).key !== normalized.key) {
-          const freeCollision = await client.query<{ id: string }>(
-            `SELECT id
-               FROM shopping_item
-              WHERE workspace_id = $1
-                AND name_normalized = $2
-                AND purchased = false
-                AND source = 'free'
-              LIMIT 1
-              FOR UPDATE`,
-            [scope.workspaceId, normalized.key],
-          );
-          if (freeCollision.rowCount) {
-            throw new StockConflictError(
-              "O novo nome já está em um item livre da lista; conclua ou remova esse item antes de renomear o produto.",
-            );
-          }
+          await assertNoFreeShoppingNameCollision(client, scope, normalized.key);
         }
         if (current.unit !== values.unit) {
           const movement = await client.query<{ id: string }>(
@@ -500,6 +485,11 @@ export class StockService {
               );
               if (collision.rowCount)
                 throw new StockConflictError("Já existe um produto ativo com esse nome.");
+              await assertNoFreeShoppingNameCollision(
+                client,
+                scope,
+                normalizeProductName(current.name).key,
+              );
             }
             let updated: { rows: StockProductRow[] };
             try {
@@ -1118,6 +1108,29 @@ async function findActiveShoppingItem(
     [scope.workspaceId, nameNormalized],
   );
   return result.rows[0] ?? null;
+}
+
+async function assertNoFreeShoppingNameCollision(
+  client: PoolClient,
+  scope: StockScope,
+  nameNormalized: string,
+): Promise<void> {
+  const collision = await client.query<{ id: string }>(
+    `SELECT id
+       FROM shopping_item
+      WHERE workspace_id = $1
+        AND name_normalized = $2
+        AND purchased = false
+        AND source = 'free'
+      LIMIT 1
+      FOR UPDATE`,
+    [scope.workspaceId, nameNormalized],
+  );
+  if (collision.rowCount) {
+    throw new StockConflictError(
+      "O nome já está em um item livre da lista; conclua ou remova esse item antes de alterar o produto.",
+    );
+  }
 }
 
 async function lockShoppingItem(

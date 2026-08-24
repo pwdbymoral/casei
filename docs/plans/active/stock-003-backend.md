@@ -14,7 +14,8 @@ uma colisão com item livre deve ser um conflito recuperável antes de qualquer 
 1. Quando um produto com item automático ativo é editado, a linha automática exibida usa nome,
    chave normalizada, unidade e rótulo atuais do produto.
 2. Quando o novo nome do produto coincide com item livre ativo do mesmo espaço, a edição retorna
-   `conflict`, não atualiza o produto e deixa a lista inalterada.
+   `conflict`, não atualiza o produto e deixa a lista inalterada; restaurar produto arquivado com
+   a mesma colisão segue a mesma regra.
 3. A unicidade continua por espaço e somente para itens não comprados; itens comprados não
    bloqueiam uma nova solicitação.
 

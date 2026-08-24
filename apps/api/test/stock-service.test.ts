@@ -334,7 +334,7 @@ function freeCollisionPool() {
   };
 }
 
-function productRenameCollisionPool() {
+function productRenameCollisionPool(archived = false) {
   const statements: string[] = [];
   const currentProduct = {
     id: productId,
@@ -349,7 +349,7 @@ function productRenameCollisionPool() {
     category: null,
     location: null,
     note: null,
-    archived: false,
+    archived,
     version: 0,
   };
   const client = {
@@ -360,6 +360,9 @@ function productRenameCollisionPool() {
       }
       if (sql.includes("FROM workspace")) {
         return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes('INSERT INTO "idempotency_key"')) {
+        return { rows: [{ id: "idempotency-1" }] as T[], rowCount: 1 };
       }
       if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
         return { rows: [currentProduct as T], rowCount: 1 };
@@ -513,6 +516,16 @@ describe("StockService membership revalidation", () => {
 
     await expect(
       service.updateProduct(scope, productId, { name: "Arroz livre", unit: "unit" }, 0),
+    ).rejects.toBeInstanceOf(StockConflictError);
+    expect(harness.statements.some((sql) => /UPDATE stock_product/i.test(sql))).toBe(false);
+  });
+
+  it("rejects restoring an archived product that collides with an active free item", async () => {
+    const harness = productRenameCollisionPool(true);
+    const service = new StockService(harness.pool as never);
+
+    await expect(
+      service.setArchived(scope, productId, false, "shopping-restore-0001", 0),
     ).rejects.toBeInstanceOf(StockConflictError);
     expect(harness.statements.some((sql) => /UPDATE stock_product/i.test(sql))).toBe(false);
   });

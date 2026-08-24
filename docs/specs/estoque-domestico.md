@@ -63,6 +63,8 @@ somente são removidos por cascade quando o workspace inteiro é purgado após a
 Quando um produto é editado, uma linha automática ativa acompanha seu nome normalizado, unidade,
 rótulo e versão. Se o novo nome colidir com um item livre ativo, a edição retorna conflito
 recuperável antes de alterar o produto, pois o MVP não possui merge silencioso de linhas.
+O mesmo bloqueio se aplica ao restauro de um produto arquivado cujo nome já esteja em um item livre
+ativo; concluir ou remover a solicitação livre é a forma explícita de resolver a colisão.
 
 ## Busca e uso no mercado
 
@@ -80,6 +82,7 @@ recuperável antes de alterar o produto, pois o MVP não possui merge silencioso
 - Renomear um produto não pode criar duas entradas ativas para a mesma solicitação de compra:
   se o novo nome já estiver em um item livre ativo, a alteração é rejeitada com conflito
   recuperável; o usuário deve concluir/remover o item livre antes de renomear o produto.
+- Restaurar produto arquivado com item livre ativo homônimo também retorna conflito recuperável.
 
 ## Critérios de aceitação
 
