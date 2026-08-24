@@ -17,6 +17,7 @@ import {
   settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
+  updateCreditCardSchema,
   updateGoalSchema,
 } from "@casei/contracts";
 import { IdempotencyConflictError } from "@casei/database";
@@ -309,6 +310,34 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       requiredIdempotencyKey(context),
     );
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+  });
+
+  router.patch("/workspaces/:workspaceId/cards/:cardId", async (context) => {
+    const cardId = parseDomainId(context.req.param("cardId"));
+    const input = await parseJsonBody(context, updateCreditCardSchema);
+    const result = await service.updateCard(
+      scopeOf(context),
+      cardId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.card.version);
+    return context.json(result.card);
+  });
+
+  router.post("/workspaces/:workspaceId/cards/:cardId/archive", async (context) => {
+    const cardId = parseDomainId(context.req.param("cardId"));
+    const result = await service.archiveCard(
+      scopeOf(context),
+      cardId,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.card.version);
+    return context.json(result.card);
   });
 
   router.post("/workspaces/:workspaceId/cards/:cardId/purchases", async (context) => {

@@ -43,6 +43,109 @@ describe("finance command guards", () => {
     expect(() => assertVariableRecurrenceSettlementAllowed(false, false)).not.toThrow();
   });
 
+  it("updates only supplied card fields and increments its version", async () => {
+    const current = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      name: "Principal",
+      closing_day: 10,
+      due_day: 17,
+      holder: "Marina",
+      last_four: "1234",
+      limit_minor: "100000",
+      currency_code: "BRL",
+      archived: false,
+      version: 3,
+    };
+    const updated = { ...current, closing_day: 31, holder: null, version: 4 };
+    const client = {
+      query: vi.fn(async (sql: string, _values?: unknown[]) => {
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM credit_card") && sql.includes("FOR UPDATE")) {
+          return { rows: [current] };
+        }
+        if (sql.startsWith("UPDATE credit_card")) return { rows: [updated] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const result = await service.updateCard(
+      {
+        workspaceId: current.workspace_id,
+        actorId: "user-1",
+        correlationId: "correlation-1",
+        role: "member",
+      },
+      current.id,
+      { closingDay: 31, holder: null },
+      "card-update-service-001",
+      3,
+    );
+
+    expect(result.card).toMatchObject({ closingDay: 31, holder: null, version: 4 });
+    const updateCall = client.query.mock.calls.find(([sql]) =>
+      sql.startsWith("UPDATE credit_card"),
+    );
+    expect(updateCall?.[1]).toEqual([
+      current.workspace_id,
+      current.id,
+      current.name,
+      31,
+      current.due_day,
+      null,
+      current.last_four,
+      current.limit_minor,
+      3,
+    ]);
+  });
+
+  it("blocks card archive while a statement has an open balance", async () => {
+    const current = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      name: "Principal",
+      closing_day: 10,
+      due_day: 17,
+      holder: null,
+      last_four: null,
+      limit_minor: null,
+      currency_code: "BRL",
+      archived: false,
+      version: 0,
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM credit_card") && sql.includes("FOR UPDATE")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("SELECT EXISTS")) return { rows: [{ blocked: true }] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+
+    await expect(
+      service.archiveCard(
+        {
+          workspaceId: current.workspace_id,
+          actorId: "user-1",
+          correlationId: "correlation-1",
+          role: "member",
+        },
+        current.id,
+        "card-archive-service-001",
+        0,
+      ),
+    ).rejects.toThrow("fatura antes de arquivar");
+    expect(client.query.mock.calls.some(([sql]) => sql.startsWith("UPDATE credit_card"))).toBe(
+      false,
+    );
+    expect(client.query.mock.calls.some(([sql]) => sql === "ROLLBACK")).toBe(true);
+  });
+
   it("pages statement composition by a stable date, creation time, and id cursor", async () => {
     const itemOne = {
       id: "0190f3c8-2a10-7abc-8def-1234567890ac",

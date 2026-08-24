@@ -3,6 +3,7 @@ import {
   payStatementSchema,
   settleTransactionSchema,
   transactionListQuerySchema,
+  updateCreditCardSchema,
 } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 
@@ -61,5 +62,15 @@ describe("finance contracts", () => {
     expect(() =>
       transactionListQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
     ).toThrow();
+  });
+
+  it("accepts partial card configuration updates and preserves explicit clearing", () => {
+    expect(updateCreditCardSchema.parse({ closingDay: 31, holder: null, limit: null })).toEqual({
+      closingDay: 31,
+      holder: null,
+      limit: null,
+    });
+    expect(() => updateCreditCardSchema.parse({})).toThrow();
+    expect(() => updateCreditCardSchema.parse({ lastFour: "123" })).toThrow();
   });
 });

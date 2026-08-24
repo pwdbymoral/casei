@@ -609,6 +609,24 @@ export const createCreditCardSchema = z.object({
   limit: moneySchema.nullable().optional(),
 });
 
+export const updateCreditCardSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    closingDay: z.number().int().min(1).max(31).optional(),
+    dueDay: z.number().int().min(1).max(31).optional(),
+    holder: z.string().trim().max(100).nullable().optional(),
+    lastFour: z
+      .string()
+      .regex(/^\d{4}$/)
+      .nullable()
+      .optional(),
+    limit: moneySchema.nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Informe ao menos uma configuração para alterar.",
+  });
+export type UpdateCreditCardInput = z.infer<typeof updateCreditCardSchema>;
+
 export const statementSchema = z.object({
   id: domainIdSchema,
   cardId: domainIdSchema,
