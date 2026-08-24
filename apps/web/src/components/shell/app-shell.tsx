@@ -17,7 +17,15 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import { AsyncState, type AsyncStateStatus } from "@/components/primitives";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +57,21 @@ type AppShellProps = {
   initialSession?: WorkspaceSession;
   onLogout?: () => Promise<void>;
 };
+
+export type AuthenticatedWorkspaceScope = {
+  workspaceId: string;
+  role: NonNullable<ReturnType<typeof getActiveWorkspace>>["role"];
+  fixtureMode: boolean;
+};
+
+const AuthenticatedWorkspaceContext = createContext<AuthenticatedWorkspaceScope | null>(null);
+
+/** Reads the scope selected by the authenticated shell, including its membership role. */
+export function useAuthenticatedWorkspace(): AuthenticatedWorkspaceScope {
+  const scope = useContext(AuthenticatedWorkspaceContext);
+  if (!scope) throw new Error("useAuthenticatedWorkspace must be used inside AppShell");
+  return scope;
+}
 
 const primaryNav = [
   { href: "/app", label: "Hoje", icon: HomeIcon },
@@ -348,6 +371,20 @@ export function AppShell({
     );
   }
 
+  const scopedChildren = activeWorkspace ? (
+    <AuthenticatedWorkspaceContext.Provider
+      value={{
+        workspaceId: activeWorkspace.id,
+        role: activeWorkspace.role,
+        fixtureMode: adapterMode === "fixture",
+      }}
+    >
+      {children}
+    </AuthenticatedWorkspaceContext.Provider>
+  ) : (
+    children
+  );
+
   return (
     <div className="min-h-dvh bg-muted/30">
       <a
@@ -542,10 +579,10 @@ export function AppShell({
                   : undefined
               }
             >
-              {children}
+              {scopedChildren}
             </AsyncState>
           ) : (
-            children
+            scopedChildren
           )}
         </main>
       </div>

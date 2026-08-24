@@ -8,6 +8,7 @@ import {
   domainIdSchema,
   paginationQuerySchema,
   payStatementSchema,
+  reopenStatementSchema,
   statementListQuerySchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
@@ -29,11 +30,26 @@ export interface FinanceRoutesOptions {
   scopeMiddleware: MiddlewareHandler<ApiEnv>;
 }
 
-/** Mounts the financial vertical below /v1. Scope resolution remains owned by AUTH-004. */
+/** Mounts the financial vertical below /v1. The app composition supplies AUTH-004 actor/scope middleware. */
 export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRoutesOptions): void {
   const { service } = options;
   router.onError((error, context) => errorResponse(context, financeErrorToHttp(error)));
-  router.use("/workspaces/:workspaceId/*", options.scopeMiddleware);
+  for (const path of [
+    "/workspaces/:workspaceId/transactions",
+    "/workspaces/:workspaceId/transactions/*",
+    "/workspaces/:workspaceId/categories",
+    "/workspaces/:workspaceId/categories/*",
+    "/workspaces/:workspaceId/cards",
+    "/workspaces/:workspaceId/cards/*",
+    "/workspaces/:workspaceId/statements",
+    "/workspaces/:workspaceId/statements/*",
+    "/workspaces/:workspaceId/recurrences",
+    "/workspaces/:workspaceId/recurrences/*",
+    "/workspaces/:workspaceId/installments",
+    "/workspaces/:workspaceId/installments/*",
+  ]) {
+    router.use(path, options.scopeMiddleware);
+  }
 
   router.post("/workspaces/:workspaceId/transactions", async (context) => {
     const input = await parseJsonBody(context, createTransactionSchema);
@@ -76,6 +92,16 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     const query = parseQuery(context, statementListQuerySchema);
     const items = await service.listStatements(scopeOf(context), query.cardId, query.limit);
     return context.json({ items, page: { nextCursor: null, hasMore: false } });
+  });
+
+  router.get("/workspaces/:workspaceId/statements/:statementId/items", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const query = parseQuery(context, paginationQuerySchema);
+    const page = await service.listStatementItems(scopeOf(context), statementId, query);
+    return context.json({
+      items: page.items,
+      page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+    });
   });
 
   router.post("/workspaces/:workspaceId/transactions/:id/post", async (context) => {
@@ -181,6 +207,20 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     setVersionHeaders(context, statement.version);
     return context.json(statement);
   });
+
+  router.post("/workspaces/:workspaceId/statements/:statementId/reopen", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const expectedVersion = requireIfMatch(context);
+    await parseJsonBody(context, reopenStatementSchema);
+    const statement = await service.reopenStatement(
+      scopeOf(context),
+      statementId,
+      requiredIdempotencyKey(context),
+      expectedVersion,
+    );
+    setVersionHeaders(context, statement.version);
+    return context.json(statement);
+  });
 }
 
 function scopeOf(context: Parameters<MiddlewareHandler<ApiEnv>>[0]): FinanceScope {
@@ -214,7 +254,8 @@ function parseDomainId(value: string | undefined): string {
 export function financeErrorToHttp(error: unknown): unknown {
   if (error instanceof FinanceNotFoundError) return notFoundError();
   if (error instanceof FinancePermissionError) return new ApiHttpError(403, "permission_denied");
-  if (error instanceof VersionConflictError) return new ApiHttpError(412, "version_conflict");
+  if (error instanceof VersionConflictError)
+    return new ApiHttpError(412, "version_conflict", { currentVersion: error.currentVersion });
   if (error instanceof FinanceConflictError)
     return new ApiHttpError(409, "validation_failed", { message: error.message });
   return error;

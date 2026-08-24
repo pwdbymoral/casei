@@ -6,11 +6,8 @@ import { useEffect, useState } from "react";
 
 import { AsyncState } from "@/components/primitives";
 import { buttonVariants } from "@/components/ui/button";
+import { configuredApiOrigin } from "@/lib/api-origin";
 import { cn } from "@/lib/utils";
-
-function apiOrigin(): string {
-  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
-}
 
 export default function InvitationPage() {
   const params = useParams<{ token: string }>();
@@ -21,8 +18,14 @@ export default function InvitationPage() {
   useEffect(() => {
     const token = params.token;
     if (!token) return;
+    const origin = configuredApiOrigin();
+    if (!origin) {
+      setState("error");
+      setMessage("A origem da API não está configurada. Tente novamente mais tarde.");
+      return;
+    }
     let canceled = false;
-    void fetch(`${apiOrigin()}/v1/invitations/${encodeURIComponent(token)}/accept`, {
+    void fetch(`${origin}/v1/invitations/${encodeURIComponent(token)}/accept`, {
       method: "POST",
       credentials: "include",
       headers: { Accept: "application/json" },

@@ -4,41 +4,49 @@ import {
   CalendarClockIcon,
   CheckIcon,
   CreditCardIcon,
+  ListTreeIcon,
   LoaderCircleIcon,
   PlusIcon,
   ReceiptTextIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { MoneyInput } from "@/components/primitives";
+import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   type CreditCard,
   canWriteFinance,
+  createRequestGuard,
   type FinanceAdapter,
+  FinanceAdapterError,
   financeAdapterForEnvironment,
   type Statement,
+  type StatementItem,
+  statementItemAmountPrefix,
   type Transaction,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
 
-const fixtureWorkspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
-const activeWorkspaceStorageKey = "casei:active-workspace:v1";
-
 function today(): string {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function activeWorkspaceId(): string {
-  if (typeof window === "undefined") return fixtureWorkspaceId;
-  return window.localStorage.getItem(activeWorkspaceStorageKey) ?? fixtureWorkspaceId;
 }
 
 function transactionLabel(transaction: Transaction): string {
@@ -62,19 +70,20 @@ function statementLabel(statement: Statement): string {
 
 type FinanceDashboardProps = {
   adapter?: FinanceAdapter;
-  workspaceId?: string;
-  role?: WorkspaceRole;
+  fixtureMode?: boolean;
+  workspaceId: string;
+  role: WorkspaceRole;
 };
 
 function FinanceDashboard({
   adapter: providedAdapter,
-  workspaceId: providedWorkspaceId,
-  role = "owner",
-}: FinanceDashboardProps = {}) {
+  fixtureMode = false,
+  workspaceId,
+  role,
+}: FinanceDashboardProps) {
   const [adapter] = useState<FinanceAdapter>(
-    () => providedAdapter ?? financeAdapterForEnvironment(),
+    () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
-  const [workspaceId, setWorkspaceId] = useState(providedWorkspaceId ?? fixtureWorkspaceId);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
@@ -93,11 +102,26 @@ function FinanceDashboard({
   const [dueDay, setDueDay] = useState("17");
   const [savingCard, setSavingCard] = useState(false);
   const [busyStatementId, setBusyStatementId] = useState<string | null>(null);
+  const [viewingStatement, setViewingStatement] = useState<Statement | null>(null);
+  const [statementItems, setStatementItems] = useState<StatementItem[]>([]);
+  const [statementItemsNextCursor, setStatementItemsNextCursor] = useState<string | null>(null);
+  const [statementItemsHasMore, setStatementItemsHasMore] = useState(false);
+  const [loadingStatementItems, setLoadingStatementItems] = useState(false);
+  const [loadingMoreStatementItems, setLoadingMoreStatementItems] = useState(false);
+  const [pendingStatementAction, setPendingStatementAction] = useState<{
+    type: "close" | "reopen";
+    statement: Statement;
+  } | null>(null);
+  const [statementItemsRequest] = useState(createRequestGuard);
   const writeAccess = canWriteFinance(role);
 
   const load = useCallback(async () => {
     setStatus("loading");
     setError(null);
+    setViewingStatement(null);
+    setStatementItems([]);
+    setStatementItemsNextCursor(null);
+    setStatementItemsHasMore(false);
     try {
       const [nextTransactions, nextCards, nextStatements] = await Promise.all([
         adapter.listTransactions(workspaceId),
@@ -113,10 +137,6 @@ function FinanceDashboard({
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.");
     }
   }, [adapter, workspaceId]);
-
-  useEffect(() => {
-    if (!providedWorkspaceId) setWorkspaceId(activeWorkspaceId());
-  }, [providedWorkspaceId]);
 
   useEffect(() => {
     void load();
@@ -185,20 +205,98 @@ function FinanceDashboard({
     }
   }
 
-  async function closeStatement(statement: Statement) {
+  async function runStatementAction(type: "close" | "reopen", statement: Statement) {
     if (busyStatementId) return;
     setBusyStatementId(statement.id);
     setError(null);
     try {
-      const closed = await adapter.closeStatement(workspaceId, statement);
-      setStatements((current) => current.map((value) => (value.id === closed.id ? closed : value)));
-      setNotice("Fatura fechada. Compras novas entram no próximo ciclo.");
+      const updated =
+        type === "close"
+          ? await adapter.closeStatement(workspaceId, statement)
+          : await adapter.reopenStatement(workspaceId, statement);
+      setStatements((current) =>
+        current.map((value) => (value.id === updated.id ? updated : value)),
+      );
+      setPendingStatementAction(null);
+      setNotice(
+        type === "close"
+          ? "Fatura fechada. Compras novas entram no próximo ciclo."
+          : "Fatura reaberta. Novos lançamentos podem voltar a compor este ciclo.",
+      );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível fechar a fatura.");
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setPendingStatementAction(null);
+        await load();
+        setNotice(
+          "A fatura mudou enquanto você revisava. Recarregamos os dados; revise antes de tentar novamente.",
+        );
+        return;
+      }
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : `Não foi possível ${type === "close" ? "fechar" : "reabrir"} a fatura.`,
+      );
     } finally {
       setBusyStatementId(null);
     }
   }
+
+  const viewingStatementId = viewingStatement?.id;
+
+  const loadStatementItems = useCallback(
+    async (statementId: string, cursor: string | undefined, append: boolean) => {
+      const request = statementItemsRequest.begin();
+      if (append) {
+        setLoadingMoreStatementItems(true);
+      } else {
+        setStatementItems([]);
+        setStatementItemsNextCursor(null);
+        setStatementItemsHasMore(false);
+        setLoadingStatementItems(true);
+      }
+      setError(null);
+      try {
+        const page = await adapter.listStatementItems(workspaceId, statementId, {
+          cursor,
+          limit: 50,
+        });
+        if (!statementItemsRequest.isCurrent(request)) return;
+        setStatementItems((current) => (append ? [...current, ...page.items] : page.items));
+        setStatementItemsNextCursor(page.nextCursor);
+        setStatementItemsHasMore(page.hasMore);
+      } catch (cause) {
+        if (!statementItemsRequest.isCurrent(request)) return;
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar a composição.",
+        );
+        if (!append) setViewingStatement(null);
+      } finally {
+        if (statementItemsRequest.isCurrent(request)) {
+          if (append) {
+            setLoadingMoreStatementItems(false);
+          } else {
+            setLoadingStatementItems(false);
+          }
+        }
+      }
+    },
+    [adapter, statementItemsRequest, workspaceId],
+  );
+
+  useEffect(() => {
+    if (!viewingStatementId) {
+      statementItemsRequest.invalidate();
+      setStatementItems([]);
+      setStatementItemsNextCursor(null);
+      setStatementItemsHasMore(false);
+      setLoadingStatementItems(false);
+      setLoadingMoreStatementItems(false);
+      return;
+    }
+    void loadStatementItems(viewingStatementId, undefined, false);
+    return () => statementItemsRequest.invalidate();
+  }, [loadStatementItems, statementItemsRequest, viewingStatementId]);
 
   async function payStatement(statement: Statement) {
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
@@ -509,14 +607,38 @@ function FinanceDashboard({
                           {formatMoneyMinor(statement.openAmount.minor)}
                         </p>
                         <div className="mt-1 flex gap-2">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setViewingStatement(statement)}
+                          >
+                            <ListTreeIcon data-icon="inline-start" aria-hidden="true" />
+                            Composição
+                          </Button>
                           {statement.state === "open" ? (
                             <Button
                               size="sm"
                               variant="outline"
                               disabled={busyStatementId !== null || !writeAccess}
-                              onClick={() => void closeStatement(statement)}
+                              onClick={() =>
+                                setPendingStatementAction({ type: "close", statement })
+                              }
                             >
                               Fechar
+                            </Button>
+                          ) : null}
+                          {statement.state === "closed" &&
+                          BigInt(statement.paid.minor) === BigInt(0) ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={busyStatementId !== null || !writeAccess}
+                              onClick={() =>
+                                setPendingStatementAction({ type: "reopen", statement })
+                              }
+                            >
+                              <RotateCcwIcon data-icon="inline-start" aria-hidden="true" />
+                              Reabrir
                             </Button>
                           ) : null}
                           {statement.state !== "paid" &&
@@ -569,10 +691,160 @@ function FinanceDashboard({
           </div>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={viewingStatement !== null}
+        onOpenChange={(open) => {
+          if (!open) setViewingStatement(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Composição da fatura</DialogTitle>
+            <DialogDescription>
+              Compras aumentam o total. Pagamentos reduzem apenas o valor em aberto.
+            </DialogDescription>
+          </DialogHeader>
+          {viewingStatement ? (
+            <div className="flex flex-col gap-4">
+              <dl className="grid grid-cols-3 gap-3 rounded-lg bg-muted/50 p-3 text-sm">
+                <div>
+                  <dt className="text-muted-foreground">Total</dt>
+                  <dd className="mt-1 font-semibold">
+                    {formatMoneyMinor(viewingStatement.total.minor)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Pago</dt>
+                  <dd className="mt-1 font-semibold">
+                    {formatMoneyMinor(viewingStatement.paid.minor)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Em aberto</dt>
+                  <dd className="mt-1 font-semibold">
+                    {formatMoneyMinor(viewingStatement.openAmount.minor)}
+                  </dd>
+                </div>
+              </dl>
+              {loadingStatementItems ? (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Carregando composição…
+                </p>
+              ) : statementItems.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                  Esta fatura ainda não possui compras nem pagamentos.
+                </p>
+              ) : (
+                <ul className="max-h-72 divide-y overflow-y-auto">
+                  {statementItems.map((item) => {
+                    const canceled = item.state === "canceled";
+                    const kindLabel = item.type === "payment" ? "Pagamento" : "Compra";
+                    return (
+                      <li
+                        key={item.id}
+                        className="flex items-start justify-between gap-3 py-3 first:pt-0 last:pb-0"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">
+                            {item.description ||
+                              (item.type === "payment" ? "Pagamento de fatura" : "Compra")}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {kindLabel}
+                            {canceled ? " cancelada" : ""} · {item.occurredOn}
+                          </p>
+                        </div>
+                        <span
+                          className={
+                            canceled
+                              ? "shrink-0 text-sm text-muted-foreground line-through"
+                              : "shrink-0 font-semibold"
+                          }
+                        >
+                          {statementItemAmountPrefix(item)}
+                          {formatMoneyMinor(item.amount.minor)}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {statementItemsHasMore ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="self-start"
+                  disabled={loadingMoreStatementItems || loadingStatementItems}
+                  onClick={() => {
+                    if (statementItemsNextCursor && viewingStatementId) {
+                      void loadStatementItems(viewingStatementId, statementItemsNextCursor, true);
+                    }
+                  }}
+                >
+                  {loadingMoreStatementItems ? "Carregando mais…" : "Carregar mais itens"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingStatementAction !== null}
+        onOpenChange={(open) => {
+          if (!open && busyStatementId === null) setPendingStatementAction(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {pendingStatementAction?.type === "reopen" ? "Reabrir fatura?" : "Fechar fatura?"}
+            </DialogTitle>
+            <DialogDescription>
+              {pendingStatementAction?.type === "reopen"
+                ? "Esta fatura voltará a aceitar lançamentos. A reabertura é bloqueada quando já existem pagamentos."
+                : "O período e o total ficam congelados. Novas compras serão direcionadas para o próximo ciclo."}
+            </DialogDescription>
+          </DialogHeader>
+          {pendingStatementAction ? (
+            <p className="rounded-lg bg-muted/50 p-3 text-sm">
+              Fatura com vencimento em {pendingStatementAction.statement.dueOn} · valor em aberto{" "}
+              <strong>{formatMoneyMinor(pendingStatementAction.statement.openAmount.minor)}</strong>
+            </p>
+          ) : null}
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />} disabled={busyStatementId !== null}>
+              Cancelar
+            </DialogClose>
+            <Button
+              disabled={busyStatementId !== null}
+              onClick={() => {
+                if (pendingStatementAction) {
+                  void runStatementAction(
+                    pendingStatementAction.type,
+                    pendingStatementAction.statement,
+                  );
+                }
+              }}
+            >
+              {busyStatementId
+                ? "Salvando…"
+                : pendingStatementAction?.type === "reopen"
+                  ? "Reabrir fatura"
+                  : "Fechar fatura"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
 export default function FinancesPage() {
-  return <FinanceDashboard />;
+  const { workspaceId, role, fixtureMode } = useAuthenticatedWorkspace();
+  return <FinanceDashboard workspaceId={workspaceId} role={role} fixtureMode={fixtureMode} />;
 }

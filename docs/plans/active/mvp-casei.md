@@ -112,6 +112,10 @@ O mesmo PR entrega cadastro de cartão, compra, associação à fatura aberta, p
 parcelamento exato e recorrência com bloqueio explícito de ocorrência variável não confirmada. Fechamento,
 reabertura, estorno em fatura fechada e as telas de cartão permanecem nas tarefas seguintes.
 
+Uma fatia posterior acrescenta a composição explicável por compras/pagamentos e a reabertura explícita,
+versionada e restrita a faturas fechadas sem pagamentos. `CARD-003` e `CARD-006` permanecem abertos até
+existirem ajuste pós-fechamento, correção de ciclo, estorno/tarifas e visão completa por ciclo.
+
 **Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
 
 ## Marco 5 — empréstimos e metas

@@ -1,16 +1,63 @@
+import type { Pool } from "@casei/database";
 import { describe, expect, it } from "vitest";
-
 import { createApp } from "../src/app.js";
 import { configureFinanceRoutes } from "../src/finance-routes.js";
 import type { FinanceService } from "../src/finance-service.js";
 import { createActorMiddleware, createWorkspaceScopeMiddleware } from "../src/http/middleware.js";
+import type { IdentityService } from "../src/identity-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
 const cardId = "0190f3c8-2a10-7abc-8def-1234567890ad";
 const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
+const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
 
 describe("finance HTTP composition", () => {
+  it("wires finance through createApp's authenticated actor and workspace scope", async () => {
+    let receivedActor: unknown;
+    let receivedWorkspaceId: string | undefined;
+    let receivedRole: string | undefined;
+    const identityService = {
+      resolveScope: async (actor: unknown, id: string) => {
+        receivedActor = actor;
+        receivedWorkspaceId = id;
+        receivedRole = "member";
+        return {
+          actor: actor as { userId: string },
+          workspaceId: id,
+          role: "member" as const,
+          correlationId: "correlation-from-request",
+        };
+      },
+    } as unknown as IdentityService;
+    const financeService = {
+      listCards: async (scope: { workspaceId: string; role: string }) => {
+        expect(scope.workspaceId).toBe(workspaceId);
+        expect(scope.role).toBe("member");
+        return [];
+      },
+    } as unknown as FinanceService;
+    const app = createApp(undefined, {
+      identity: {
+        pool: {} as Pool,
+        service: identityService,
+        actorResolver: async () => ({ userId: "auth-user-1", email: "auth@example.com" }),
+      },
+      finance: { pool: {} as Pool, service: financeService },
+    });
+
+    const response = await app.request(`http://localhost/v1/workspaces/${workspaceId}/cards`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      items: [],
+      page: { nextCursor: null, hasMore: false },
+    });
+    expect(receivedActor).toEqual({ userId: "auth-user-1", email: "auth@example.com" });
+    expect(receivedWorkspaceId).toBe(workspaceId);
+    expect(receivedRole).toBe("member");
+  });
+
   it("mounts the scoped transaction command below /v1", async () => {
     const fakeService = {
       createTransaction: async () => ({
@@ -185,5 +232,97 @@ describe("finance HTTP composition", () => {
     expect(closed.status).toBe(200);
     expect(closed.headers.get("etag")).toBe('"v1"');
     await expect(closed.json()).resolves.toMatchObject({ id: statementId, state: "closed" });
+  });
+
+  it("explains statement composition and reopens a closed statement explicitly", async () => {
+    let receivedItemsQuery: unknown;
+    const fakeService = {
+      listStatementItems: async (_scope: unknown, _statementId: string, query: unknown) => {
+        receivedItemsQuery = query;
+        return {
+          items: [
+            {
+              id: statementItemId,
+              transactionId,
+              statementId,
+              type: "purchase",
+              state: "posted",
+              description: "Mercado",
+              occurredOn: "2026-08-23",
+              amount: { currency: "BRL", minor: "2500" },
+            },
+          ],
+          nextCursor: "opaque-next-cursor",
+          hasMore: true,
+        };
+      },
+      reopenStatement: async () => ({
+        id: statementId,
+        workspaceId,
+        cardId,
+        periodStart: "2026-08-11",
+        closingOn: "2026-09-10",
+        dueOn: "2026-09-17",
+        state: "open",
+        total: { currency: "BRL", minor: "2500" },
+        paid: { currency: "BRL", minor: "0" },
+        openAmount: { currency: "BRL", minor: "2500" },
+        version: 2,
+      }),
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const items = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/items?limit=1&cursor=opaque-cursor`,
+    );
+    expect(items.status).toBe(200);
+    expect(receivedItemsQuery).toEqual({ cursor: "opaque-cursor", limit: 1 });
+    await expect(items.json()).resolves.toEqual({
+      items: [expect.objectContaining({ transactionId, type: "purchase" })],
+      page: { nextCursor: "opaque-next-cursor", hasMore: true },
+    });
+
+    const rejected = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/reopen`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "statement-reopen-route-001",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: false }),
+      },
+    );
+    expect(rejected.status).toBe(422);
+
+    const reopened = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/reopen`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "statement-reopen-route-002",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+    expect(reopened.status).toBe(200);
+    expect(reopened.headers.get("etag")).toBe('"v2"');
+    await expect(reopened.json()).resolves.toMatchObject({ id: statementId, state: "open" });
   });
 });

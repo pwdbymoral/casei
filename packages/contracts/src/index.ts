@@ -287,7 +287,23 @@ export const statementListQuerySchema = z.object({
 
 export const closeStatementSchema = z.object({
   /** Closing is a command, but the body is kept explicit for future audit metadata. */
-  confirm: z.literal(true).default(true),
+  confirm: z.literal(true),
+});
+
+export const reopenStatementSchema = z.object({
+  /** Reopening changes the cycle that receives future purchases and must be explicit. */
+  confirm: z.literal(true),
+});
+
+export const statementItemSchema = z.object({
+  id: domainIdSchema,
+  transactionId: domainIdSchema,
+  statementId: domainIdSchema,
+  type: z.enum(["purchase", "payment"]),
+  state: z.enum(["planned", "partially_settled", "posted", "canceled"]),
+  description: z.string(),
+  occurredOn: civilDateSchema,
+  amount: moneySchema,
 });
 
 export const payStatementSchema = z.object({

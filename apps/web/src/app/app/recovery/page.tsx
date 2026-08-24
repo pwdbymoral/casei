@@ -8,14 +8,11 @@ import { useEffect, useMemo, useState } from "react";
 import { AsyncState } from "@/components/primitives";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { requireApiOrigin } from "@/lib/api-origin";
 import { cn } from "@/lib/utils";
 import { authenticatedWorkspaceAdapter, type WorkspaceSession } from "@/lib/workspaces";
 
 type RecoveryView = { status: "active" | "expired"; recoveryUntil: string; version: number };
-
-function apiOrigin(): string {
-  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
-}
 
 export default function RecoveryPage() {
   const router = useRouter();
@@ -75,7 +72,7 @@ export default function RecoveryPage() {
     void (async () => {
       try {
         const response = await fetch(
-          `${apiOrigin()}/v1/workspaces/${encodeURIComponent(workspace.id)}/recovery`,
+          `${requireApiOrigin()}/v1/workspaces/${encodeURIComponent(workspace.id)}/recovery`,
           { credentials: "include", headers: { Accept: "application/json" }, cache: "no-store" },
         );
         if (!response.ok) throw new Error("Não foi possível carregar o estado de recuperação.");
@@ -97,7 +94,7 @@ export default function RecoveryPage() {
     setError(null);
     try {
       const response = await fetch(
-        `${apiOrigin()}/v1/workspaces/${encodeURIComponent(workspace.id)}/recovery/cancel`,
+        `${requireApiOrigin()}/v1/workspaces/${encodeURIComponent(workspace.id)}/recovery/cancel`,
         {
           method: "POST",
           credentials: "include",

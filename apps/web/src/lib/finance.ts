@@ -1,3 +1,4 @@
+import { configuredApiOrigin } from "./api-origin";
 import type { WorkspaceRole } from "./workspaces";
 
 export type Money = { currency: string; minor: string };
@@ -45,6 +46,28 @@ export type Statement = {
   version: number;
 };
 
+export type StatementItem = {
+  id: string;
+  transactionId: string;
+  statementId: string;
+  type: "purchase" | "payment";
+  state: Transaction["state"];
+  description: string;
+  occurredOn: string;
+  amount: Money;
+};
+
+export type StatementItemsPage = {
+  items: StatementItem[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type StatementItemsQuery = {
+  cursor?: string | null;
+  limit?: number;
+};
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -82,7 +105,13 @@ export type FinanceAdapter = {
     },
   ): Promise<CreditCard>;
   listStatements(workspaceId: string, cardId?: string): Promise<Statement[]>;
+  listStatementItems(
+    workspaceId: string,
+    statementId: string,
+    query?: StatementItemsQuery,
+  ): Promise<StatementItemsPage>;
   closeStatement(workspaceId: string, statement: Statement): Promise<Statement>;
+  reopenStatement(workspaceId: string, statement: Statement): Promise<Statement>;
   payStatement(
     workspaceId: string,
     statement: Statement,
@@ -118,11 +147,35 @@ export class FinanceAdapterError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    readonly currentVersion?: number,
   ) {
     super(message);
     this.name = "FinanceAdapterError";
   }
 }
+
+const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> => {
+  throw new FinanceAdapterError(
+    "Sua sessão financeira não está disponível. Entre novamente para continuar.",
+    401,
+  );
+};
+
+/** Safe default for environments without an explicit authenticated API origin. */
+export const unauthenticatedFinanceAdapter: FinanceAdapter = {
+  listTransactions: unavailableFinanceOperation,
+  createTransaction: unavailableFinanceOperation,
+  listCategories: unavailableFinanceOperation,
+  listCards: unavailableFinanceOperation,
+  createCard: unavailableFinanceOperation,
+  listStatements: unavailableFinanceOperation,
+  listStatementItems: unavailableFinanceOperation,
+  closeStatement: unavailableFinanceOperation,
+  reopenStatement: unavailableFinanceOperation,
+  payStatement: unavailableFinanceOperation,
+  createRecurrence: unavailableFinanceOperation,
+  createInstallmentPlan: unavailableFinanceOperation,
+};
 
 type JsonResponse<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
 
@@ -142,7 +195,7 @@ export function createHttpFinanceAdapter(
       credentials: "include",
     });
     const payload = (await response.json().catch(() => null)) as
-      | { error?: { message?: string } }
+      | { error?: { message?: string; currentVersion?: number } }
       | T
       | null;
     if (!response.ok) {
@@ -150,16 +203,22 @@ export function createHttpFinanceAdapter(
         payload && typeof payload === "object" && "error" in payload
           ? payload.error?.message
           : undefined;
+      const currentVersion =
+        payload && typeof payload === "object" && "error" in payload
+          ? payload.error?.currentVersion
+          : undefined;
       throw new FinanceAdapterError(
         message ?? "Não foi possível concluir a operação financeira.",
         response.status,
+        currentVersion,
       );
     }
     return payload as T;
   }
 
   const idempotencyKey = () => `web-${crypto.randomUUID()}`;
-  const list = async <T>(path: string) => (await call<JsonResponse<T>>(path)).items;
+  const listPage = async <T>(path: string) => call<JsonResponse<T>>(path);
+  const list = async <T>(path: string) => (await listPage<T>(path)).items;
 
   return {
     listTransactions: (workspaceId) => list<Transaction>(`/workspaces/${workspaceId}/transactions`),
@@ -181,8 +240,30 @@ export function createHttpFinanceAdapter(
       list<Statement>(
         `/workspaces/${workspaceId}/statements${cardId ? `?cardId=${encodeURIComponent(cardId)}` : ""}`,
       ),
+    listStatementItems: (workspaceId, statementId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const search = params.toString();
+      return listPage<StatementItem>(
+        `/workspaces/${workspaceId}/statements/${statementId}/items${search ? `?${search}` : ""}`,
+      ).then((response) => ({
+        items: response.items,
+        nextCursor: response.page.nextCursor,
+        hasMore: response.page.hasMore,
+      }));
+    },
     closeStatement: (workspaceId, statement) =>
       call<Statement>(`/workspaces/${workspaceId}/statements/${statement.id}/close`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${statement.version}"`,
+        },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    reopenStatement: (workspaceId, statement) =>
+      call<Statement>(`/workspaces/${workspaceId}/statements/${statement.id}/reopen`, {
         method: "POST",
         headers: {
           "Idempotency-Key": idempotencyKey(),
@@ -315,8 +396,46 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     },
     listStatements: async (_workspaceId, cardId) =>
       statements.filter((statement) => !cardId || statement.cardId === cardId),
+    listStatementItems: async (_workspaceId, statementId, query = {}) => {
+      const allItems = transactions
+        .filter((transaction) => transaction.statementId === statementId)
+        .map((transaction) => ({
+          id: transaction.id,
+          transactionId: transaction.id,
+          statementId,
+          type: transaction.kind === "transfer" ? ("payment" as const) : ("purchase" as const),
+          state: transaction.state,
+          description: transaction.description,
+          occurredOn: transaction.occurredOn,
+          amount: transaction.amount,
+        }));
+      const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+      const offset = query.cursor?.startsWith("fixture:")
+        ? Number.parseInt(query.cursor.slice("fixture:".length), 10)
+        : 0;
+      const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+      const items = allItems.slice(start, start + limit);
+      const hasMore = start + limit < allItems.length;
+      return {
+        items,
+        nextCursor: hasMore ? `fixture:${start + limit}` : null,
+        hasMore,
+      };
+    },
     closeStatement: async (_workspaceId, statement) => {
       const value = { ...statement, state: "closed" as const, version: statement.version + 1 };
+      const index = statements.findIndex(({ id }) => id === statement.id);
+      if (index >= 0) statements[index] = value;
+      return value;
+    },
+    reopenStatement: async (_workspaceId, statement) => {
+      if (statement.state !== "closed" || BigInt(statement.paid.minor) > BigInt(0)) {
+        throw new FinanceAdapterError(
+          "Apenas faturas fechadas e sem pagamentos podem ser reabertas.",
+          409,
+        );
+      }
+      const value = { ...statement, state: "open" as const, version: statement.version + 1 };
       const index = statements.findIndex(({ id }) => id === statement.id);
       if (index >= 0) statements[index] = value;
       return value;
@@ -347,12 +466,38 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
   };
 }
 
-export function financeAdapterForEnvironment(): FinanceAdapter {
-  return process.env.NODE_ENV === "production"
-    ? createHttpFinanceAdapter({ baseUrl: process.env.NEXT_PUBLIC_API_URL ?? "" })
-    : createFixtureFinanceAdapter();
+export function financeAdapterForEnvironment(options: { fixtures?: boolean } = {}): FinanceAdapter {
+  if (
+    process.env.NODE_ENV !== "production" &&
+    (options.fixtures === true || process.env.CASEI_UI_FIXTURES === "1")
+  ) {
+    return createFixtureFinanceAdapter();
+  }
+  const origin = configuredApiOrigin();
+  return origin ? createHttpFinanceAdapter({ baseUrl: origin }) : unauthenticatedFinanceAdapter;
 }
 
 export function canWriteFinance(role: WorkspaceRole): boolean {
   return role !== "viewer";
+}
+
+export function statementItemAmountPrefix(item: Pick<StatementItem, "type" | "state">): string {
+  if (item.state === "canceled") return "Cancelada · ";
+  return item.type === "payment" ? "−" : "+";
+}
+
+export function createRequestGuard() {
+  let latestRequest = 0;
+  return {
+    begin(): number {
+      latestRequest += 1;
+      return latestRequest;
+    },
+    invalidate(): void {
+      latestRequest += 1;
+    },
+    isCurrent(request: number): boolean {
+      return request === latestRequest;
+    },
+  };
 }

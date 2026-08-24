@@ -3,11 +3,8 @@
 import { useRouter } from "next/navigation";
 
 import { OnboardingFlow } from "@/components/onboarding/onboarding-flow";
+import { requireApiOrigin } from "@/lib/api-origin";
 import type { OnboardingDraft } from "@/lib/onboarding";
-
-function apiOrigin(): string {
-  return (process.env.NEXT_PUBLIC_CASEI_API_ORIGIN ?? "http://localhost:3001").replace(/\/$/, "");
-}
 
 const onboardingKeyStorage = "casei:onboarding-idempotency:v1";
 
@@ -30,7 +27,7 @@ export default function OnboardingPage() {
       </div>
       <OnboardingFlow
         onComplete={async (draft: OnboardingDraft) => {
-          const response = await fetch(`${apiOrigin()}/v1/onboarding`, {
+          const response = await fetch(`${requireApiOrigin()}/v1/onboarding`, {
             method: "POST",
             credentials: "include",
             headers: {
