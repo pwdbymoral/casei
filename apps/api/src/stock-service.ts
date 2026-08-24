@@ -523,33 +523,79 @@ export class StockService {
     const parsed = stockShoppingListQuerySchema.parse(query);
     return this.withUnitOfWork(scope, async ({ client }) => {
       const result = await client.query<ShoppingItemRow>(
-        `SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
-                i.quantity_milli,
-                CASE WHEN p.id IS NULL THEN i.quantity_milli
-                     WHEN p.minimum_milli IS NULL THEN NULL
-                     ELSE GREATEST(p.minimum_milli - COALESCE(p.quantity_milli, 0), 0)
-                END AS effective_quantity_milli,
-                COALESCE(p.unit, i.unit) AS unit,
-                COALESCE(p.unit_label, i.unit_label) AS unit_label,
-                i.note, i.purchased, i.purchased_at, i.last_changed_by, i.version
-           FROM shopping_item i
-           LEFT JOIN stock_product p
-             ON p.workspace_id = i.workspace_id AND p.id = i.product_id
-          WHERE i.workspace_id = $1
-            AND ($2::boolean OR i.purchased = false)
-            AND (i.purchased OR ((i.source = 'free' AND NOT EXISTS (
-                   SELECT 1 FROM stock_product duplicate
-                    WHERE duplicate.workspace_id = i.workspace_id
-                      AND duplicate.name_normalized = i.name_normalized
-                      AND duplicate.archived = false
-                 )) OR (i.source = 'automatic' AND p.id IS NOT NULL
-                 AND p.shopping_auto = true
-                 AND (p.marked_missing OR p.quantity_milli = 0
-                      OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
-                          AND p.quantity_milli <= p.minimum_milli)))))
-          ORDER BY i.purchased ASC, i.source ASC, lower(i.name), i.id
-          LIMIT $3`,
-        [scope.workspaceId, parsed.includePurchased, parsed.limit],
+        `WITH visible_items AS (
+          SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
+                 i.quantity_milli,
+                 CASE WHEN p.id IS NULL THEN i.quantity_milli
+                      WHEN p.minimum_milli IS NULL THEN NULL
+                      ELSE GREATEST(p.minimum_milli - COALESCE(p.quantity_milli, 0), 0)
+                 END AS effective_quantity_milli,
+                 COALESCE(p.unit, i.unit) AS unit,
+                 COALESCE(p.unit_label, i.unit_label) AS unit_label,
+                 i.note, i.purchased, i.purchased_at, i.last_changed_by, i.version
+            FROM shopping_item i
+            LEFT JOIN stock_product p
+              ON p.workspace_id = i.workspace_id AND p.id = i.product_id
+           WHERE i.workspace_id = $1
+             AND ($3::boolean OR i.purchased = false)
+             AND (i.purchased OR ((i.source = 'free' AND NOT EXISTS (
+                    SELECT 1 FROM stock_product duplicate
+                     WHERE duplicate.workspace_id = i.workspace_id
+                       AND duplicate.name_normalized = i.name_normalized
+                       AND duplicate.archived = false
+                  )) OR (i.source = 'automatic' AND p.id IS NOT NULL
+                  AND p.shopping_auto = true
+                  AND (p.marked_missing OR p.quantity_milli = 0
+                       OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
+                           AND p.quantity_milli <= p.minimum_milli)))))
+        ),
+        derived_items AS (
+          SELECT p.id, p.workspace_id, p.id AS product_id, p.name, 'automatic' AS source,
+                 NULL::bigint AS quantity_milli,
+                 CASE WHEN p.minimum_milli IS NULL THEN NULL::bigint
+                      ELSE GREATEST(p.minimum_milli - COALESCE(p.quantity_milli, 0), 0)
+                 END AS effective_quantity_milli,
+                 p.unit, p.unit_label, p.note,
+                 false AS purchased, NULL::timestamptz AS purchased_at,
+                 $2::text AS last_changed_by, p.version
+            FROM stock_product p
+           WHERE p.workspace_id = $1 AND p.archived = false AND p.shopping_auto = true
+             AND (p.marked_missing OR p.quantity_milli = 0
+                  OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
+                      AND p.quantity_milli <= p.minimum_milli))
+             AND NOT EXISTS (
+                   SELECT 1 FROM shopping_item active
+                    WHERE active.workspace_id = p.workspace_id
+                      AND active.purchased = false
+                      AND (active.product_id = p.id
+                           OR active.name_normalized = p.name_normalized)
+                 )
+             AND NOT EXISTS (
+                   SELECT 1 FROM shopping_item prior
+                    WHERE prior.workspace_id = p.workspace_id
+                      AND prior.product_id = p.id
+                      AND prior.purchased = true
+                      AND prior.purchased_at > COALESCE(
+                            (SELECT max(m.occurred_at)
+                               FROM stock_movement m
+                              WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id),
+                            '-infinity'::timestamptz
+                          )
+                 )
+        )
+        SELECT shopping.id, shopping.workspace_id, shopping.product_id, shopping.name,
+               shopping.source, shopping.quantity_milli, shopping.effective_quantity_milli,
+               shopping.unit, shopping.unit_label, shopping.note, shopping.purchased,
+               shopping.purchased_at, shopping.last_changed_by, shopping.version
+          FROM (
+            SELECT * FROM visible_items
+            UNION ALL
+            SELECT * FROM derived_items
+          ) shopping
+         WHERE $3::boolean OR shopping.purchased = false
+         ORDER BY shopping.purchased ASC, shopping.source ASC, lower(shopping.name), shopping.id
+         LIMIT $4`,
+        [scope.workspaceId, scope.actorId, parsed.includePurchased, parsed.limit],
       );
       return result.rows.map(toShoppingItemView);
     });
@@ -662,7 +708,7 @@ export class StockService {
         key: idempotencyKey,
         request: { itemId, ...parsed, expectedVersion },
         execute: async () => {
-          const current = await lockShoppingItem(client, scope, itemId);
+          const current = await lockOrMaterializeAutomaticItem(client, scope, itemId);
           assertExpectedVersion(current.version, expectedVersion);
           if (current.purchased)
             throw new StockConflictError("Este item já foi marcado como comprado.");
@@ -727,14 +773,15 @@ export class StockService {
               RETURNING id, workspace_id, product_id, name, source, quantity_milli,
                         quantity_milli AS effective_quantity_milli, unit, unit_label, note,
                         purchased, purchased_at, last_changed_by, version`,
-            [scope.workspaceId, itemId, scope.actorId, expectedVersion],
+            [scope.workspaceId, current.id, scope.actorId, expectedVersion],
           );
           const row = updated.rows[0];
           if (!row) throw new StockVersionConflictError(current.version);
-          await insertShoppingEvent(client, scope, itemId, "purchased", {
+          await insertShoppingEvent(client, scope, current.id, "purchased", {
             addToStock: parsed.addToStock,
             quantity: parsed.quantity ?? null,
           });
+          if (parsed.addToStock) await syncAutomaticShoppingItems(client, scope);
           return {
             statusCode: 200,
             response: {
@@ -861,7 +908,7 @@ async function syncAutomaticShoppingItems(client: PoolClient, scope: StockScope)
            WHERE prior.workspace_id = p.workspace_id
              AND prior.product_id = p.id
              AND prior.purchased = true
-             AND prior.purchased_at >= COALESCE(
+             AND prior.purchased_at > COALESCE(
                (SELECT max(m.occurred_at)
                   FROM stock_movement m
                  WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id),
@@ -901,7 +948,7 @@ async function lockShoppingItem(
   client: PoolClient,
   scope: StockScope,
   itemId: string,
-): Promise<ShoppingItemRow> {
+): Promise<ShoppingItemRow | null> {
   const result = await client.query<ShoppingItemRow>(
     `SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
             i.quantity_milli, i.quantity_milli AS effective_quantity_milli,
@@ -914,8 +961,55 @@ async function lockShoppingItem(
     [scope.workspaceId, itemId],
   );
   const row = result.rows[0];
-  if (!row) throw new StockNotFoundError();
-  return row;
+  return row ?? null;
+}
+
+/**
+ * A low/missing automatic product may be projected by GET before a shopping row
+ * exists. Materialize that projection only inside the purchase transaction so
+ * the normal append-only shopping history and If-Match contract still apply.
+ */
+async function lockOrMaterializeAutomaticItem(
+  client: PoolClient,
+  scope: StockScope,
+  itemId: string,
+): Promise<ShoppingItemRow> {
+  const existing = await lockShoppingItem(client, scope, itemId);
+  if (existing) return existing;
+
+  const product = await lockProduct(client, scope, itemId);
+  if (!isAutomaticShoppingCandidate(product)) throw new StockNotFoundError();
+
+  const normalized = normalizeProductName(product.name);
+  const inserted = await client.query<ShoppingItemRow>(
+    `INSERT INTO shopping_item
+      (workspace_id, product_id, name, name_normalized, source, unit, unit_label,
+       last_changed_by, version)
+     VALUES ($1, $2, $3, $4, 'automatic', $5, $6, $7, $8)
+     ON CONFLICT (workspace_id, name_normalized) WHERE purchased = false DO NOTHING
+     RETURNING id, workspace_id, product_id, name, source, quantity_milli,
+               quantity_milli AS effective_quantity_milli, unit, unit_label, note,
+               purchased, purchased_at, last_changed_by, version`,
+    [
+      scope.workspaceId,
+      product.id,
+      product.name,
+      normalized.key,
+      product.unit,
+      product.unit_label,
+      scope.actorId,
+      product.version,
+    ],
+  );
+  const row = inserted.rows[0];
+  if (row) {
+    await insertShoppingEvent(client, scope, row.id, "created", { source: "automatic" });
+    return row;
+  }
+
+  const concurrent = await findActiveShoppingItem(client, scope, normalized.key);
+  if (!concurrent) throw new StockNotFoundError();
+  return concurrent;
 }
 
 async function insertShoppingEvent(
@@ -934,6 +1028,18 @@ async function insertShoppingEvent(
 
 function normalizeStockValue(value: bigint | string | null): bigint | null {
   return value === null ? null : BigInt(value);
+}
+
+function isAutomaticShoppingCandidate(product: StockProductRow): boolean {
+  const quantity = normalizeStockValue(product.quantity_milli);
+  const minimum = normalizeStockValue(product.minimum_milli);
+  return (
+    !product.archived &&
+    product.shopping_auto &&
+    (product.marked_missing ||
+      quantity === 0n ||
+      (quantity !== null && minimum !== null && quantity <= minimum))
+  );
 }
 
 function toProductView(row: StockProductRow): StockProductView {

@@ -5,21 +5,26 @@
 
 ## Objetivo
 
-Impedir efeitos colaterais em GET da lista de compras e preservar a decisão explícita de uma compra
-automática sem entrada no estoque até que uma movimentação real altere o produto.
+Impedir efeitos colaterais em GET da lista de compras, manter produtos automáticos visíveis mesmo
+antes da materialização da linha e preservar a decisão explícita de uma compra sem entrada no
+estoque até que uma movimentação real altere o produto.
 
 ## Estado inicial
 
-`StockService.listShoppingItems` chama `syncAutomaticShoppingItems`, inserindo itens e eventos
-durante uma leitura. Após `addToStock=false`, a linha comprada continua permitindo nova inserção
-automática em uma leitura posterior porque a unicidade só cobre itens não comprados.
+`StockService.listShoppingItems` chamava `syncAutomaticShoppingItems`, inserindo itens e eventos
+durante uma leitura. Além disso, produtos automáticos antigos ou criados fora do sincronizador não
+tinham uma linha projetável até algum comando de escrita. Após `addToStock=false`, a linha comprada
+continuava permitindo nova inserção automática em uma leitura posterior porque a unicidade só cobre
+itens não comprados.
 
 ## Abordagem
 
-Sincronizar itens automáticos somente no final de comandos de escrita que alteram produtos, manter
-GET sem INSERT/UPDATE/evento e considerar a compra automática suprimida enquanto o último
-`purchased_at` não for anterior a uma movimentação posterior do produto. Não foi necessária nova
-migration: a decisão é derivada de `shopping_item.purchased_at` e `stock_movement.occurred_at`.
+Projetar produtos automáticos `low`/`missing` no GET sem INSERT/UPDATE/evento; materializar a
+projeção apenas dentro da confirmação de compra. Sincronizar itens automáticos no final de comandos
+de escrita que alteram produtos e, quando `addToStock=true`, também após a confirmação. A compra
+sem entrada continua suprimida até uma movimentação posterior; a comparação estrita de
+`purchased_at` com `max(stock_movement.occurred_at)` permite o movimento e a confirmação na mesma
+transação sem empate suprimir o item. Não foi necessária nova migration.
 
 ## Etapas
 
@@ -30,9 +35,10 @@ migration: a decisão é derivada de `shopping_item.purchased_at` e `stock_movem
 
 ## Rastreabilidade
 
-Os testes de serviço verificam que a leitura não chama INSERT/evento e que a condição de supressão
-compara `purchased_at` com `max(stock_movement.occurred_at)`; o teste de rota cobre conflito de
-idempotência. A integração PostgreSQL deve confirmar concorrência quando o ambiente estiver disponível.
+Os testes de serviço verificam que a leitura não chama INSERT/evento e exercitam a sequência
+GET→compra→GET→movimentação→GET, além da confirmação com entrada que permanece `low`; o teste de
+rota cobre conflito de idempotência. A integração PostgreSQL deve confirmar concorrência quando o
+ambiente estiver disponível.
 
 ## Riscos
 
