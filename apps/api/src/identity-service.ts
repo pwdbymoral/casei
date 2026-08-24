@@ -390,12 +390,15 @@ export class IdentityService {
            SELECT 1 FROM finance_transaction
               WHERE workspace_id = $1
                 AND state IN ('planned', 'partially_settled', 'posted')
+             UNION ALL
+           SELECT 1 FROM credit_card
+              WHERE workspace_id = $1
            ) AS exists`,
           [scope.workspaceId],
         );
         if (movement.rows[0]?.exists) {
           throw new IdentityConflictError(
-            "A moeda não pode ser alterada após o primeiro movimento.",
+            "A moeda não pode ser alterada após registrar movimentações, compromissos ou cartões.",
           );
         }
       }
