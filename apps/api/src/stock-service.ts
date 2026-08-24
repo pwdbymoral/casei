@@ -971,6 +971,23 @@ async function lockShoppingItem(
   scope: StockScope,
   itemId: string,
 ): Promise<ShoppingItemRow | null> {
+  return queryShoppingItem(client, scope, itemId, true);
+}
+
+async function findShoppingItem(
+  client: PoolClient,
+  scope: StockScope,
+  itemId: string,
+): Promise<ShoppingItemRow | null> {
+  return queryShoppingItem(client, scope, itemId, false);
+}
+
+async function queryShoppingItem(
+  client: PoolClient,
+  scope: StockScope,
+  itemId: string,
+  lock: boolean,
+): Promise<ShoppingItemRow | null> {
   const result = await client.query<ShoppingItemRow>(
     `SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
             i.quantity_milli, i.quantity_milli AS effective_quantity_milli,
@@ -979,11 +996,10 @@ async function lockShoppingItem(
        FROM shopping_item i
        LEFT JOIN stock_product p ON p.workspace_id = i.workspace_id AND p.id = i.product_id
       WHERE i.workspace_id = $1 AND i.id = $2
-      FOR UPDATE OF i`,
+      ${lock ? "FOR UPDATE OF i" : ""}`,
     [scope.workspaceId, itemId],
   );
-  const row = result.rows[0];
-  return row ?? null;
+  return result.rows[0] ?? null;
 }
 
 /**
@@ -996,8 +1012,15 @@ async function lockOrMaterializeAutomaticItem(
   scope: StockScope,
   itemId: string,
 ): Promise<ShoppingItemRow> {
-  const existing = await lockShoppingItem(client, scope, itemId);
-  if (existing) return existing;
+  const observed = await findShoppingItem(client, scope, itemId);
+  if (observed) {
+    if (observed.source === "automatic" && observed.product_id) {
+      await lockProduct(client, scope, observed.product_id);
+    }
+    const existing = await lockShoppingItem(client, scope, itemId);
+    if (!existing) throw new StockNotFoundError();
+    return existing;
+  }
 
   const product = await lockProduct(client, scope, itemId);
   if (!isAutomaticShoppingCandidate(product)) throw new StockNotFoundError();

@@ -115,10 +115,10 @@ function shoppingScenarioPool() {
       ) {
         return { rows: [], rowCount: 0 };
       }
-      if (sql.includes("FROM shopping_item i") && sql.includes("FOR UPDATE")) {
+      if (sql.includes("FROM shopping_item i") && sql.includes("AND i.id = $2")) {
         const requestedItemId = values[1];
-        const locked = item && requestedItemId === item.id ? item : null;
-        return { rows: locked ? [locked as T] : [], rowCount: locked ? 1 : 0 };
+        const loaded = item && requestedItemId === item.id ? item : null;
+        return { rows: loaded ? [loaded as T] : [], rowCount: loaded ? 1 : 0 };
       }
       if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
         return { rows: [productRow() as T], rowCount: 1 };
@@ -386,6 +386,8 @@ describe("StockService membership revalidation", () => {
       "shopping-behavior-version-003",
       1,
     );
+    const invalidated = (await service.listShoppingItems(scope))[0];
+    expect(invalidated).toMatchObject({ id: materializedItemId, productId, version: 2 });
 
     await expect(
       service.purchaseShoppingItem(
@@ -396,5 +398,41 @@ describe("StockService membership revalidation", () => {
         resynchronized.version,
       ),
     ).rejects.toMatchObject({ code: "version_conflict", currentVersion: 2 });
+  });
+
+  it("locks the automatic product before its shopping row", async () => {
+    const harness = shoppingScenarioPool();
+    const service = new StockService(harness.pool as never);
+
+    const projected = (await service.listShoppingItems(scope))[0];
+    if (!projected) throw new Error("expected a derived shopping item");
+    await service.createMovement(
+      scope,
+      productId,
+      { kind: "entry", quantity: "1" },
+      "shopping-behavior-lock-order-001",
+      projected.version,
+    );
+    const materialized = (await service.listShoppingItems(scope))[0];
+    if (!materialized) throw new Error("expected a materialized shopping item");
+    harness.statements.length = 0;
+
+    await service.purchaseShoppingItem(
+      scope,
+      materialized.id,
+      { addToStock: false },
+      "shopping-behavior-lock-order-002",
+      materialized.version,
+    );
+
+    const productLock = harness.statements.findIndex(
+      (sql) => sql.includes("FROM stock_product") && sql.includes("FOR UPDATE"),
+    );
+    const itemLock = harness.statements.findIndex(
+      (sql) => sql.includes("FROM shopping_item i") && sql.includes("FOR UPDATE"),
+    );
+    expect(productLock).toBeGreaterThanOrEqual(0);
+    expect(itemLock).toBeGreaterThanOrEqual(0);
+    expect(productLock).toBeLessThan(itemLock);
   });
 });
