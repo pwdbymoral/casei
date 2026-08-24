@@ -52,6 +52,13 @@ describe("STOCK-004 parser de cadastro em lote", () => {
     });
   });
 
+  it("aceita a coluna Nome em qualquer posição do cabeçalho", () => {
+    const result = parseStockBulk("Quantidade\tNome\n2\tArroz");
+
+    expect(result.fatalErrors).toEqual([]);
+    expect(result.rows[0]?.values).toMatchObject({ name: "Arroz", quantity: "2" });
+  });
+
   it("rejeita cabeçalho desconhecido como erro de arquivo e não inventa campo", () => {
     const result = parseStockBulk("Nome\tFornecedor\nArroz\tAcme");
 

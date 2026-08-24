@@ -245,6 +245,26 @@ export const updateStockProductSchema = z
   });
 export type UpdateStockProductInput = z.infer<typeof updateStockProductSchema>;
 
+export const stockBulkModeSchema = z.enum(["valid_only", "all_or_nothing"]);
+export type StockBulkMode = z.infer<typeof stockBulkModeSchema>;
+
+const stockBulkContentSchema = z
+  .string()
+  .min(1, "Informe pelo menos uma linha de produto.")
+  .max(10_000_000, "O conteúdo do lote excede o limite permitido.");
+
+export const stockBulkPreviewRequestSchema = z.object({
+  content: stockBulkContentSchema,
+});
+export type StockBulkPreviewRequest = z.infer<typeof stockBulkPreviewRequestSchema>;
+
+export const stockBulkApplyRequestSchema = z.object({
+  content: stockBulkContentSchema,
+  mode: stockBulkModeSchema,
+  previewHash: z.string().regex(/^[a-f0-9]{64}$/, "Hash da prévia inválido."),
+});
+export type StockBulkApplyRequest = z.infer<typeof stockBulkApplyRequestSchema>;
+
 export const stockProductListQuerySchema = paginationQuerySchema.extend({
   query: z.string().trim().max(100).optional(),
   includeArchived: z.coerce.boolean().default(false),

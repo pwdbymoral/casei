@@ -252,7 +252,8 @@ function parseRow(
 ): StockBulkParsedRow {
   const split = splitDelimitedLine(line, delimiter);
   const errors: string[] = split.error ? [split.error] : [];
-  const rawName = split.cells[0] ?? "";
+  const nameIndex = headerMap.indexOf("name");
+  const rawName = split.cells[nameIndex < 0 ? 0 : nameIndex] ?? "";
   const values: StockBulkProductValues = { name: normalizeText(rawName) };
   const mutable = values as unknown as Record<string, unknown>;
   for (const [index, key] of headerMap.entries()) {

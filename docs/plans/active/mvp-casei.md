@@ -149,7 +149,7 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
   Follow-up separado **STOCK-003a** permanece para substituir os cursores atualmente aceitos pelos
   endpoints de produtos/movimentações por cursor opaco assinado, com teste de continuidade, limite e
   rejeição de cursor adulterado; esta fatia não altera a ordenação/contrato já publicado do STOCK-002.
-- [ ] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
+- [x] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
 - [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
 - [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
 

@@ -27,6 +27,7 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 
 - Cadastro único começa por nome e oferece detalhes progressivos: quantidade, unidade, mínimo, categoria, local e nota.
 - Cadastro em lote aceita uma linha por produto e também colagem tabular. A prévia separa novos, atualizações, duplicatas e erros antes de confirmar.
+- O núcleo aceita nomes em linhas simples ou colagem TAB/semicolons com cabeçalho; a confirmação usa `POST /v1/workspaces/:workspaceId/stock/products/bulk` com `valid_only` ou `all_or_nothing` e o hash da prévia. Linhas inválidas nunca são aplicadas silenciosamente.
 - Modo avançado usa tabela editável com navegação por teclado, seleção em lote, filtros e ações explícitas; nenhuma ação essencial depende de drag.
 - Atualização em lote exige prévia quando altera quantidades ou arquiva produtos.
 
