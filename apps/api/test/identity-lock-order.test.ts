@@ -120,26 +120,41 @@ describe("IdentityService workspace lock ordering", () => {
   it("locks transfer memberships in sorted user order before workspace", async () => {
     const harness = poolFor();
     const service = new IdentityService(harness.pool as never);
-    await expect(service.transferOwnership(scope, "user-a-target", 0)).resolves.toEqual({ version: 1 });
+    await expect(service.transferOwnership(scope, "user-a-target", 0)).resolves.toEqual({
+      version: 1,
+    });
     const locks = forUpdateStatements(harness.statements);
     expect(locks[0]).toMatch(/FROM membership/);
     expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
     expect(locks[1]).toMatch(/FROM workspace/);
-    const transferLock = harness.statements.findIndex((statement) => statement.includes("ANY($2::text[]"));
-    expect(harness.parameters[transferLock]).toEqual([scope.workspaceId, ["user-a-target", "user-z-owner"]]);
+    const transferLock = harness.statements.findIndex((statement) =>
+      statement.includes("ANY($2::text[]"),
+    );
+    expect(harness.parameters[transferLock]).toEqual([
+      scope.workspaceId,
+      ["user-a-target", "user-z-owner"],
+    ]);
   });
 
   it("rechecks the actor role after taking canonical locks", async () => {
     const harness = poolFor({ actorRole: "member" });
     const service = new IdentityService(harness.pool as never);
-    await expect(service.transferOwnership(scope, "user-a-target", 0)).rejects.toBeInstanceOf(IdentityPermissionError);
-    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(false);
+    await expect(service.transferOwnership(scope, "user-a-target", 0)).rejects.toBeInstanceOf(
+      IdentityPermissionError,
+    );
+    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(
+      false,
+    );
   });
 
   it("locks every deactivation membership before workspace", async () => {
     const harness = poolFor();
-    const service = new IdentityService(harness.pool as never, { now: () => new Date("2030-01-01T00:00:00.000Z") });
-    await expect(service.deactivateWorkspace(scope, { workspaceName: "Casa", reason: "teste" }, 0)).resolves.toMatchObject({ version: 1 });
+    const service = new IdentityService(harness.pool as never, {
+      now: () => new Date("2030-01-01T00:00:00.000Z"),
+    });
+    await expect(
+      service.deactivateWorkspace(scope, { workspaceName: "Casa", reason: "teste" }, 0),
+    ).resolves.toMatchObject({ version: 1 });
     const locks = forUpdateStatements(harness.statements);
     expect(locks[0]).toMatch(/FROM membership/);
     expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
@@ -159,7 +174,9 @@ describe("IdentityService workspace lock ordering", () => {
   it("locks actor and target before workspace when changing a member role", async () => {
     const harness = poolFor();
     const service = new IdentityService(harness.pool as never);
-    await expect(service.changeMemberRole(scope, "user-a-target", { role: "viewer" }, 0)).resolves.toEqual({ role: "viewer", version: 1 });
+    await expect(
+      service.changeMemberRole(scope, "user-a-target", { role: "viewer" }, 0),
+    ).resolves.toEqual({ role: "viewer", version: 1 });
     const locks = forUpdateStatements(harness.statements);
     expect(locks[0]).toMatch(/FROM membership/);
     expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
@@ -169,21 +186,37 @@ describe("IdentityService workspace lock ordering", () => {
   it("rechecks the actor role after locking members for removal", async () => {
     const harness = poolFor({ actorRole: "member" });
     const service = new IdentityService(harness.pool as never);
-    await expect(service.removeMember(scope, "user-a-target", 0)).rejects.toBeInstanceOf(IdentityPermissionError);
-    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(false);
+    await expect(service.removeMember(scope, "user-a-target", 0)).rejects.toBeInstanceOf(
+      IdentityPermissionError,
+    );
+    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(
+      false,
+    );
   });
 
   it("rechecks the actor role after locking members for role changes", async () => {
     const harness = poolFor({ actorRole: "member" });
     const service = new IdentityService(harness.pool as never);
-    await expect(service.changeMemberRole(scope, "user-a-target", { role: "viewer" }, 0)).rejects.toBeInstanceOf(IdentityPermissionError);
-    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(false);
+    await expect(
+      service.changeMemberRole(scope, "user-a-target", { role: "viewer" }, 0),
+    ).rejects.toBeInstanceOf(IdentityPermissionError);
+    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(
+      false,
+    );
   });
 
   it("locks the invitee membership, workspace, then invitation when accepting", async () => {
     const harness = invitationPool();
-    const service = new IdentityService(harness.pool as never, { now: () => new Date("2029-01-01T00:00:00.000Z") });
-    await expect(service.acceptInvitation({ userId: "user-invitee", email: "invitee@example.test", recentAuthentication: true }, harness.token, scope.correlationId)).resolves.toMatchObject({ id: scope.workspaceId, role: "member" });
+    const service = new IdentityService(harness.pool as never, {
+      now: () => new Date("2029-01-01T00:00:00.000Z"),
+    });
+    await expect(
+      service.acceptInvitation(
+        { userId: "user-invitee", email: "invitee@example.test", recentAuthentication: true },
+        harness.token,
+        scope.correlationId,
+      ),
+    ).resolves.toMatchObject({ id: scope.workspaceId, role: "member" });
     const locks = forUpdateStatements(harness.statements);
     expect(locks[0]).toMatch(/FROM membership/);
     expect(locks[1]).toMatch(/FROM workspace_invitation/);
