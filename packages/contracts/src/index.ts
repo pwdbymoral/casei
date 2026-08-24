@@ -4,6 +4,8 @@ export const workspaceRoleSchema = z.enum(["owner", "member", "viewer"]);
 
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 
+export const versionSchema = z.number().int().nonnegative();
+
 /** Domain identifiers are PostgreSQL UUIDv7 values in lowercase canonical form. */
 export const domainIdSchema = z
   .string()
@@ -49,6 +51,48 @@ export const workspaceSessionSchema = z.object({
   workspaces: z.array(workspaceSummarySchema),
 });
 export type WorkspaceSessionContract = z.infer<typeof workspaceSessionSchema>;
+
+export const localeSchema = z.literal("pt-BR");
+export const userProfileSchema = z.object({
+  userId: userIdSchema,
+  displayName: z.string().min(1).max(200),
+  email: z.string().email(),
+  emailVerified: z.boolean(),
+  locale: localeSchema,
+  hideValues: z.boolean(),
+  version: versionSchema,
+});
+export type UserProfileContract = z.infer<typeof userProfileSchema>;
+
+export const updateUserProfileSchema = z.object({
+  displayName: z.string().trim().min(2).max(200),
+  locale: localeSchema,
+  hideValues: z.boolean(),
+});
+export type UpdateUserProfileInput = z.infer<typeof updateUserProfileSchema>;
+
+const safetyMarginMinorSchema = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$/)
+  .refine((value) => BigInt(value) <= 999999999999999n, "margem fora do limite suportado");
+
+export const workspacePreferencesSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  name: z.string().min(1).max(200),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  timeZone: z.string().min(1).max(64),
+  safetyMarginMinor: safetyMarginMinorSchema,
+  version: versionSchema,
+});
+export type WorkspacePreferencesContract = z.infer<typeof workspacePreferencesSchema>;
+
+export const updateWorkspacePreferencesSchema = z.object({
+  name: z.string().trim().min(2).max(200),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  timeZone: z.string().trim().min(1).max(64),
+  safetyMarginMinor: safetyMarginMinorSchema,
+});
+export type UpdateWorkspacePreferencesInput = z.infer<typeof updateWorkspacePreferencesSchema>;
 
 export const onboardingSchema = z.object({
   displayName: z.string().trim().min(2).max(200),
@@ -113,14 +157,172 @@ export const correlationIdSchema = z
 
 export type CorrelationId = z.infer<typeof correlationIdSchema>;
 
-export const versionSchema = z.number().int().nonnegative();
-
 export const paginationQuerySchema = z.object({
   cursor: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 
 export type PaginationQuery = z.infer<typeof paginationQuerySchema>;
+
+export const stockUnitSchema = z.enum(["unit", "package", "box", "kg", "g", "L", "ml", "other"]);
+export type StockUnit = z.infer<typeof stockUnitSchema>;
+export const stockStateSchema = z.enum(["unknown", "ok", "low", "missing"]);
+export type StockState = z.infer<typeof stockStateSchema>;
+export const stockMovementKindSchema = z.enum(["entry", "consume", "correction", "discard"]);
+export type StockMovementKind = z.infer<typeof stockMovementKindSchema>;
+
+/** Fixed-point quantities travel as canonical decimal strings, never JavaScript floats. */
+export const stockQuantitySchema = z
+  .string()
+  .regex(/^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?$/, "quantidade deve ter até três casas decimais")
+  .refine((value) => {
+    const [whole = "0", fraction = ""] = value.split(".");
+    return BigInt(whole) * 1000n + BigInt(fraction.padEnd(3, "0") || "0") <= 999999999999999n;
+  }, "quantidade fora do limite suportado");
+
+export const stockProductSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  name: z.string().trim().min(1).max(200),
+  unit: stockUnitSchema,
+  unitLabel: z.string().trim().max(40).nullable(),
+  quantity: stockQuantitySchema.nullable(),
+  minimum: stockQuantitySchema.nullable(),
+  markedMissing: z.boolean(),
+  /** Controls whether missing/low state is materialized in the shared shopping list. */
+  shoppingAuto: z.boolean(),
+  state: stockStateSchema,
+  category: z.string().trim().max(100).nullable(),
+  location: z.string().trim().max(100).nullable(),
+  note: z.string().trim().max(500).nullable(),
+  archived: z.boolean(),
+  version: versionSchema,
+});
+export type StockProductContract = z.infer<typeof stockProductSchema>;
+
+export const createStockProductSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    unit: stockUnitSchema.default("unit"),
+    unitLabel: z.string().trim().max(40).nullable().optional(),
+    quantity: stockQuantitySchema.nullable().optional(),
+    minimum: stockQuantitySchema.nullable().optional(),
+    shoppingAuto: z.boolean().default(true),
+    category: z.string().trim().max(100).nullable().optional(),
+    location: z.string().trim().max(100).nullable().optional(),
+    note: z.string().trim().max(500).nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.unit === "other" && !value.unitLabel) {
+      context.addIssue({
+        code: "custom",
+        path: ["unitLabel"],
+        message: "Informe o rótulo da unidade.",
+      });
+    }
+  });
+export type CreateStockProductInput = z.infer<typeof createStockProductSchema>;
+
+export const updateStockProductSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    unit: stockUnitSchema,
+    unitLabel: z.string().trim().max(40).nullable().optional(),
+    minimum: stockQuantitySchema.nullable().optional(),
+    shoppingAuto: z.boolean().optional(),
+    category: z.string().trim().max(100).nullable().optional(),
+    location: z.string().trim().max(100).nullable().optional(),
+    note: z.string().trim().max(500).nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.unit === "other" && !value.unitLabel) {
+      context.addIssue({
+        code: "custom",
+        path: ["unitLabel"],
+        message: "Informe o rótulo da unidade.",
+      });
+    }
+  });
+export type UpdateStockProductInput = z.infer<typeof updateStockProductSchema>;
+
+export const stockProductListQuerySchema = paginationQuerySchema.extend({
+  query: z.string().trim().max(100).optional(),
+  includeArchived: z.coerce.boolean().default(false),
+});
+
+export const stockMovementSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  productId: domainIdSchema,
+  kind: stockMovementKindSchema,
+  quantity: stockQuantitySchema,
+  before: stockQuantitySchema.nullable(),
+  after: stockQuantitySchema.nullable(),
+  reason: z.string().trim().max(300).nullable(),
+  authorId: userIdSchema,
+  occurredAt: z.string().datetime({ offset: true }),
+});
+export type StockMovementContract = z.infer<typeof stockMovementSchema>;
+
+export const createStockMovementSchema = z.object({
+  kind: stockMovementKindSchema,
+  /** correction accepts zero; all other operations require a positive quantity. */
+  quantity: stockQuantitySchema,
+  reason: z.string().trim().max(300).nullable().optional(),
+});
+export type CreateStockMovementInput = z.infer<typeof createStockMovementSchema>;
+
+export const markStockMissingSchema = z.object({ missing: z.boolean() });
+
+export const stockShoppingItemSourceSchema = z.enum(["automatic", "free"]);
+export type StockShoppingItemSource = z.infer<typeof stockShoppingItemSourceSchema>;
+
+export const stockShoppingItemSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  productId: domainIdSchema.nullable(),
+  name: z.string().trim().min(1).max(200),
+  source: stockShoppingItemSourceSchema,
+  quantity: stockQuantitySchema.nullable(),
+  unit: stockUnitSchema,
+  unitLabel: z.string().trim().max(40).nullable(),
+  note: z.string().trim().max(500).nullable(),
+  purchased: z.boolean(),
+  purchasedAt: z.string().datetime({ offset: true }).nullable(),
+  lastChangedBy: userIdSchema,
+  version: versionSchema,
+});
+export type StockShoppingItemContract = z.infer<typeof stockShoppingItemSchema>;
+
+export const createStockShoppingItemSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    quantity: stockQuantitySchema.nullable().optional(),
+    unit: stockUnitSchema.default("unit"),
+    unitLabel: z.string().trim().max(40).nullable().optional(),
+    note: z.string().trim().max(500).nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.unit === "other" && !value.unitLabel) {
+      context.addIssue({
+        code: "custom",
+        path: ["unitLabel"],
+        message: "Informe o rótulo da unidade.",
+      });
+    }
+  });
+export type CreateStockShoppingItemInput = z.infer<typeof createStockShoppingItemSchema>;
+
+export const purchaseStockShoppingItemSchema = z.object({
+  /** This explicit flag is the only way a purchase can create a stock entry. */
+  addToStock: z.boolean().default(false),
+  quantity: stockQuantitySchema.nullable().optional(),
+});
+export type PurchaseStockShoppingItemInput = z.infer<typeof purchaseStockShoppingItemSchema>;
+
+export const stockShoppingListQuerySchema = paginationQuerySchema.extend({
+  includePurchased: z.coerce.boolean().default(false),
+});
 
 export const pageSchema = z.object({
   nextCursor: z.string().min(1).nullable(),

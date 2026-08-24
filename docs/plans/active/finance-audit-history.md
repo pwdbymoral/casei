@@ -22,8 +22,9 @@ com allowlist, criar contratos e endpoints de lista/detalhe usando cursor assina
 transação, e consumir ambos os endpoints no diálogo acessível da UI. Consequências serão somente
 eventos do livro razão da mesma transação e espaço.
 
-A migration usa o número `0008_finance_audit_history.sql`, reservado após as migrations de identidade
-(`0004`/`0005`) e estoque (`0006`/`0007`) na cadeia integrada do MVP.
+A migration usa o número `0009_finance_audit_history.sql`, após as migrations de identidade
+(`0004`/`0005`) e estoque (`0006`–`0008`) na cadeia integrada do MVP. As colunas de snapshot já
+são criadas por `0005`; esta migration apenas reforça os grants de auditoria.
 
 ## Etapas
 

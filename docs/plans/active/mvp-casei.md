@@ -62,7 +62,7 @@ Executar schema/base antes das fatias paralelas.
 - [x] **AUTH-003 Memberships:** convite com token armazenado somente como hash, reenvio que revoga o token anterior, expiração, aceite com e-mail correspondente, remoção e transferência de propriedade. A gestão PWA em Configurações lista membros/convites, cria/reenvia/revoga e entrega link copiável; toda criação grava intenção e `auth_email_outbox` criptografados na mesma transação, sem token/URL/e-mail em claro no armazenamento ou logs.
 - [x] **AUTH-004 Autorização:** matriz owner/member/viewer, escopo server-side por `workspaceId`, membership lock em mutações, política RLS para memberships próprios e entitlement owner de recuperação; rotas não autorizadas não confiam no ID fornecido pelo cliente. Remoção, transferência, papel e desativação exigem `If-Match` e retornam `ETag`/412 em conflito.
 - [x] **AUTH-005 Desativação do espaço:** confirmação do owner com autenticação recente, estado `deletion_pending`, entitlement de recuperação alcançável na sessão e PWA sem leitura de domínio, preservação/restauração seletiva de memberships, cancelamento de jobs/outbox, purge durável por workspace no dia 30, tombstone pseudonimizado com limite verificável de backup em 35 dias e retenção auditável até o dia 365. O worker standalone executa o reaper idempotente de tombstones e auditoria detached; `apps/api/test/identity-service.integration.test.ts` cobre concorrência de onboarding, outbox, retry, cutoff 29/30, guards de backup/restore e execução do worker no cutoff 365 quando `DATABASE_URL_TEST` está disponível.
-- [ ] **AUTH-006 Perfil e preferências:** API e PWA para editar nome/locale/ocultação de valores e iniciar os fluxos Better Auth de senha/e-mail com reverificação; owner edita nome, fuso e margem de segurança do espaço com `If-Match`, prévia e bloqueio de mudança de moeda após o primeiro movimento. Cobrir contrato, autorização cruzada entre espaços, auditoria e estados offline/conflito antes do Gate 1.
+- [x] **AUTH-006 Perfil e preferências:** API e PWA para editar nome/locale (`pt-BR` no MVP)/ocultação de valores e iniciar os fluxos nativos Better Auth de senha/e-mail com reverificação; owner edita nome, fuso IANA e margem de segurança do espaço com `If-Match`, prévia e bloqueio server-side de mudança de moeda após movimentos ou compromissos `planned`/`partially_settled`. Migrations `0004_profile_preferences` e `0005_audit_redacted_fields` têm companions down; contratos, RLS/autorização cruzada, locks de moeda/perfil, auditoria `before_redacted`/`after_redacted`, estados loading/error/offline/conflito e testes focados estão cobertos em `identity-routes`, `identity-service.integration`, `settings.test` e `database/test/schema` (a integração PostgreSQL roda quando `DATABASE_URL_TEST` está disponível).
 - [x] **WEB-001 App shell:** layouts separados para experiência doméstica e administração, `WorkspaceAdapter` explícito, default de produção negando sessão, troca de espaço com reset de escopo, navegação mobile/desktop e estados loading/error/offline/permission/empty. A composição autenticada só é renderizada após guard server-side; AUTH-002..005 fornece agora o adapter real de sessão/troca/logout.
 - [x] **WEB-002 Design primitives:** primitives oficiais Base UI/shadcn (Alert, Empty, Field, Input, Label, Dialog, Separator e Skeleton) e componentes de domínio `MoneyInput`, `StatusBadge` e `AsyncState`; parsing/caret monetário e estados de acesso cobertos por Vitest.
 - [x] **WEB-003 Onboarding UI:** fluxo responsivo em três passos, moeda BRL/fuso visíveis, saldo opcional, retomada de rascunho local, validação com foco no resumo do primeiro erro e retry sem perder dados. O submit agora chama `/v1/onboarding` com chave de idempotência e preserva o rascunho em falhas.
@@ -139,11 +139,18 @@ Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam ser
 
 Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro somente após Gate 2.
 
-- [ ] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes, arquivamento e regra de unidade.
-- [ ] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência e histórico.
-- [ ] **STOCK-003 Lista de compras:** derivação por mínimo/marcação, itens livres, deduplicação e colaboração.
+- [x] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes progressivos, arquivamento/restauração e regra de unidade.
+- [x] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência com lock/If-Match e histórico append-only.
+- [x] **STOCK-003 Lista de compras:** derivação por mínimo/marcação, itens livres, deduplicação e colaboração.
+  `shopping_auto` permite preferência por produto; a lista é materializada com unicidade parcial e
+  eventos append-only na migration `0007_stock_shopping`. A API exige idempotência + `If-Match` para
+  concluir item e só cria entrada no estoque quando `addToStock: true` é confirmado por item. A PWA
+  oferece chips Lista/Faltando/Todos, itens livres e revisão de quantidade antes da confirmação.
+  Follow-up separado **STOCK-003a** permanece para substituir os cursores atualmente aceitos pelos
+  endpoints de produtos/movimentações por cursor opaco assinado, com teste de continuidade, limite e
+  rejeição de cursor adulterado; esta fatia não altera a ordenação/contrato já publicado do STOCK-002.
 - [ ] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
-- [ ] **STOCK-005 UI estoque:** busca, filtros, lista touch, quick actions, modo avançado responsivo e estados offline.
+- [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
 - [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
 
 **Gate 6:** quantidade e histórico reconciliam; concorrência não duplica lista; jornada no mercado passa em telefone e teclado.

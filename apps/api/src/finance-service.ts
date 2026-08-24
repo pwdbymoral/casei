@@ -654,6 +654,12 @@ export class FinanceService {
       expectedVersion,
       "transactions/:id/post",
       async (client, row) => {
+        const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
+        if (row.currency_code !== workspaceCurrency) {
+          throw new FinanceConflictError(
+            "A moeda da transação não corresponde mais à moeda do espaço.",
+          );
+        }
         if (row.state !== "planned" && row.state !== "partially_settled") {
           throw new FinanceConflictError("Somente uma transação planejada pode ser realizada.");
         }
@@ -1506,7 +1512,11 @@ export class FinanceService {
 
   private async workspaceCurrency(client: PgPoolClient, workspaceId: string): Promise<string> {
     const result = await client.query<{ currency_code: string }>(
-      `SELECT currency_code FROM workspace_preference WHERE workspace_id = $1`,
+      `SELECT p.currency_code
+         FROM workspace_preference p
+         JOIN workspace w ON w.id = p.workspace_id
+        WHERE p.workspace_id = $1
+        FOR UPDATE OF w, p`,
       [workspaceId],
     );
     return result.rows[0]?.currency_code ?? "BRL";

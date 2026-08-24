@@ -3,6 +3,8 @@ import {
   deactivateWorkspaceSchema,
   onboardingSchema,
   updateMembershipRoleSchema,
+  updateUserProfileSchema,
+  updateWorkspacePreferencesSchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
 import { ApiHttpError, notFoundError } from "./http/index.js";
@@ -31,10 +33,28 @@ export function configureIdentityRoutes(
   router.use("/workspaces/:workspaceId/members", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/members/*", options.scopeMiddleware);
   router.use("/workspaces/:workspaceId/ownership/*", options.scopeMiddleware);
+  router.use("/workspaces/:workspaceId/preferences", options.scopeMiddleware);
 
   router.get("/me/workspaces", async (context) => {
     const actor = actorOf(context);
     return context.json(await service.getSession(actor));
+  });
+
+  router.get("/me/profile", async (context) => {
+    const result = await service.getProfile(actorOf(context));
+    setVersionHeaders(context, result.version);
+    return context.json(result);
+  });
+
+  router.patch("/me/profile", async (context) => {
+    const result = await service.updateProfile(
+      actorOf(context),
+      await parseJsonBody(context, updateUserProfileSchema),
+      requireIfMatch(context),
+      context.get("correlationId"),
+    );
+    setVersionHeaders(context, result.version);
+    return context.json(result);
   });
 
   router.post("/onboarding", async (context) => {
@@ -65,6 +85,22 @@ export function configureIdentityRoutes(
 
   router.get("/workspaces/:workspaceId/invitations", async (context) => {
     return context.json(await service.listInvitations(scopeOf(context)));
+  });
+
+  router.get("/workspaces/:workspaceId/preferences", async (context) => {
+    const result = await service.getWorkspacePreferences(scopeOf(context));
+    setVersionHeaders(context, result.version);
+    return context.json(result);
+  });
+
+  router.patch("/workspaces/:workspaceId/preferences", async (context) => {
+    const result = await service.updateWorkspacePreferences(
+      scopeOf(context),
+      await parseJsonBody(context, updateWorkspacePreferencesSchema),
+      requireIfMatch(context),
+    );
+    setVersionHeaders(context, result.version);
+    return context.json(result);
   });
 
   router.post("/workspaces/:workspaceId/invitations/:invitationId/resend", async (context) => {

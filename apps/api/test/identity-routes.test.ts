@@ -2,7 +2,10 @@ import { workspaceSessionSchema } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import {
+  IdentityConflictError,
+  IdentityNotFoundError,
   IdentityPermissionError,
+  IdentityRecentAuthError,
   IdentityVersionConflictError,
   InvitationRateLimitError,
 } from "../src/identity-service.js";
@@ -10,6 +13,26 @@ import {
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 
 describe("AUTH-002..005 HTTP boundary", () => {
+  it("preserves the typed identity version conflict for API error mapping", () => {
+    const errors = [
+      new IdentityNotFoundError(),
+      new IdentityPermissionError(),
+      new IdentityConflictError("conflict"),
+      new IdentityVersionConflictError(7),
+      new IdentityRecentAuthError(),
+      new InvitationRateLimitError(30),
+    ];
+    expect(errors.map((error) => error.name)).toEqual([
+      "IdentityNotFoundError",
+      "IdentityPermissionError",
+      "IdentityConflictError",
+      "IdentityVersionConflictError",
+      "IdentityRecentAuthError",
+      "InvitationRateLimitError",
+    ]);
+    expect(errors[3]).toMatchObject({ code: "version_conflict", currentVersion: 7 });
+  });
+
   it("requires each workspace session summary to carry its configured currency", () => {
     expect(
       workspaceSessionSchema.parse({
@@ -237,6 +260,70 @@ describe("AUTH-002..005 HTTP boundary", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ recoveryUntil: "2030-01-31T00:00:00.000Z" });
   });
+
+  it("protects profile and workspace preferences with scope and If-Match", async () => {
+    const app = createAppWithProfile();
+    const profile = await app.request("http://localhost/v1/me/profile");
+    expect(profile.status).toBe(200);
+    expect(profile.headers.get("ETag")).toBe('"v0"');
+    await expect(profile.json()).resolves.toMatchObject({
+      userId: "user-owner",
+      displayName: "Pessoa owner",
+      locale: "pt-BR",
+      hideValues: false,
+      version: 0,
+    });
+
+    const missingProfileVersion = await app.request("http://localhost/v1/me/profile", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Novo nome", locale: "pt-BR", hideValues: true }),
+    });
+    expect(missingProfileVersion.status).toBe(428);
+
+    const updatedProfile = await app.request("http://localhost/v1/me/profile", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "If-Match": '"v0"' },
+      body: JSON.stringify({ displayName: "Novo nome", locale: "pt-BR", hideValues: true }),
+    });
+    expect(updatedProfile.status).toBe(200);
+    expect(updatedProfile.headers.get("ETag")).toBe('"v1"');
+
+    const preferences = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/preferences`,
+    );
+    expect(preferences.status).toBe(200);
+    expect(preferences.headers.get("ETag")).toBe('"v0"');
+    await expect(preferences.json()).resolves.toMatchObject({
+      workspaceId,
+      name: "Casa",
+      currency: "BRL",
+      timeZone: "America/Fortaleza",
+      safetyMarginMinor: "0",
+      version: 0,
+    });
+
+    const member = createAppWithProfile("member");
+    const denied = await member.request(
+      `http://localhost/v1/workspaces/${workspaceId}/preferences`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "If-Match": '"v0"' },
+        body: JSON.stringify({
+          name: "Outra casa",
+          currency: "BRL",
+          timeZone: "America/Fortaleza",
+          safetyMarginMinor: "0",
+        }),
+      },
+    );
+    expect(denied.status).toBe(403);
+
+    const foreign = await app.request(
+      "http://localhost/v1/workspaces/0190f3c8-2a10-7abc-8def-1234567890ac/preferences",
+    );
+    expect(foreign.status).toBe(404);
+  });
 });
 
 function createAppWithRole(
@@ -315,4 +402,69 @@ function createAppWithRole(
       }),
     },
   });
+}
+
+function createAppWithProfile(role: "owner" | "member" = "owner") {
+  const service = {
+    resolveScope: async (_actor: unknown, requestedWorkspaceId: string) =>
+      requestedWorkspaceId === workspaceId
+        ? {
+            actor: { userId: "user-owner", email: "owner@example.com" },
+            workspaceId,
+            role,
+            correlationId: "",
+          }
+        : null,
+    getProfile: async () => ({
+      userId: "user-owner",
+      displayName: "Pessoa owner",
+      email: "owner@example.com",
+      emailVerified: true,
+      locale: "pt-BR",
+      hideValues: false,
+      version: 0,
+    }),
+    updateProfile: async () => ({
+      userId: "user-owner",
+      displayName: "Novo nome",
+      email: "owner@example.com",
+      emailVerified: true,
+      locale: "pt-BR",
+      hideValues: true,
+      version: 1,
+    }),
+    getWorkspacePreferences: async () => ({
+      workspaceId,
+      name: "Casa",
+      currency: "BRL",
+      timeZone: "America/Fortaleza",
+      safetyMarginMinor: "0",
+      version: 0,
+    }),
+    updateWorkspacePreferences: async () => {
+      if (role !== "owner") throw new IdentityPermissionError();
+      return {
+        workspaceId,
+        name: "Outra casa",
+        currency: "BRL",
+        timeZone: "America/Fortaleza",
+        safetyMarginMinor: "0",
+        version: 1,
+      };
+    },
+  };
+  const app = createApp(undefined, {
+    identity: {
+      pool: {} as never,
+      service: service as never,
+      actorResolver: async () => ({
+        userId: "user-owner",
+        email: "owner@example.com",
+        displayName: "Pessoa owner",
+      }),
+    },
+  });
+  // The boundary uses the injected scope resolver; members can read but not mutate.
+  void role;
+  return app;
 }

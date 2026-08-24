@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { describe, expect, it } from "vitest";
+import { FinanceService } from "../src/finance-service.js";
 import { IdentityService, InvitationRateLimitError } from "../src/identity-service.js";
 import { runWorkspaceWorkerOnce } from "../src/workspace-worker.js";
 
@@ -79,6 +80,280 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       const scope = await service.resolveScope(owner, workspaceId, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
       expect(scope?.role).toBe("owner");
       if (!scope) throw new Error("owner scope was not resolved");
+
+      const initialProfile = await service.getProfile(owner);
+      expect(initialProfile).toMatchObject({
+        userId: ownerId,
+        displayName: "Owner",
+        locale: "pt-BR",
+        hideValues: false,
+        version: 0,
+      });
+      const concurrentProfiles = await Promise.allSettled([
+        service.updateProfile(
+          owner,
+          { displayName: "Concorrente A", locale: "pt-BR", hideValues: true },
+          initialProfile.version,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        ),
+        service.updateProfile(
+          owner,
+          { displayName: "Concorrente B", locale: "pt-BR", hideValues: false },
+          initialProfile.version,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        ),
+      ]);
+      expect(concurrentProfiles.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const winningProfile = concurrentProfiles.find((result) => result.status === "fulfilled");
+      expect(winningProfile).toMatchObject({
+        status: "fulfilled",
+        value: { version: 1, locale: "pt-BR" },
+      });
+      const concurrentFailure = concurrentProfiles.find((result) => result.status === "rejected");
+      expect(concurrentFailure).toMatchObject({
+        status: "rejected",
+        reason: { name: "IdentityVersionConflictError" },
+      });
+      const profileAudit = await pool.query<{
+        action: string;
+        reason: string;
+        before_redacted: Record<string, unknown>;
+        after_redacted: Record<string, unknown>;
+      }>(
+        `SELECT action, reason, before_redacted, after_redacted FROM audit_event
+          WHERE action = 'identity.profile_updated' AND target_id = $1
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [ownerId],
+      );
+      expect(profileAudit.rows[0]).toMatchObject({
+        action: "identity.profile_updated",
+        reason: "profile_fields_updated",
+        before_redacted: { display_name: "[redacted]", locale: "pt-BR", hide_values: false },
+        after_redacted: { display_name: "[redacted]", locale: "pt-BR" },
+      });
+      expect([true, false]).toContain(profileAudit.rows[0]?.after_redacted.hide_values);
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("Concorrente A");
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("Concorrente B");
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("owner@example.test");
+      await expect(
+        service.updateProfile(
+          owner,
+          { displayName: "Conflito", locale: "pt-BR", hideValues: false },
+          initialProfile.version,
+          "01ARZ3NDEKTSV4RRQ69G5FAW",
+        ),
+      ).rejects.toMatchObject({ name: "IdentityVersionConflictError" });
+
+      const initialPreferences = await service.getWorkspacePreferences(scope);
+      expect(initialPreferences).toMatchObject({
+        workspaceId,
+        name: "Casa lifecycle",
+        currency: "BRL",
+        timeZone: "America/Fortaleza",
+        safetyMarginMinor: "0",
+        version: 0,
+      });
+      const updatedPreferences = await service.updateWorkspacePreferences(
+        scope,
+        {
+          name: "Casa lifecycle",
+          currency: "USD",
+          timeZone: "America/Sao_Paulo",
+          safetyMarginMinor: "1200",
+        },
+        initialPreferences.version,
+      );
+      expect(updatedPreferences).toMatchObject({
+        currency: "USD",
+        timeZone: "America/Sao_Paulo",
+        safetyMarginMinor: "1200",
+        version: 1,
+      });
+      const preferenceAudit = await pool.query<{
+        action: string;
+        reason: string;
+        before_redacted: Record<string, unknown>;
+        after_redacted: Record<string, unknown>;
+      }>(
+        `SELECT action, reason, before_redacted, after_redacted FROM audit_event
+          WHERE action = 'workspace.preferences_updated' AND target_id = $1
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [workspaceId],
+      );
+      expect(preferenceAudit.rows[0]).toEqual({
+        action: "workspace.preferences_updated",
+        reason: "workspace_preference_fields_updated",
+        before_redacted: {
+          name: "[redacted]",
+          currency: "BRL",
+          time_zone: "America/Fortaleza",
+          safety_margin_minor: "[redacted]",
+        },
+        after_redacted: {
+          name: "[redacted]",
+          currency: "USD",
+          time_zone: "America/Sao_Paulo",
+          safety_margin_minor: "[redacted]",
+        },
+      });
+      expect(preferenceAudit.rows[0]?.after_redacted).toMatchObject({
+        currency: "USD",
+        time_zone: "America/Sao_Paulo",
+      });
+      const noMovementPreferences = await service.updateWorkspacePreferences(
+        scope,
+        {
+          name: "Casa lifecycle",
+          currency: "EUR",
+          timeZone: "America/Sao_Paulo",
+          safetyMarginMinor: "1200",
+        },
+        updatedPreferences.version,
+      );
+      expect(noMovementPreferences.currency).toBe("EUR");
+      await pool.query(
+        `INSERT INTO credit_card
+          (workspace_id, name, closing_day, due_day, currency_code)
+         VALUES ($1, 'Cartão de teste', 10, 20, 'EUR')`,
+        [workspaceId],
+      );
+      const cardPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          cardPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
+      await pool.query(
+        `INSERT INTO finance_transaction
+          (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, description)
+         VALUES ($1, 'expense', 'planned', 'wallet', 100, 0, 'EUR', '2030-01-01', 'compromisso')`,
+        [workspaceId],
+      );
+      const plannedPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          plannedPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
+      await pool.query(
+        `DELETE FROM finance_transaction
+          WHERE workspace_id = $1 AND state = 'planned'`,
+        [workspaceId],
+      );
+      await pool.query(
+        `INSERT INTO finance_transaction
+          (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, description)
+         VALUES ($1, 'expense', 'posted', 'wallet', 100, 100, 'EUR', '2030-01-01', 'teste')`,
+        [workspaceId],
+      );
+      const movementPreferences = await service.getWorkspacePreferences(scope);
+      await expect(
+        service.updateWorkspacePreferences(
+          scope,
+          {
+            name: "Casa lifecycle",
+            currency: "BRL",
+            timeZone: "America/Sao_Paulo",
+            safetyMarginMinor: "1200",
+          },
+          movementPreferences.version,
+        ),
+      ).rejects.toMatchObject({ name: "IdentityConflictError" });
+
+      const raceWorkspace = await pool.query<{ id: string }>(
+        `INSERT INTO workspace (name) VALUES ('Casa concorrência moeda') RETURNING id`,
+      );
+      const raceWorkspaceId = raceWorkspace.rows[0]?.id;
+      expect(raceWorkspaceId).toBeTruthy();
+      if (!raceWorkspaceId) throw new Error("race workspace was not created");
+      await pool.query(
+        `INSERT INTO workspace_preference (workspace_id, currency_code, timezone)
+         VALUES ($1, 'BRL', 'America/Fortaleza')`,
+        [raceWorkspaceId],
+      );
+      await pool.query(
+        `INSERT INTO membership (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [raceWorkspaceId, ownerId],
+      );
+      const raceScope = await service.resolveScope(
+        owner,
+        raceWorkspaceId,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+      );
+      expect(raceScope?.role).toBe("owner");
+      if (!raceScope) throw new Error("race scope was not resolved");
+      const financeService = new FinanceService(pool, { cursorSecret: "integration-secret" });
+      const financeScope = {
+        workspaceId: raceWorkspaceId,
+        actorId: ownerId,
+        role: "owner" as const,
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+      };
+      const blocker = await pool.connect();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query(
+          `SELECT w.id FROM workspace w
+             JOIN workspace_preference p ON p.workspace_id = w.id
+            WHERE w.id = $1
+            FOR UPDATE OF w, p`,
+          [raceWorkspaceId],
+        );
+        const preferenceAttempt = service.updateWorkspacePreferences(
+          raceScope,
+          {
+            name: "Casa concorrência moeda",
+            currency: "USD",
+            timeZone: "America/Fortaleza",
+            safetyMarginMinor: "0",
+          },
+          0,
+        );
+        const transactionAttempt = financeService.createTransaction(
+          financeScope,
+          {
+            kind: "expense",
+            state: "planned",
+            amount: { currency: "BRL", minor: "100" },
+            occurredOn: "2030-01-01",
+            description: "disputa de moeda",
+          },
+          "currency-race-transaction",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await blocker.query("COMMIT");
+        const raceResults = await Promise.allSettled([preferenceAttempt, transactionAttempt]);
+        expect(raceResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+        const racePreferences = await service.getWorkspacePreferences(raceScope);
+        const raceTransactions = await pool.query<{ currency_code: string }>(
+          `SELECT currency_code FROM finance_transaction WHERE workspace_id = $1`,
+          [raceWorkspaceId],
+        );
+        if (racePreferences.currency === "USD") {
+          expect(raceTransactions.rows).toHaveLength(0);
+        } else {
+          expect(racePreferences.currency).toBe("BRL");
+          expect(raceTransactions.rows).toEqual([{ currency_code: "BRL" }]);
+        }
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        blocker.release();
+      }
 
       const invitation = await service.createInvitation(
         scope,
@@ -235,7 +510,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           workspaceName: "Casa lifecycle",
           reason: "teste de ciclo de vida",
         },
-        0,
+        2,
       );
       expect(first.recoveryUntil).toBe("2030-01-31T00:00:00.000Z");
       await expect(
@@ -247,7 +522,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
             reason: "retry após perda de resposta",
           },
           "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-          0,
+          2,
         ),
       ).resolves.toEqual(first);
       await expect(
@@ -272,16 +547,17 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         { user_id: ownerId, status: "recovery_only" },
         { user_id: revokedId, status: "revoked" },
       ]);
-      await expect(service.getSession(owner)).resolves.toMatchObject({
-        workspaces: [
+      const sessionAfterDeactivate = await service.getSession(owner);
+      expect(sessionAfterDeactivate.workspaces).toEqual(
+        expect.arrayContaining([
           expect.objectContaining({
             id: workspaceId,
             status: "deletion_pending",
             role: "owner",
-            currency: "BRL",
+            currency: "EUR",
           }),
-        ],
-      });
+        ]),
+      );
       await expect(
         pool.query<{ actor_id: string | null; required_capability: string; state: string }>(
           `SELECT actor_id, required_capability, state FROM job WHERE job_type = 'workspace.purge' AND workspace_id = $1`,
@@ -326,7 +602,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           workspaceName: "Casa lifecycle",
           reason: "teste do cutoff",
         },
-        2,
+        4,
       );
       await expect(
         pool.query<{ reason: string }>(
