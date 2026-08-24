@@ -58,9 +58,10 @@ No backend do MVP, a leitura reconstruível fica disponível em
 determinísticas; o segundo aceita `horizonDays` entre 1 e 365. A resposta do valor
 seguro inclui `gross`, `safe`, `available`, `confidence` e o breakdown de saldo,
 entradas, saídas da carteira, faturas, reservas cobertas/descobertas e margem.
-Quando ainda não há evento publicado de carteira para sustentar o saldo, `available`
-é `false` e os valores `safe`/`gross` são nulos, mesmo que o breakdown mostre os
-dados observados. A UI deve transformar a razão de baixa confiança em ação objetiva.
+Quando ainda não há evento publicado de abertura ou conferência de saldo para
+sustentar o saldo, `available` é `false` e os valores `safe`/`gross` são nulos,
+mesmo que o breakdown mostre os dados observados. A UI deve transformar a razão
+de baixa confiança em ação objetiva.
 
 ### Confiança
 

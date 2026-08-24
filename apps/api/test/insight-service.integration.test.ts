@@ -29,7 +29,7 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
         gross: { currency: "BRL", minor: "725" },
         confidence: {
           level: "medium",
-          reasons: ["saldo_sem_conferencia_recente", "recorrencia_variavel_sem_estimativa"],
+          reasons: ["recorrencia_variavel_sem_estimativa"],
         },
         breakdown: {
           balance: { currency: "BRL", minor: "1500" },
@@ -64,9 +64,33 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
       await fixture.close();
     }
   });
+
+  integrationIt(
+    "does not present safe spending without opening or reconciliation evidence",
+    async () => {
+      const fixture = await createFixture({ withOpening: false });
+      try {
+        const insight = new InsightService(fixture.pool);
+        const safe = await insight.getSafeToSpend(fixture.scope, {
+          asOf: "2026-08-05",
+          horizonDays: 30,
+        });
+
+        expect(safe.available).toBe(false);
+        expect(safe.safe).toBeNull();
+        expect(safe.gross).toBeNull();
+        expect(safe.confidence).toEqual({
+          level: "low",
+          reasons: ["saldo_sem_evidencia_de_abertura_ou_conferencia"],
+        });
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
 });
 
-async function createFixture() {
+async function createFixture(options: { withOpening?: boolean } = {}) {
   if (!adminUrl) throw new Error("DATABASE_URL_TEST is required");
   const adminPool = getDatabasePool({ connectionString: adminUrl });
   const suffix = randomUUID().replaceAll("-", "");
@@ -131,10 +155,12 @@ async function createFixture() {
     const account = accounts.rows[0];
     if (!account) throw new Error("accounts were not created");
 
-    await insertLedgerEvent(pool, workspaceId, "opening.balance.v1", "2026-08-01", [
-      [account.wallet_id, 2_000],
-      [account.income_id, -2_000],
-    ]);
+    if (options.withOpening !== false) {
+      await insertLedgerEvent(pool, workspaceId, "opening.balance.v1", "2026-08-01", [
+        [account.wallet_id, 2_000],
+        [account.income_id, -2_000],
+      ]);
+    }
     await insertLedgerEvent(pool, workspaceId, "transaction.posted.v1", "2026-08-02", [
       [account.wallet_id, -500],
       [account.expense_id, 500],

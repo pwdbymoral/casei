@@ -103,6 +103,7 @@ interface Snapshot {
   config: WorkspaceConfig;
   balance: bigint;
   hasBalanceEvidence: boolean;
+  hasRecentBalanceEvidence: boolean;
   income: bigint;
   expense: bigint;
   transfer: bigint;
@@ -121,6 +122,8 @@ interface Snapshot {
 interface InsightNumericRow {
   balance_minor?: string | bigint | null;
   event_count?: string | bigint | null;
+  evidence_count?: string | bigint | null;
+  recent_evidence_count?: string | bigint | null;
   income_minor?: string | bigint | null;
   expense_minor?: string | bigint | null;
   transfer_minor?: string | bigint | null;
@@ -235,10 +238,18 @@ export class InsightService {
   ): Promise<Snapshot> {
     const balanceResult = await client.query<InsightNumericRow>(
       `SELECT COALESCE(SUM(le.amount_minor), 0) AS balance_minor,
-              COUNT(DISTINCT le.event_id) AS event_count
+              COUNT(DISTINCT le.event_id) AS event_count,
+              COUNT(DISTINCT ev.id) FILTER (
+                WHERE ev.event_type = 'opening.balance.v1' OR ft.kind = 'adjustment'
+              ) AS evidence_count,
+              COUNT(DISTINCT ev.id) FILTER (
+                WHERE (ev.event_type = 'opening.balance.v1' OR ft.kind = 'adjustment')
+                  AND ev.occurred_on >= ($3::date - INTERVAL '30 days')
+              ) AS recent_evidence_count
          FROM ledger_entry le
          JOIN ledger_event ev ON ev.workspace_id = le.workspace_id AND ev.id = le.event_id
          JOIN financial_account fa ON fa.workspace_id = le.workspace_id AND fa.id = le.account_id
+         LEFT JOIN finance_transaction ft ON ft.workspace_id = ev.workspace_id AND ft.id = ev.transaction_id
         WHERE le.workspace_id = $1
           AND le.currency_code = $2
           AND fa.currency_code = $2
@@ -299,9 +310,8 @@ export class InsightService {
          FROM credit_statement
         WHERE workspace_id = $1
           AND state NOT IN ('paid', 'canceled')
-          AND due_on <= $3::date
-          ${includeOverdue ? "" : "AND due_on >= $2::date"}`,
-      includeOverdue ? [workspaceId, dates.from, dates.to] : [workspaceId, dates.from, dates.to],
+          AND due_on <= $2::date`,
+      [workspaceId, dates.to],
     );
     const reservations = await client.query<InsightNumericRow>(
       `SELECT COALESCE(SUM(CASE WHEN kind = 'allocate' THEN amount_minor
@@ -330,7 +340,8 @@ export class InsightService {
       to: dates.to,
       config,
       balance: toBigInt(balanceRow?.balance_minor),
-      hasBalanceEvidence: toBigInt(balanceRow?.event_count) > 0n,
+      hasBalanceEvidence: toBigInt(balanceRow?.evidence_count) > 0n,
+      hasRecentBalanceEvidence: toBigInt(balanceRow?.recent_evidence_count) > 0n,
       income: toBigInt(resultRow?.income_minor),
       expense: toBigInt(resultRow?.expense_minor),
       transfer: toBigInt(transferResult.rows[0]?.transfer_minor),
@@ -355,6 +366,7 @@ export class InsightService {
       this.pool,
       { ...scope, applicationRole: this.applicationRole },
       async ({ client }) => callback(client),
+      { isolationLevel: "repeatable read", readOnly: true },
     );
   }
 }
@@ -430,11 +442,13 @@ function toSafeToSpendView(snapshot: Snapshot, horizonDays: number): SafeToSpend
 
 function confidenceFor(snapshot: Snapshot): InsightConfidence {
   if (!snapshot.hasBalanceEvidence) {
-    return { level: "low", reasons: ["saldo_sem_eventos_publicados"] };
+    return { level: "low", reasons: ["saldo_sem_evidencia_de_abertura_ou_conferencia"] };
   }
-  const reasons = ["saldo_sem_conferencia_recente"];
+  const reasons: string[] = [];
+  if (!snapshot.hasRecentBalanceEvidence) reasons.push("saldo_sem_conferencia_recente");
   if (snapshot.unknownVariableCount > 0) reasons.push("recorrencia_variavel_sem_estimativa");
-  return { level: "medium", reasons };
+  if (reasons.length > 0) return { level: "medium", reasons };
+  return { level: "high", reasons: ["saldo_conferido_recentemente"] };
 }
 
 function coveredReservations(balance: bigint, reserved: bigint): bigint {
