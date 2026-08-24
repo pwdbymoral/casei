@@ -6,6 +6,8 @@ import {
   markStockMissingSchema,
   paginationQuerySchema,
   purchaseStockShoppingItemSchema,
+  stockBulkApplyRequestSchema,
+  stockBulkPreviewRequestSchema,
   stockProductListQuerySchema,
   stockShoppingListQuerySchema,
   updateStockProductSchema,
@@ -57,6 +59,30 @@ export function configureStockRoutes(router: Hono<ApiEnv>, options: StockRoutesO
     );
     context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
     return context.json(result.product, result.replayed ? 200 : 201);
+  });
+
+  router.post("/workspaces/:workspaceId/stock/products/bulk/preview", async (context) => {
+    const input = await parseJsonBody(context, stockBulkPreviewRequestSchema);
+    const preview = await service.previewBulkProducts(scopeOf(context), input);
+    return context.json(preview);
+  });
+
+  router.post("/workspaces/:workspaceId/stock/products/bulk", async (context) => {
+    const input = await parseJsonBody(context, stockBulkApplyRequestSchema);
+    const result = await service.applyBulkProducts(
+      scopeOf(context),
+      input,
+      requiredIdempotencyKey(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(
+      {
+        committed: result.committed,
+        preview: result.preview,
+        applied: result.applied,
+      },
+      result.statusCode as 200 | 422,
+    );
   });
 
   router.get("/workspaces/:workspaceId/stock/shopping", async (context) => {

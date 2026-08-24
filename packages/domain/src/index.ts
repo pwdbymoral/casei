@@ -5,4 +5,5 @@ export * from "./ids.js";
 export * from "./money.js";
 export * from "./result.js";
 export * from "./stock.js";
+export * from "./stock-bulk.js";
 export * from "./time.js";
