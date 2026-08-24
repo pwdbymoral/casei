@@ -52,8 +52,9 @@ describe("StockService membership revalidation", () => {
     const service = new StockService(harness.pool as never);
 
     await expect(service.listProducts(scope)).resolves.toEqual([]);
-    const membershipQuery = harness.statements.find((sql) => sql.includes("FROM membership"));
-    expect(membershipQuery).toMatch(/FOR UPDATE/);
+    const lockQueries = harness.statements.filter((sql) => sql.includes("FOR UPDATE"));
+    expect(lockQueries[0]).toMatch(/FROM membership/);
+    expect(lockQueries[1]).toMatch(/FROM workspace/);
   });
 
   it("does not trust a stale writable role from the request scope", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  clearStockOfflineSnapshot,
+  clearAllStockOfflineSnapshots,
   createFixtureStockAdapter,
   createHttpStockAdapter,
 } from "./stock";
@@ -118,6 +118,7 @@ describe("stock adapter", () => {
     try {
       const adapter = createHttpStockAdapter({ fetch });
       await expect(adapter.listProducts(workspaceA)).resolves.toEqual([cachedProduct]);
+      await expect(adapter.listProducts(workspaceB)).resolves.toEqual([cachedProduct]);
       online = false;
       const offlineAdapter = createHttpStockAdapter({ fetch });
       await expect(offlineAdapter.listProducts(workspaceA)).resolves.toEqual([cachedProduct]);
@@ -125,8 +126,29 @@ describe("stock adapter", () => {
       await expect(
         offlineAdapter.createProduct(workspaceA, { name: "Leite" }, "stock-offline-001"),
       ).rejects.toMatchObject({ code: "offline_required" });
-      clearStockOfflineSnapshot(workspaceA);
+      await expect(offlineAdapter.listProducts(workspaceB)).resolves.toEqual([cachedProduct]);
+      clearAllStockOfflineSnapshots();
       await expect(offlineAdapter.listProducts(workspaceA)).rejects.toMatchObject({
+        code: "offline_required",
+      });
+      await expect(offlineAdapter.listProducts(workspaceB)).rejects.toMatchObject({
+        code: "offline_required",
+      });
+
+      let resolvePending!: (response: Response) => void;
+      const pendingResponse = new Promise<Response>((resolve) => {
+        resolvePending = resolve;
+      });
+      const pendingAdapter = createHttpStockAdapter({ fetch: async () => pendingResponse });
+      const pendingRead = pendingAdapter.listProducts(workspaceA);
+      clearAllStockOfflineSnapshots();
+      resolvePending(
+        Response.json({ items: [cachedProduct], page: { nextCursor: null, hasMore: false } }),
+      );
+      await expect(pendingRead).resolves.toEqual([cachedProduct]);
+      online = false;
+      const afterLateReadAdapter = createHttpStockAdapter({ fetch });
+      await expect(afterLateReadAdapter.listProducts(workspaceA)).rejects.toMatchObject({
         code: "offline_required",
       });
     } finally {
