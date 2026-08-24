@@ -368,6 +368,17 @@ describe("finance adapter", () => {
     expect(guard.isCurrent(oldRequest)).toBe(false);
   });
 
+  it("drops an old category mutation after changing workspace", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    const request = guard.begin("workspace-a");
+    guard.switchWorkspace("workspace-b");
+    const categories: string[] = [];
+    const oldResponse = Promise.resolve("category-from-a");
+    const value = await oldResponse;
+    if (guard.isCurrent(request)) categories.push(value);
+    expect(categories).toEqual([]);
+  });
+
   it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
     const adapter = createFixtureFinanceAdapter();
     const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";
@@ -415,9 +426,21 @@ describe("finance adapter", () => {
       state: "posted",
       description: "Freela",
       cardId: null,
+      categoryId: null,
     });
     expect(transactionCardIdForKind("income", "card-1")).toBeNull();
     expect(transactionCardIdForKind("expense", "card-1")).toBe("card-1");
+    expect(
+      createQuickCaptureTransactionInput({
+        kind: "expense",
+        amountMinor: "500",
+        currency: "USD",
+        planned: false,
+        description: "Feira",
+        cardId: "",
+        categoryId: "category-1",
+      }).categoryId,
+    ).toBe("category-1");
   });
 
   it("labels every timeline kind and uses a non-expense sign for transfers and adjustments", () => {

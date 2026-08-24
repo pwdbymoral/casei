@@ -3,11 +3,40 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertStatementCanReopen,
   assertVariableRecurrenceSettlementAllowed,
+  FinanceConflictError,
   FinanceService,
 } from "../src/finance-service.js";
 import { decodeCursor } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
+  it("turns a concurrent active category name collision into a recoverable conflict", async () => {
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-category" }] };
+        if (sql.includes("INSERT INTO finance_category")) throw { code: "23505" };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    await expect(
+      service.createCategory(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "member",
+        },
+        { name: "Mercado", kind: "expense" },
+        "category-collision-001",
+      ),
+    ).rejects.toBeInstanceOf(FinanceConflictError);
+  });
+
   it("updates a category atomically and records its redacted audit transition", async () => {
     const categoryId = "0190f3c8-2a10-7abc-8def-1234567890b0";
     const client = {

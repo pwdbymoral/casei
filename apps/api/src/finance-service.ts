@@ -939,10 +939,24 @@ export class FinanceService {
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
-          const result = await client.query(
-            `INSERT INTO finance_category (workspace_id, name, kind) VALUES ($1, $2, $3) RETURNING id, workspace_id, name, kind, archived, version`,
-            [scope.workspaceId, parsed.name, parsed.kind],
-          );
+          const result = await client
+            .query<{
+              id: string;
+              workspace_id: string;
+              name: string;
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+              version: number;
+            }>(
+              `INSERT INTO finance_category (workspace_id, name, kind) VALUES ($1, $2, $3) RETURNING id, workspace_id, name, kind, archived, version`,
+              [scope.workspaceId, parsed.name, parsed.kind],
+            )
+            .catch((error: unknown) => {
+              if (isUniqueViolation(error)) {
+                throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+              }
+              throw error;
+            });
           const row = result.rows[0];
           if (!row) throw new Error("category insert failed");
           await this.recordCategoryAudit(client, scope, row.id, "category.created", {
@@ -1914,6 +1928,10 @@ async function assertCategoryNameAvailable(
   );
   if (result.rows[0])
     throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+}
+
+function isUniqueViolation(error: unknown): error is { code: string } {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "23505");
 }
 
 export function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {

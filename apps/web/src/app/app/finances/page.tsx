@@ -130,6 +130,7 @@ function FinanceDashboard({
   const [notice, setNotice] = useState<string | null>(null);
   const [transactionType, setTransactionType] = useState<"expense" | "income">("expense");
   const [transactionCardId, setTransactionCardId] = useState("");
+  const [transactionCategoryId, setTransactionCategoryId] = useState("");
   const [amount, setAmount] = useState("0");
   const [description, setDescription] = useState("");
   const [planned, setPlanned] = useState(false);
@@ -364,6 +365,7 @@ function FinanceDashboard({
           planned,
           description,
           cardId: transactionCardId,
+          categoryId: transactionCategoryId,
         }),
         commandKey,
       );
@@ -372,6 +374,7 @@ function FinanceDashboard({
       setAmount("0");
       setDescription("");
       setTransactionCardId("");
+      setTransactionCategoryId("");
       setPlanned(false);
       if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
       else await load(false);
@@ -465,6 +468,7 @@ function FinanceDashboard({
     if (savingCategory || !name || !writeAccess) return;
     setSavingCategory(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const value = editingCategory
         ? await adapter.updateCategory(workspaceId, editingCategory, {
@@ -472,6 +476,7 @@ function FinanceDashboard({
             kind: categoryKind,
           })
         : await adapter.createCategory(workspaceId, { name, kind: categoryKind });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setCategories((current) => {
         const index = current.findIndex((category) => category.id === value.id);
         if (index < 0) return [...current, value];
@@ -482,9 +487,10 @@ function FinanceDashboard({
       setEditingCategory(null);
       setNotice(editingCategory ? "Categoria atualizada." : "Categoria criada.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível salvar a categoria.");
     } finally {
-      setSavingCategory(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCategory(false);
     }
   }
 
@@ -492,21 +498,24 @@ function FinanceDashboard({
     if (savingCategory || !writeAccess) return;
     setSavingCategory(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const value =
         action === "archive"
           ? await adapter.archiveCategory(workspaceId, category)
           : await adapter.restoreCategory(workspaceId, category);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setCategories((current) => current.map((item) => (item.id === value.id ? value : item)));
       setNotice(action === "archive" ? "Categoria arquivada." : "Categoria restaurada.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(
         cause instanceof Error
           ? cause.message
           : `Não foi possível ${action === "archive" ? "arquivar" : "restaurar"} a categoria.`,
       );
     } finally {
-      setSavingCategory(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCategory(false);
     }
   }
 
@@ -917,6 +926,28 @@ function FinanceDashboard({
                       maxLength={500}
                     />
                     <FieldDescription>Você pode detalhar depois.</FieldDescription>
+                  </Field>
+                  <Field className="mt-3">
+                    <FieldLabel htmlFor="transaction-category">Categoria (opcional)</FieldLabel>
+                    <select
+                      id="transaction-category"
+                      className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                      value={transactionCategoryId}
+                      onChange={(event) => setTransactionCategoryId(event.target.value)}
+                    >
+                      <option value="">Sem categoria</option>
+                      {visibleCategories
+                        .filter(
+                          (category) =>
+                            !category.archived &&
+                            (category.kind === "both" || category.kind === transactionType),
+                        )
+                        .map((category) => (
+                          <option key={category.id} value={category.id}>
+                            {category.name}
+                          </option>
+                        ))}
+                    </select>
                   </Field>
                 </div>
               </details>

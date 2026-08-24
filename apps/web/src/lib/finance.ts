@@ -154,6 +154,7 @@ export function createQuickCaptureTransactionInput(input: {
   planned: boolean;
   description: string;
   cardId: string;
+  categoryId?: string;
 }): CreateTransactionInput {
   return {
     kind: input.kind,
@@ -161,6 +162,7 @@ export function createQuickCaptureTransactionInput(input: {
     state: input.planned ? "planned" : "posted",
     description: input.description,
     cardId: transactionCardIdForKind(input.kind, input.cardId),
+    categoryId: input.categoryId || null,
   };
 }
 
