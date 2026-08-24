@@ -116,15 +116,35 @@ function shoppingScenarioPool() {
         return { rows: [], rowCount: 0 };
       }
       if (sql.includes("FROM shopping_item i") && sql.includes("FOR UPDATE")) {
-        return { rows: item ? [item as T] : [], rowCount: item ? 1 : 0 };
+        const requestedItemId = values[1];
+        const locked = item && requestedItemId === item.id ? item : null;
+        return { rows: locked ? [locked as T] : [], rowCount: locked ? 1 : 0 };
       }
       if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
         return { rows: [productRow() as T], rowCount: 1 };
+      }
+      if (sql.includes("FROM shopping_item prior") && !sql.includes("UNION ALL")) {
+        const suppressed =
+          item?.purchased === true && movementAt !== null && purchasedAt !== null
+            ? purchasedAt > movementAt
+            : item?.purchased === true && movementAt === null;
+        return {
+          rows: suppressed ? ([{ id: item?.id }] as T[]) : [],
+          rowCount: suppressed ? 1 : 0,
+        };
       }
       if (sql.includes("INSERT INTO shopping_item_event")) {
         return { rows: [], rowCount: 0 };
       }
       if (sql.includes("INSERT INTO shopping_item") && sql.includes("SELECT p.workspace_id")) {
+        if (!item) {
+          item = {
+            ...derivedItem(),
+            id: materializedItemId,
+            version: sql.includes("p.version") ? productVersion : 0,
+          };
+          return { rows: [{ id: materializedItemId } as T], rowCount: 1 };
+        }
         const shouldReappear =
           productQuantity <= 10n &&
           item?.purchased === true &&
@@ -183,6 +203,7 @@ function shoppingScenarioPool() {
         return { rows: [item as T], rowCount: 1 };
       }
       if (sql.includes("FROM shopping_item i") && sql.includes("UNION ALL")) {
+        console.error("LIST MATCH", { hasItem: Boolean(item), purchased: item?.purchased, sql });
         if (item && item.purchased === false) return { rows: [item as T], rowCount: 1 };
         if (item?.purchased === true && (!movementAt || !purchasedAt || movementAt < purchasedAt)) {
           return { rows: [], rowCount: 0 };
@@ -284,5 +305,51 @@ describe("StockService membership revalidation", () => {
     const remaining = await service.listShoppingItems(scope);
     expect(remaining).toHaveLength(1);
     expect(remaining[0]).toMatchObject({ productId, purchased: false });
+  });
+
+  it("rejects a second purchase through the old projected product id after no-stock completion", async () => {
+    const harness = shoppingScenarioPool();
+    const service = new StockService(harness.pool as never);
+
+    const projected = (await service.listShoppingItems(scope))[0];
+    if (!projected) throw new Error("expected a derived shopping item");
+    await service.purchaseShoppingItem(
+      scope,
+      projected.id,
+      { addToStock: false },
+      "shopping-behavior-second-001",
+      projected.version,
+    );
+
+    await expect(
+      service.purchaseShoppingItem(
+        scope,
+        projected.id,
+        { addToStock: false },
+        "shopping-behavior-second-002",
+        projected.version,
+      ),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(
+      harness.statements.filter((sql) => /INSERT INTO shopping_item_event/i.test(sql)),
+    ).toHaveLength(2);
+  });
+
+  it("keeps a resynchronized automatic item at the product version used by If-Match", async () => {
+    const harness = shoppingScenarioPool();
+    const service = new StockService(harness.pool as never);
+
+    const projected = (await service.listShoppingItems(scope))[0];
+    if (!projected) throw new Error("expected a derived shopping item");
+    await service.createMovement(
+      scope,
+      productId,
+      { kind: "entry", quantity: "1" },
+      "shopping-behavior-resync-001",
+      projected.version,
+    );
+
+    const resynchronized = (await service.listShoppingItems(scope))[0];
+    expect(resynchronized).toMatchObject({ productId, version: 1 });
   });
 });

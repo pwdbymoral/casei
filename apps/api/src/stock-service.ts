@@ -895,8 +895,8 @@ async function lockProduct(
 async function syncAutomaticShoppingItems(client: PoolClient, scope: StockScope): Promise<void> {
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO shopping_item
-      (workspace_id, product_id, name, name_normalized, source, unit, unit_label, last_changed_by)
-     SELECT p.workspace_id, p.id, p.name, p.name_normalized, 'automatic', p.unit, p.unit_label, $2
+      (workspace_id, product_id, name, name_normalized, source, unit, unit_label, last_changed_by, version)
+     SELECT p.workspace_id, p.id, p.name, p.name_normalized, 'automatic', p.unit, p.unit_label, $2, p.version
        FROM stock_product p
       WHERE p.workspace_id = $1 AND p.archived = false AND p.shopping_auto = true
         AND (p.marked_missing OR p.quantity_milli = 0
@@ -979,6 +979,11 @@ async function lockOrMaterializeAutomaticItem(
 
   const product = await lockProduct(client, scope, itemId);
   if (!isAutomaticShoppingCandidate(product)) throw new StockNotFoundError();
+  if (await hasSuppressedAutomaticPurchase(client, scope, product.id)) {
+    throw new StockConflictError(
+      "Este item já foi marcado como comprado; faça uma movimentação no estoque antes de comprá-lo novamente.",
+    );
+  }
 
   const normalized = normalizeProductName(product.name);
   const inserted = await client.query<ShoppingItemRow>(
@@ -1024,6 +1029,29 @@ async function insertShoppingEvent(
      VALUES ($1, $2, $3, $4, $5)`,
     [scope.workspaceId, itemId, kind, scope.actorId, payload],
   );
+}
+
+async function hasSuppressedAutomaticPurchase(
+  client: PoolClient,
+  scope: StockScope,
+  productId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1
+       FROM shopping_item prior
+      WHERE prior.workspace_id = $1
+        AND prior.product_id = $2
+        AND prior.purchased = true
+        AND prior.purchased_at > COALESCE(
+          (SELECT max(m.occurred_at)
+             FROM stock_movement m
+            WHERE m.workspace_id = $1 AND m.product_id = $2),
+          '-infinity'::timestamptz
+        )
+      LIMIT 1`,
+    [scope.workspaceId, productId],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 function normalizeStockValue(value: bigint | string | null): bigint | null {
