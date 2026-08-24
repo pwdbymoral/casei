@@ -57,6 +57,13 @@
       "when": 1787543600000,
       "tag": "0007_stock_shopping",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787547200000,
+      "tag": "0008_stock_purge_cascade",
+      "breakpoints": true
     }
   ]
 }

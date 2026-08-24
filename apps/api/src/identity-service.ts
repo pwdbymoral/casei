@@ -1135,17 +1135,32 @@ export class IdentityService {
       this.pool,
       { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole, correlationId },
       async ({ client }) => {
-        const result = await client.query<{ status: string; expires_at: Date; version: number }>(
-          `SELECT w.status, w.version, r.expires_at
-             FROM workspace w
-             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
-            WHERE w.id = $1 AND r.owner_user_id = $2 AND r.status = 'active'
-            FOR UPDATE OF w, r`,
+        // Recovery cancellation mutates every recovery membership. Keep the
+        // same membership→workspace order as deactivation and invitation
+        // acceptance before taking the recovery row lock.
+        const locked = await lockMembershipsThenWorkspace(client, workspaceId);
+        const actorMembership = locked.memberships.find(
+          (membership) => membership.user_id === actor.userId,
+        );
+        if (actorMembership?.role !== "owner" || actorMembership.status !== "recovery_only")
+          throw new IdentityNotFoundError();
+        const recovery = await client.query<{ status: string; expires_at: Date }>(
+          `SELECT status, expires_at
+             FROM workspace_deletion_recovery
+            WHERE workspace_id = $1 AND owner_user_id = $2 AND status = 'active'
+            FOR UPDATE`,
           [workspaceId, actor.userId],
         );
-        const row = result.rows[0];
+        const row =
+          locked.workspace && recovery.rows[0]
+            ? {
+                workspaceStatus: locked.workspace.status,
+                version: locked.workspace.version,
+                expires_at: recovery.rows[0].expires_at,
+              }
+            : undefined;
         if (
-          row?.status !== "deletion_pending" ||
+          row?.workspaceStatus !== "deletion_pending" ||
           new Date(row.expires_at).getTime() <= this.now().getTime()
         )
           throw new IdentityNotFoundError();

@@ -41,7 +41,7 @@ CREATE TABLE "stock_movement" (
   "author_id" text NOT NULL,
   "occurred_at" timestamptz DEFAULT now() NOT NULL,
   CONSTRAINT "stock_movement_product_scope_fk"
-    FOREIGN KEY ("workspace_id", "product_id") REFERENCES "stock_product"("workspace_id", "id") ON DELETE CASCADE,
+    FOREIGN KEY ("workspace_id", "product_id") REFERENCES "stock_product"("workspace_id", "id") ON DELETE RESTRICT,
   CONSTRAINT "stock_movement_author_fk"
     FOREIGN KEY ("author_id") REFERENCES "user"("id") ON DELETE RESTRICT,
   CONSTRAINT "stock_movement_kind_check" CHECK ("kind" in ('entry', 'consume', 'correction', 'discard')),

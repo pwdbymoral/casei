@@ -21,7 +21,7 @@ CREATE TABLE "shopping_item" (
   "updated_at" timestamptz DEFAULT now() NOT NULL,
   CONSTRAINT "shopping_item_workspace_id_id_unique" UNIQUE ("workspace_id", "id"),
   CONSTRAINT "shopping_item_product_scope_fk"
-    FOREIGN KEY ("workspace_id", "product_id") REFERENCES "stock_product"("workspace_id", "id") ON DELETE CASCADE,
+    FOREIGN KEY ("workspace_id", "product_id") REFERENCES "stock_product"("workspace_id", "id") ON DELETE RESTRICT,
   CONSTRAINT "shopping_item_name_check" CHECK (length(trim("name")) > 0),
   CONSTRAINT "shopping_item_source_check" CHECK ("source" in ('automatic', 'free')),
   CONSTRAINT "shopping_item_unit_check" CHECK ("unit" in ('unit', 'package', 'box', 'kg', 'g', 'L', 'ml', 'other')),
@@ -46,7 +46,7 @@ CREATE TABLE "shopping_item_event" (
   "payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "occurred_at" timestamptz DEFAULT now() NOT NULL,
   CONSTRAINT "shopping_item_event_item_scope_fk"
-    FOREIGN KEY ("workspace_id", "item_id") REFERENCES "shopping_item"("workspace_id", "id") ON DELETE CASCADE,
+    FOREIGN KEY ("workspace_id", "item_id") REFERENCES "shopping_item"("workspace_id", "id") ON DELETE RESTRICT,
   CONSTRAINT "shopping_item_event_kind_check" CHECK ("kind" in ('created', 'purchased'))
 );
 CREATE INDEX "shopping_item_event_item_occurred_idx"
