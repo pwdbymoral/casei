@@ -51,6 +51,27 @@ export function addLocalDateDays(date: LocalDate, days: number): LocalDate {
   return parsedResult.value;
 }
 
+/** Adds civil calendar months and clamps an invalid target day to month end. */
+export function addLocalDateMonths(date: LocalDate, months: number): LocalDate {
+  if (!Number.isSafeInteger(months)) throw new RangeError("months must be a safe integer");
+  const parsed = parseLocalDate(date);
+  if (!parsed.ok) throw new RangeError("date must be a valid LocalDate");
+  const [yearText, monthText, dayText] = date.split("-");
+  const target = new Date(Date.UTC(Number(yearText), Number(monthText) - 1 + months, 1));
+  const targetYear = target.getUTCFullYear();
+  if (targetYear < 1 || targetYear > 9999) {
+    throw new RangeError("LocalDate result must stay within years 0001-9999");
+  }
+  const targetMonth = target.getUTCMonth() + 1;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth, 0)).getUTCDate();
+  const result = `${targetYear.toString().padStart(4, "0")}-${targetMonth
+    .toString()
+    .padStart(2, "0")}-${Math.min(Number(dayText), lastDay).toString().padStart(2, "0")}`;
+  const parsedResult = parseLocalDate(result);
+  if (!parsedResult.ok) throw new RangeError("LocalDate result must be a real civil date");
+  return parsedResult.value;
+}
+
 export function parseInstant(value: unknown): Result<Instant, DomainError> {
   if (typeof value !== "string" || !INSTANT_PATTERN.test(value)) {
     return err(
