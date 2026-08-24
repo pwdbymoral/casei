@@ -139,11 +139,18 @@ Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam ser
 
 Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro somente após Gate 2.
 
-- [ ] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes, arquivamento e regra de unidade.
-- [ ] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência e histórico.
-- [ ] **STOCK-003 Lista de compras:** derivação por mínimo/marcação, itens livres, deduplicação e colaboração.
+- [x] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes progressivos, arquivamento/restauração e regra de unidade.
+- [x] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência com lock/If-Match e histórico append-only.
+- [x] **STOCK-003 Lista de compras:** derivação por mínimo/marcação, itens livres, deduplicação e colaboração.
+  `shopping_auto` permite preferência por produto; a lista é materializada com unicidade parcial e
+  eventos append-only na migration `0007_stock_shopping`. A API exige idempotência + `If-Match` para
+  concluir item e só cria entrada no estoque quando `addToStock: true` é confirmado por item. A PWA
+  oferece chips Lista/Faltando/Todos, itens livres e revisão de quantidade antes da confirmação.
+  Follow-up separado **STOCK-003a** permanece para substituir os cursores atualmente aceitos pelos
+  endpoints de produtos/movimentações por cursor opaco assinado, com teste de continuidade, limite e
+  rejeição de cursor adulterado; esta fatia não altera a ordenação/contrato já publicado do STOCK-002.
 - [ ] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
-- [ ] **STOCK-005 UI estoque:** busca, filtros, lista touch, quick actions, modo avançado responsivo e estados offline.
+- [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
 - [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
 
 **Gate 6:** quantidade e histórico reconciliam; concorrência não duplica lista; jornada no mercado passa em telefone e teclado.

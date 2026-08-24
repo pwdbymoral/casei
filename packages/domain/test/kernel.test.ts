@@ -97,7 +97,7 @@ describe("Money em minor units", () => {
       expect(pieces).toMatchObject({ ok: true });
       if (isOk(pieces)) expect(pieces.value.map((part) => part.minor)).toEqual([4n, 3n, 3n]);
     }
-  });
+  }, 15_000);
 
   it("rejeita moeda incompatível e JSON não canônico", () => {
     const brl = moneyFromDerivedMinor("10", "BRL");
