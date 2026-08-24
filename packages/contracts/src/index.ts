@@ -489,6 +489,49 @@ export const settleTransactionSchema = z.object({
 });
 export type SettleTransactionInput = z.infer<typeof settleTransactionSchema>;
 
+export const loanDirectionSchema = z.enum(["lent", "borrowed"]);
+export const loanStatusSchema = z.enum(["open", "settled"]);
+
+export const loanSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  direction: loanDirectionSchema,
+  counterparty: z.string().min(1).max(200),
+  principal: positiveMoneySchema,
+  paid: moneySchema,
+  remaining: moneySchema,
+  occurredOn: civilDateSchema,
+  dueOn: civilDateSchema.nullable(),
+  status: loanStatusSchema,
+  version: versionSchema,
+});
+
+export const createLoanSchema = z
+  .object({
+    direction: loanDirectionSchema,
+    counterparty: z.string().trim().min(1).max(200),
+    principal: positiveMoneySchema,
+    occurredOn: civilDateSchema.optional(),
+    dueOn: civilDateSchema.nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.dueOn && value.occurredOn && value.dueOn < value.occurredOn) {
+      context.addIssue({
+        code: "custom",
+        path: ["dueOn"],
+        message: "O vencimento não pode ser anterior à data do empréstimo.",
+      });
+    }
+  });
+
+export const loanPaymentSchema = z.object({
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+});
+
+export type CreateLoanInput = z.infer<typeof createLoanSchema>;
+export type LoanPaymentInput = z.infer<typeof loanPaymentSchema>;
+
 export const transactionListQuerySchema = paginationQuerySchema
   .extend({
     search: z.string().trim().max(100).optional(),
