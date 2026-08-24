@@ -864,30 +864,36 @@ export class IdentityService {
     expectedVersion: number,
   ): Promise<{ version: number }> {
     assertRole(scope, "owner");
-    return this.withScoped(scope, async (client) => {
-      const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
-        `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-        [scope.workspaceId, userId],
-      );
-      const row = result.rows[0];
-      if (!row) throw new IdentityNotFoundError();
-      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
-      if (row.role === "owner")
-        throw new IdentityConflictError("Transfira a propriedade antes de remover o owner.");
-      if (row.status === "revoked") return { version: row.version };
-      await client.query(
-        `UPDATE membership SET status = 'revoked', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
-        [scope.workspaceId, userId],
-      );
-      await writeAudit(client, {
-        actorId: scope.actor.userId,
-        workspaceId: scope.workspaceId,
-        correlationId: scope.correlationId,
-        action: "membership.revoked",
-        targetId: userId,
-      });
-      return { version: row.version + 1 };
-    });
+    return this.withScoped(
+      scope,
+      async (client) => {
+        const locked = await lockMembershipsThenWorkspace(client, scope.workspaceId, [
+          scope.actor.userId,
+          userId,
+        ]);
+        assertLockedActiveMembership(locked.memberships, scope);
+        assertLockedActiveWorkspace(locked.workspace);
+        const row = locked.memberships.find((membership) => membership.user_id === userId);
+        if (!row) throw new IdentityNotFoundError();
+        if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
+        if (row.role === "owner")
+          throw new IdentityConflictError("Transfira a propriedade antes de remover o owner.");
+        if (row.status === "revoked") return { version: row.version };
+        await client.query(
+          `UPDATE membership SET status = 'revoked', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+          [scope.workspaceId, userId],
+        );
+        await writeAudit(client, {
+          actorId: scope.actor.userId,
+          workspaceId: scope.workspaceId,
+          correlationId: scope.correlationId,
+          action: "membership.revoked",
+          targetId: userId,
+        });
+        return { version: row.version + 1 };
+      },
+      { lockMembership: false },
+    );
   }
 
   async changeMemberRole(
@@ -898,30 +904,38 @@ export class IdentityService {
   ): Promise<{ role: WorkspaceRole; version: number }> {
     assertRole(scope, "owner");
     const { role } = updateMembershipRoleSchema.parse(input);
-    return this.withScoped(scope, async (client) => {
-      const result = await client.query<{ role: WorkspaceRole; status: string; version: number }>(
-        `SELECT role, status, version FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-        [scope.workspaceId, userId],
-      );
-      const row = result.rows[0];
-      if (row?.status !== "active") throw new IdentityNotFoundError();
-      if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
-      if (row.role === "owner")
-        throw new IdentityConflictError("Use a transferência de propriedade para alterar o owner.");
-      await client.query(
-        `UPDATE membership SET role = $3, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
-        [scope.workspaceId, userId, role],
-      );
-      await writeAudit(client, {
-        actorId: scope.actor.userId,
-        workspaceId: scope.workspaceId,
-        correlationId: scope.correlationId,
-        action: "membership.role_changed",
-        targetId: userId,
-        reason: role,
-      });
-      return { role, version: row.version + 1 };
-    });
+    return this.withScoped(
+      scope,
+      async (client) => {
+        const locked = await lockMembershipsThenWorkspace(client, scope.workspaceId, [
+          scope.actor.userId,
+          userId,
+        ]);
+        assertLockedActiveMembership(locked.memberships, scope);
+        assertLockedActiveWorkspace(locked.workspace);
+        const row = locked.memberships.find((membership) => membership.user_id === userId);
+        if (row?.status !== "active") throw new IdentityNotFoundError();
+        if (row.version !== expectedVersion) throw new IdentityVersionConflictError(row.version);
+        if (row.role === "owner")
+          throw new IdentityConflictError(
+            "Use a transferência de propriedade para alterar o owner.",
+          );
+        await client.query(
+          `UPDATE membership SET role = $3, version = version + 1, updated_at = now() WHERE workspace_id = $1 AND user_id = $2`,
+          [scope.workspaceId, userId, role],
+        );
+        await writeAudit(client, {
+          actorId: scope.actor.userId,
+          workspaceId: scope.workspaceId,
+          correlationId: scope.correlationId,
+          action: "membership.role_changed",
+          targetId: userId,
+          reason: role,
+        });
+        return { role, version: row.version + 1 };
+      },
+      { lockMembership: false },
+    );
   }
 
   async transferOwnership(
