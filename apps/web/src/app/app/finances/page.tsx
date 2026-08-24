@@ -39,6 +39,7 @@ import {
   type FinanceAdapter,
   FinanceAdapterError,
   financeAdapterForEnvironment,
+  hasTransactionQueryFilters,
   mergeTransactionPage,
   type Statement,
   type StatementItem,
@@ -137,13 +138,7 @@ function FinanceDashboard({
     [searchParams],
   );
 
-  const hasTimelineFilters = Boolean(
-    timelineQuery.search ||
-      timelineQuery.from ||
-      timelineQuery.to ||
-      timelineQuery.state ||
-      timelineQuery.kind,
-  );
+  const hasTimelineFilters = hasTransactionQueryFilters(timelineQuery);
 
   useEffect(() => {
     setTimelineSearch(timelineQuery.search ?? "");

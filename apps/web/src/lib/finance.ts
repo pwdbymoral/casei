@@ -111,6 +111,12 @@ export function shouldRetryIdempotentCommand(error: unknown): boolean {
   );
 }
 
+export function hasTransactionQueryFilters(query: TransactionQuery): boolean {
+  return Boolean(
+    query.search || query.from || query.to || query.state || query.kind || query.cardId,
+  );
+}
+
 export function mergeTransactionPage(
   current: Transaction[],
   page: TransactionPage,

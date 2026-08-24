@@ -7,6 +7,7 @@ import {
   createRequestGuard,
   FinanceAdapterError,
   financeAdapterForEnvironment,
+  hasTransactionQueryFilters,
   mergeTransactionPage,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
@@ -199,6 +200,7 @@ describe("finance adapter", () => {
       cursor: "cursor-2",
       cardId: "card-1",
     });
+    expect(hasTransactionQueryFilters({ cardId: "card-1" })).toBe(true);
 
     const first = { id: "first" } as never;
     const second = { id: "second" } as never;
