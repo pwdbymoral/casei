@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArchiveIcon,
   CalendarClockIcon,
   CheckIcon,
   CreditCardIcon,
@@ -55,6 +56,7 @@ import {
   transactionAmountPrefix,
   transactionKindLabel,
   transactionQueryFromSearchParams,
+  type UpdateCreditCardInput,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
@@ -144,6 +146,16 @@ function FinanceDashboard({
   const [categoryKind, setCategoryKind] = useState<Category["kind"]>("expense");
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [savingCategory, setSavingCategory] = useState(false);
+  const [editingCard, setEditingCard] = useState<CreditCard | null>(null);
+  const [cardEditName, setCardEditName] = useState("");
+  const [cardEditClosingDay, setCardEditClosingDay] = useState("10");
+  const [cardEditDueDay, setCardEditDueDay] = useState("17");
+  const [cardEditHolder, setCardEditHolder] = useState("");
+  const [cardEditLastFour, setCardEditLastFour] = useState("");
+  const [cardEditLimit, setCardEditLimit] = useState("");
+  const [savingCardEdit, setSavingCardEdit] = useState(false);
+  const [pendingCardArchive, setPendingCardArchive] = useState<CreditCard | null>(null);
+  const [archivingCardId, setArchivingCardId] = useState<string | null>(null);
   const [busyStatementId, setBusyStatementId] = useState<string | null>(null);
   const [viewingStatement, setViewingStatement] = useState<Statement | null>(null);
   const [statementItems, setStatementItems] = useState<StatementItem[]>([]);
@@ -236,6 +248,10 @@ function FinanceDashboard({
     setCategoryName("");
     setCategoryKind("expense");
     setEditingCategory(null);
+    setEditingCard(null);
+    setSavingCardEdit(false);
+    setPendingCardArchive(null);
+    setArchivingCardId(null);
     setBusyStatementId(null);
     setPendingStatementAction(null);
     setUndoableTransaction(null);
@@ -264,6 +280,8 @@ function FinanceDashboard({
   const visibleSelectedAudit = workspaceDataReady ? selectedAudit : null;
   const visibleViewingStatement = workspaceDataReady ? viewingStatement : null;
   const visiblePendingStatementAction = workspaceDataReady ? pendingStatementAction : null;
+  const visibleEditingCard = workspaceDataReady ? editingCard : null;
+  const visiblePendingCardArchive = workspaceDataReady ? pendingCardArchive : null;
 
   useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
@@ -516,6 +534,105 @@ function FinanceDashboard({
       );
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCategory(false);
+    }
+  }
+
+  function openCardEditor(card: CreditCard) {
+    setEditingCard(card);
+    setCardEditName(card.name);
+    setCardEditClosingDay(String(card.closingDay));
+    setCardEditDueDay(String(card.dueDay));
+    setCardEditHolder(card.holder ?? "");
+    setCardEditLastFour(card.lastFour ?? "");
+    setCardEditLimit(card.limit?.minor ?? "");
+    setError(null);
+  }
+
+  async function handleCardEditSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingCard || savingCardEdit) return;
+    const nextClosingDay = Number(cardEditClosingDay);
+    const nextDueDay = Number(cardEditDueDay);
+    if (!cardEditName.trim()) {
+      setError("Informe um nome para o cartão.");
+      return;
+    }
+    if (
+      !Number.isInteger(nextClosingDay) ||
+      nextClosingDay < 1 ||
+      nextClosingDay > 31 ||
+      !Number.isInteger(nextDueDay) ||
+      nextDueDay < 1 ||
+      nextDueDay > 31
+    ) {
+      setError("Fechamento e vencimento devem estar entre 1 e 31.");
+      return;
+    }
+    const normalizedLastFour = cardEditLastFour.trim();
+    if (normalizedLastFour && !/^\d{4}$/.test(normalizedLastFour)) {
+      setError("Os últimos quatro dígitos devem conter somente quatro números.");
+      return;
+    }
+    const input: UpdateCreditCardInput = {
+      name: cardEditName.trim(),
+      closingDay: nextClosingDay,
+      dueDay: nextDueDay,
+      holder: cardEditHolder.trim() || null,
+      lastFour: normalizedLastFour || null,
+      limit: cardEditLimit ? { currency, minor: cardEditLimit } : null,
+    };
+    setSavingCardEdit(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const updated = await adapter.updateCard(workspaceId, editingCard, input);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setCards((current) => current.map((value) => (value.id === updated.id ? updated : value)));
+      setEditingCard(null);
+      setNotice("Configuração do cartão atualizada.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setEditingCard(null);
+        await load();
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+        setNotice(
+          "O cartão mudou enquanto você o editava. Recarregamos os dados; revise antes de tentar novamente.",
+        );
+      } else {
+        setError(cause instanceof Error ? cause.message : "Não foi possível atualizar o cartão.");
+      }
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCardEdit(false);
+    }
+  }
+
+  async function handleCardArchive() {
+    if (!pendingCardArchive || archivingCardId) return;
+    const card = pendingCardArchive;
+    setArchivingCardId(card.id);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const archived = await adapter.archiveCard(workspaceId, card);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setCards((current) => current.map((value) => (value.id === archived.id ? archived : value)));
+      setPendingCardArchive(null);
+      setNotice("Cartão arquivado. O histórico de faturas foi preservado.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setPendingCardArchive(null);
+        await load();
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+        setNotice(
+          "O cartão mudou enquanto você o revisava. Recarregamos os dados; revise antes de tentar novamente.",
+        );
+      } else {
+        setError(cause instanceof Error ? cause.message : "Não foi possível arquivar o cartão.");
+      }
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setArchivingCardId(null);
     }
   }
 
@@ -1356,10 +1473,46 @@ function FinanceDashboard({
             {visibleCards.map((card) => (
               <div key={card.id} className="rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="font-medium">{card.name}</p>
-                  <span className="text-sm text-muted-foreground">
-                    Fecha {card.closingDay} · vence {card.dueDay}
-                  </span>
+                  <div>
+                    <p className="font-medium">
+                      {card.name}
+                      {card.archived ? (
+                        <span className="ml-2 text-xs font-normal text-muted-foreground">
+                          Arquivado
+                        </span>
+                      ) : null}
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Fecha {card.closingDay} · vence {card.dueDay}
+                      {card.lastFour ? ` · •••• ${card.lastFour}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Editar ${card.name}`}
+                      onClick={() => openCardEditor(card)}
+                      disabled={!writeAccess || savingCardEdit || archivingCardId !== null}
+                    >
+                      <PencilIcon aria-hidden="true" />
+                      <span className="sr-only">Editar</span>
+                    </Button>
+                    {!card.archived ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Arquivar ${card.name}`}
+                        onClick={() => setPendingCardArchive(card)}
+                        disabled={!writeAccess || savingCardEdit || archivingCardId !== null}
+                      >
+                        <ArchiveIcon aria-hidden="true" />
+                        <span className="sr-only">Arquivar</span>
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
                 {visibleStatements
                   .filter((statement) => statement.cardId === card.id)
@@ -1761,6 +1914,140 @@ function FinanceDashboard({
           ) : null}
           <DialogFooter>
             <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={visibleEditingCard !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingCardEdit) setEditingCard(null);
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Editar cartão</DialogTitle>
+            <DialogDescription>
+              A nova configuração vale para ciclos futuros. Faturas já fechadas preservam suas datas
+              e valores.
+            </DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={handleCardEditSubmit}>
+            <Field>
+              <FieldLabel htmlFor="edit-card-name">Nome do cartão</FieldLabel>
+              <Input
+                id="edit-card-name"
+                value={cardEditName}
+                onChange={(event) => setCardEditName(event.target.value)}
+                required
+                disabled={savingCardEdit}
+              />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <FieldLabel htmlFor="edit-card-closing">Fecha dia</FieldLabel>
+                <Input
+                  id="edit-card-closing"
+                  type="number"
+                  min={1}
+                  max={31}
+                  value={cardEditClosingDay}
+                  onChange={(event) => setCardEditClosingDay(event.target.value)}
+                  required
+                  disabled={savingCardEdit}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="edit-card-due">Vence dia</FieldLabel>
+                <Input
+                  id="edit-card-due"
+                  type="number"
+                  min={1}
+                  max={31}
+                  value={cardEditDueDay}
+                  onChange={(event) => setCardEditDueDay(event.target.value)}
+                  required
+                  disabled={savingCardEdit}
+                />
+              </Field>
+            </div>
+            <Field>
+              <FieldLabel htmlFor="edit-card-holder">Titular (opcional)</FieldLabel>
+              <Input
+                id="edit-card-holder"
+                value={cardEditHolder}
+                onChange={(event) => setCardEditHolder(event.target.value)}
+                disabled={savingCardEdit}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="edit-card-last-four">Últimos quatro dígitos</FieldLabel>
+              <Input
+                id="edit-card-last-four"
+                inputMode="numeric"
+                maxLength={4}
+                value={cardEditLastFour}
+                onChange={(event) => setCardEditLastFour(event.target.value.replace(/\D/g, ""))}
+                disabled={savingCardEdit}
+              />
+            </Field>
+            <MoneyInput
+              id="edit-card-limit"
+              value={cardEditLimit}
+              onChange={setCardEditLimit}
+              label="Limite (opcional)"
+              currency={currency}
+              disabled={savingCardEdit}
+            />
+            <DialogFooter>
+              <DialogClose
+                render={<Button type="button" variant="outline" />}
+                disabled={savingCardEdit}
+              >
+                Cancelar
+              </DialogClose>
+              <Button type="submit" disabled={savingCardEdit}>
+                {savingCardEdit ? "Salvando…" : "Salvar alterações"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={visiblePendingCardArchive !== null}
+        onOpenChange={(open) => {
+          if (!open && archivingCardId === null) setPendingCardArchive(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Arquivar cartão?</DialogTitle>
+            <DialogDescription>
+              O cartão deixará de aceitar novas compras, mas suas faturas e pagamentos continuarão
+              no histórico.
+            </DialogDescription>
+          </DialogHeader>
+          {visiblePendingCardArchive ? (
+            <p className="rounded-lg bg-muted/50 p-3 text-sm">
+              O arquivamento só é permitido quando não há saldo em aberto nem fatura pendente para
+              este cartão.
+            </p>
+          ) : null}
+          <DialogFooter>
+            <DialogClose
+              render={<Button type="button" variant="outline" />}
+              disabled={archivingCardId !== null}
+            >
+              Cancelar
+            </DialogClose>
+            <Button
+              type="button"
+              onClick={() => void handleCardArchive()}
+              disabled={archivingCardId !== null}
+            >
+              {archivingCardId ? "Arquivando…" : "Arquivar cartão"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

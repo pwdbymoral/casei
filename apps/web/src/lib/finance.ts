@@ -32,6 +32,15 @@ export type CreditCard = {
   version: number;
 };
 
+export type UpdateCreditCardInput = {
+  name?: string;
+  closingDay?: number;
+  dueDay?: number;
+  holder?: string | null;
+  lastFour?: string | null;
+  limit?: Money | null;
+};
+
 export type Statement = {
   id: string;
   workspaceId: string;
@@ -281,6 +290,12 @@ export type FinanceAdapter = {
       limit?: Money | null;
     },
   ): Promise<CreditCard>;
+  updateCard(
+    workspaceId: string,
+    card: CreditCard,
+    input: UpdateCreditCardInput,
+  ): Promise<CreditCard>;
+  archiveCard(workspaceId: string, card: CreditCard): Promise<CreditCard>;
   listStatements(workspaceId: string, cardId?: string): Promise<Statement[]>;
   listStatementItems(
     workspaceId: string,
@@ -352,6 +367,8 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   restoreCategory: unavailableFinanceOperation,
   listCards: unavailableFinanceOperation,
   createCard: unavailableFinanceOperation,
+  updateCard: unavailableFinanceOperation,
+  archiveCard: unavailableFinanceOperation,
   listStatements: unavailableFinanceOperation,
   listStatementItems: unavailableFinanceOperation,
   closeStatement: unavailableFinanceOperation,
@@ -495,6 +512,23 @@ export function createHttpFinanceAdapter(
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify(input),
+      }),
+    updateCard: (workspaceId, card, input) =>
+      call<CreditCard>(`/workspaces/${workspaceId}/cards/${card.id}`, {
+        method: "PATCH",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${card.version}"`,
+        },
+        body: JSON.stringify(input),
+      }),
+    archiveCard: (workspaceId, card) =>
+      call<CreditCard>(`/workspaces/${workspaceId}/cards/${card.id}/archive`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${card.version}"`,
+        },
       }),
     listStatements: (workspaceId, cardId) =>
       list<Statement>(
@@ -877,6 +911,61 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       };
       state.cards.push(card);
       return card;
+    },
+    updateCard: async (workspaceId, card, input) => {
+      const state = stateFor(workspaceId);
+      const current = state.cards.find((item) => item.id === card.id);
+      if (!current) throw new FinanceAdapterError("Cartão não encontrado.", 404);
+      if (current.version !== card.version) {
+        throw new FinanceAdapterError(
+          "O cartão foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      if (input.closingDay !== undefined && (input.closingDay < 1 || input.closingDay > 31)) {
+        throw new FinanceAdapterError("O fechamento deve estar entre 1 e 31.", 422);
+      }
+      if (input.dueDay !== undefined && (input.dueDay < 1 || input.dueDay > 31)) {
+        throw new FinanceAdapterError("O vencimento deve estar entre 1 e 31.", 422);
+      }
+      const value: CreditCard = {
+        ...current,
+        ...input,
+        holder: input.holder === undefined ? current.holder : input.holder,
+        lastFour: input.lastFour === undefined ? current.lastFour : input.lastFour,
+        limit: input.limit === undefined ? current.limit : input.limit,
+        version: current.version + 1,
+      };
+      state.cards[state.cards.indexOf(current)] = value;
+      return value;
+    },
+    archiveCard: async (workspaceId, card) => {
+      const state = stateFor(workspaceId);
+      const current = state.cards.find((item) => item.id === card.id);
+      if (!current) throw new FinanceAdapterError("Cartão não encontrado.", 404);
+      if (current.version !== card.version) {
+        throw new FinanceAdapterError(
+          "O cartão foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      const hasOpenBalance = state.statements.some(
+        (statement) =>
+          statement.cardId === current.id &&
+          statement.state !== "canceled" &&
+          (statement.state === "open" || BigInt(statement.openAmount.minor) > BigInt(0)),
+      );
+      if (hasOpenBalance) {
+        throw new FinanceAdapterError(
+          "Quite o saldo e feche ou transfira a fatura antes de arquivar o cartão.",
+          409,
+        );
+      }
+      const value = { ...current, archived: true, version: current.version + 1 };
+      state.cards[state.cards.indexOf(current)] = value;
+      return value;
     },
     listStatements: async (workspaceId, cardId) =>
       stateFor(workspaceId).statements.filter(
