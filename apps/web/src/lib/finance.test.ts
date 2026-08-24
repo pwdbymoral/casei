@@ -14,6 +14,7 @@ import {
   mergeTransactionPage,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
+  type Transaction,
   transactionAmountPrefix,
   transactionCardIdForKind,
   transactionKindLabel,
@@ -170,6 +171,19 @@ describe("finance adapter", () => {
     expect(keys).toEqual(["logical-command-002", "logical-command-002"]);
   });
 
+  it("sends an explicit idempotency key when reversing a transaction", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("reverse-command-001");
+      return Response.json({ id: "transaction-reversed", state: "canceled" });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const transaction = { id: "transaction-1", version: 2 } as Transaction;
+
+    await expect(
+      adapter.reverseTransaction("workspace", transaction, "reverse-command-001"),
+    ).resolves.toMatchObject({ id: "transaction-reversed", state: "canceled" });
+  });
+
   it("serializes timeline filters and cursor in the API request", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       expect(input).toBe(
@@ -242,6 +256,56 @@ describe("finance adapter", () => {
     await expect(
       adapter.reverseTransaction("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201", created),
     ).resolves.toMatchObject({ id: created.id, state: "canceled" });
+  });
+
+  it("reuses an explicit reverse key and updates the fixture invoice totals", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const cardId = "019b5d9e-3c12-7a10-8d47-7b5b5dd7a210";
+    const created = await adapter.createTransaction(
+      workspaceId,
+      {
+        kind: "expense",
+        amount: { currency: "BRL", minor: "2500" },
+        cardId,
+      },
+      "fixture-card-purchase",
+    );
+    await expect(adapter.listStatements(workspaceId, cardId)).resolves.toMatchObject([
+      { total: { minor: "2500" }, openAmount: { minor: "2500" } },
+    ]);
+
+    const reversed = await adapter.reverseTransaction(workspaceId, created, "fixture-reverse-1");
+    const replay = await adapter.reverseTransaction(workspaceId, created, "fixture-reverse-1");
+    expect(replay).toEqual(reversed);
+    expect(reversed.state).toBe("canceled");
+    await expect(adapter.listStatements(workspaceId, cardId)).resolves.toMatchObject([
+      { total: { minor: "0" }, openAmount: { minor: "0" } },
+    ]);
+  });
+
+  it("keeps the new workspace empty when an old response arrives after a failed load", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    let resolveOldResponse!: (items: string[]) => void;
+    const oldResponse = new Promise<string[]>((resolve) => {
+      resolveOldResponse = resolve;
+    });
+    const oldRequest = guard.begin("workspace-a");
+    const visibleItems: string[] = [];
+
+    guard.switchWorkspace("workspace-b");
+    const newRequest = guard.begin("workspace-b");
+    try {
+      throw new Error("new workspace unavailable");
+    } catch {
+      if (guard.isCurrent(newRequest)) visibleItems.length = 0;
+    }
+    resolveOldResponse(["old-workspace-item"]);
+    const oldItems = await oldResponse;
+    if (guard.isCurrent(oldRequest)) visibleItems.push(...oldItems);
+
+    expect(visibleItems).toEqual([]);
+    expect(guard.isCurrent(oldRequest)).toBe(false);
   });
 
   it("keeps fixture data isolated by workspace and replays a transaction command", async () => {

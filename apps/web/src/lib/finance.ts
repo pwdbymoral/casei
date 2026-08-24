@@ -199,7 +199,11 @@ export type FinanceAdapter = {
     input: CreateTransactionInput,
     idempotencyKey?: string,
   ): Promise<Transaction>;
-  reverseTransaction(workspaceId: string, transaction: Transaction): Promise<Transaction>;
+  reverseTransaction(
+    workspaceId: string,
+    transaction: Transaction,
+    idempotencyKey?: string,
+  ): Promise<Transaction>;
   listCategories(workspaceId: string): Promise<Category[]>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
   createCard(
@@ -356,11 +360,11 @@ export function createHttpFinanceAdapter(
         headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
-    reverseTransaction: (workspaceId, transaction) =>
+    reverseTransaction: (workspaceId, transaction, commandKey) =>
       call<Transaction>(`/workspaces/${workspaceId}/transactions/${transaction.id}/reverse`, {
         method: "POST",
         headers: {
-          "Idempotency-Key": idempotencyKey(),
+          "Idempotency-Key": commandKey ?? idempotencyKey(),
           "If-Match": `"v${transaction.version}"`,
         },
       }),
@@ -451,6 +455,10 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     cards: CreditCard[];
     statements: Statement[];
     transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
+    reverseCommands: Map<
+      string,
+      { transactionId: string; fingerprint: string; transaction: Transaction }
+    >;
   };
   const createWorkspaceState = (
     workspaceId: string,
@@ -496,6 +504,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       cards,
       statements,
       transactionCommands: new Map(),
+      reverseCommands: new Map(),
     };
   };
   const workspaceStates = new Map<string, FixtureWorkspaceState>([
@@ -596,12 +605,42 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         state.transactionCommands.set(commandKey, { fingerprint, transaction: value });
       return value;
     },
-    reverseTransaction: async (workspaceId, transaction) => {
+    reverseTransaction: async (workspaceId, transaction, commandKey) => {
       const state = stateFor(workspaceId);
       const current = state.transactions.find((value) => value.id === transaction.id);
       if (!current) throw new FinanceAdapterError("Lançamento não encontrado.", 404);
+      const fingerprint = `${transaction.id}:v${transaction.version}`;
+      if (commandKey) {
+        const previous = state.reverseCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outra reversão.", 409);
+          }
+          return previous.transaction;
+        }
+      }
+      if (current.state === "canceled") return current;
       const value = { ...current, state: "canceled" as const, version: current.version + 1 };
       state.transactions[state.transactions.indexOf(current)] = value;
+      if (value.statementId && value.kind === "expense") {
+        const statement = state.statements.find((item) => item.id === value.statementId);
+        if (statement) {
+          const total = BigInt(statement.total.minor) - BigInt(value.amount.minor);
+          const openAmount = total - BigInt(statement.paid.minor);
+          statement.total = { ...statement.total, minor: total.toString() };
+          statement.openAmount = {
+            ...statement.openAmount,
+            minor: (openAmount > BigInt(0) ? openAmount : BigInt(0)).toString(),
+          };
+        }
+      }
+      if (commandKey) {
+        state.reverseCommands.set(commandKey, {
+          transactionId: value.id,
+          fingerprint,
+          transaction: value,
+        });
+      }
       return value;
     },
     listCategories: async () => [],

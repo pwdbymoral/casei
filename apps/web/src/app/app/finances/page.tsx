@@ -92,6 +92,7 @@ function FinanceDashboard({
     () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [dataWorkspaceId, setDataWorkspaceId] = useState(workspaceId);
   const [transactionsNextCursor, setTransactionsNextCursor] = useState<string | null>(null);
   const [transactionsHasMore, setTransactionsHasMore] = useState(false);
   const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null);
@@ -133,6 +134,7 @@ function FinanceDashboard({
   const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
   const [undoing, setUndoing] = useState(false);
   const transactionCommandKey = useRef<string | null>(null);
+  const transactionReverseCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
 
@@ -161,7 +163,26 @@ function FinanceDashboard({
     workspaceRequests.switchWorkspace(workspaceId);
     timelineRequest.invalidate();
     statementItemsRequest.invalidate();
+    // Clear every workspace-scoped value before the next workspace can render. The
+    // generation guard prevents late responses from repopulating this empty state.
+    setDataWorkspaceId(workspaceId);
+    setTransactions([]);
+    setTransactionsNextCursor(null);
+    setTransactionsHasMore(false);
+    setCards([]);
+    setStatements([]);
+    setStatus("loading");
+    setError(null);
+    setNotice(null);
+    setViewingTransaction(null);
+    setViewingStatement(null);
+    setStatementItems([]);
+    setStatementItemsNextCursor(null);
+    setStatementItemsHasMore(false);
+    setLoadingStatementItems(false);
+    setLoadingMoreStatementItems(false);
     transactionCommandKey.current = null;
+    transactionReverseCommandKey.current = null;
     setSaving(false);
     setUndoing(false);
     setSavingCard(false);
@@ -169,6 +190,19 @@ function FinanceDashboard({
     setPendingStatementAction(null);
     setUndoableTransaction(null);
   }, [statementItemsRequest, timelineRequest, workspaceId, workspaceRequests]);
+
+  // Effects run after a render. Until the switch effect above has cleared the
+  // old snapshot, keep it out of the new workspace's visible tree.
+  const workspaceDataReady = dataWorkspaceId === workspaceId;
+  const visibleTransactions = workspaceDataReady ? transactions : [];
+  const visibleCards = workspaceDataReady ? cards : [];
+  const visibleStatements = workspaceDataReady ? statements : [];
+  const visibleError = workspaceDataReady ? error : null;
+  const visibleNotice = workspaceDataReady ? notice : null;
+  const visibleStatus = workspaceDataReady ? status : "loading";
+  const visibleViewingTransaction = workspaceDataReady ? viewingTransaction : null;
+  const visibleViewingStatement = workspaceDataReady ? viewingStatement : null;
+  const visiblePendingStatementAction = workspaceDataReady ? pendingStatementAction : null;
 
   useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
@@ -236,14 +270,14 @@ function FinanceDashboard({
 
   const walletTotal = useMemo(
     () =>
-      transactions.reduce((total, transaction) => {
+      visibleTransactions.reduce((total, transaction) => {
         if (transaction.state !== "posted" || transaction.cardId) return total;
         const value = BigInt(transaction.amount.minor);
         if (transaction.kind === "income") return total + value;
         if (transaction.kind === "expense") return total - value;
         return total;
       }, BigInt(0)),
-    [transactions],
+    [visibleTransactions],
   );
 
   async function handleTransactionSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -296,9 +330,12 @@ function FinanceDashboard({
     setUndoing(true);
     setError(null);
     const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey = transactionReverseCommandKey.current ?? `web-reverse-${crypto.randomUUID()}`;
+    transactionReverseCommandKey.current = commandKey;
     try {
-      await adapter.reverseTransaction(workspaceId, undoableTransaction);
+      await adapter.reverseTransaction(workspaceId, undoableTransaction, commandKey);
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      transactionReverseCommandKey.current = null;
       setUndoableTransaction(null);
       if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
       else await load(false);
@@ -306,6 +343,7 @@ function FinanceDashboard({
       setNotice("Lançamento desfeito.");
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (!shouldRetryIdempotentCommand(cause)) transactionReverseCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível desfazer o lançamento.");
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setUndoing(false);
@@ -401,7 +439,7 @@ function FinanceDashboard({
     }
   }
 
-  const viewingStatementId = viewingStatement?.id;
+  const viewingStatementId = visibleViewingStatement?.id;
 
   const loadStatementItems = useCallback(
     async (statementId: string, cursor: string | undefined, append: boolean) => {
@@ -498,15 +536,19 @@ function FinanceDashboard({
             Registre o essencial agora. Faturas, parcelas e compromissos ficam no mesmo lugar.
           </p>
         </div>
-        <Button variant="outline" onClick={() => void load()} disabled={status === "loading"}>
+        <Button
+          variant="outline"
+          onClick={() => void load()}
+          disabled={visibleStatus === "loading"}
+        >
           <RefreshCwIcon aria-hidden="true" /> Atualizar
         </Button>
       </header>
 
-      {notice ? (
+      {visibleNotice ? (
         <Alert role="status">
           <CheckIcon aria-hidden="true" />
-          <AlertTitle>{notice}</AlertTitle>
+          <AlertTitle>{visibleNotice}</AlertTitle>
           <AlertDescription>
             <span className="flex flex-wrap items-center gap-3">
               <span>Você pode continuar registrando ou revisar a linha do tempo abaixo.</span>
@@ -525,10 +567,10 @@ function FinanceDashboard({
           </AlertDescription>
         </Alert>
       ) : null}
-      {error ? (
+      {visibleError ? (
         <Alert variant="destructive" role="alert">
           <AlertTitle>Não foi possível concluir</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{visibleError}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -559,7 +601,7 @@ function FinanceDashboard({
           <CardHeader>
             <CardDescription>Cartões ativos</CardDescription>
             <CardTitle className="text-3xl font-semibold">
-              {cards.filter((card) => !card.archived).length}
+              {visibleCards.filter((card) => !card.archived).length}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
@@ -610,7 +652,7 @@ function FinanceDashboard({
                   onChange={(event) => setTransactionCardId(event.target.value)}
                 >
                   <option value="">Carteira</option>
-                  {cards
+                  {visibleCards
                     .filter((card) => !card.archived)
                     .map((card) => (
                       <option key={card.id} value={card.id}>
@@ -620,17 +662,24 @@ function FinanceDashboard({
                 </select>
               </Field>
               <MoneyInput value={amount} onChange={setAmount} label="Valor" currency={currency} />
-              <Field>
-                <FieldLabel htmlFor="transaction-description">Descrição (opcional)</FieldLabel>
-                <Input
-                  id="transaction-description"
-                  value={description}
-                  onChange={(event) => setDescription(event.target.value)}
-                  placeholder="Ex.: mercado"
-                  maxLength={500}
-                />
-                <FieldDescription>Você pode detalhar depois.</FieldDescription>
-              </Field>
+              <details className="rounded-lg border border-dashed px-3 py-2 md:col-span-2">
+                <summary className="cursor-pointer text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                  Mais detalhes
+                </summary>
+                <div className="pt-3">
+                  <Field>
+                    <FieldLabel htmlFor="transaction-description">Descrição (opcional)</FieldLabel>
+                    <Input
+                      id="transaction-description"
+                      value={description}
+                      onChange={(event) => setDescription(event.target.value)}
+                      placeholder="Ex.: mercado"
+                      maxLength={500}
+                    />
+                    <FieldDescription>Você pode detalhar depois.</FieldDescription>
+                  </Field>
+                </div>
+              </details>
               <div className="flex flex-col gap-2">
                 <label className="flex min-h-8 items-center gap-2 text-sm">
                   <input
@@ -748,11 +797,11 @@ function FinanceDashboard({
                 ) : null}
               </div>
             </form>
-            {status === "loading" ? (
+            {visibleStatus === "loading" ? (
               <p role="status" className="text-sm text-muted-foreground">
                 Carregando lançamentos…
               </p>
-            ) : transactions.length === 0 ? (
+            ) : visibleTransactions.length === 0 ? (
               <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
                 {hasTimelineFilters
                   ? "Nenhum lançamento corresponde aos filtros. Tente limpar ou ampliar o período."
@@ -761,7 +810,7 @@ function FinanceDashboard({
             ) : (
               <>
                 <ul className="divide-y">
-                  {transactions.map((transaction) => (
+                  {visibleTransactions.map((transaction) => (
                     <li
                       key={transaction.id}
                       className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
@@ -887,10 +936,10 @@ function FinanceDashboard({
                 </Button>
               </form>
             ) : null}
-            {cards.length === 0 ? (
+            {visibleCards.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nenhum cartão cadastrado.</p>
             ) : null}
-            {cards.map((card) => (
+            {visibleCards.map((card) => (
               <div key={card.id} className="rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-medium">{card.name}</p>
@@ -898,7 +947,7 @@ function FinanceDashboard({
                     Fecha {card.closingDay} · vence {card.dueDay}
                   </span>
                 </div>
-                {statements
+                {visibleStatements
                   .filter((statement) => statement.cardId === card.id)
                   .map((statement) => (
                     <div
@@ -1005,7 +1054,7 @@ function FinanceDashboard({
       </Card>
 
       <Dialog
-        open={viewingTransaction !== null}
+        open={visibleViewingTransaction !== null}
         onOpenChange={(open) => {
           if (!open) setViewingTransaction(null);
         }}
@@ -1017,45 +1066,47 @@ function FinanceDashboard({
               Revise a origem, o estado e a versão antes de corrigir este registro.
             </DialogDescription>
           </DialogHeader>
-          {viewingTransaction ? (
+          {visibleViewingTransaction ? (
             <dl className="grid gap-3 rounded-lg bg-muted/50 p-4 text-sm sm:grid-cols-2">
               <div>
                 <dt className="text-muted-foreground">Descrição</dt>
-                <dd className="mt-1 font-medium">{transactionLabel(viewingTransaction)}</dd>
+                <dd className="mt-1 font-medium">{transactionLabel(visibleViewingTransaction)}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Tipo</dt>
-                <dd className="mt-1 font-medium">{transactionKindLabel(viewingTransaction)}</dd>
+                <dd className="mt-1 font-medium">
+                  {transactionKindLabel(visibleViewingTransaction)}
+                </dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Valor</dt>
                 <dd className="mt-1 font-medium">
-                  {transactionAmountPrefix(viewingTransaction.kind)}
+                  {transactionAmountPrefix(visibleViewingTransaction.kind)}
                   {formatMoneyMinor(
-                    viewingTransaction.amount.minor,
-                    viewingTransaction.amount.currency,
+                    visibleViewingTransaction.amount.minor,
+                    visibleViewingTransaction.amount.currency,
                   )}
                 </dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Estado</dt>
                 <dd className="mt-1 font-medium">
-                  {viewingTransaction.state === "posted"
+                  {visibleViewingTransaction.state === "posted"
                     ? "Realizada"
-                    : viewingTransaction.state === "planned"
+                    : visibleViewingTransaction.state === "planned"
                       ? "Planejada"
-                      : viewingTransaction.state === "partially_settled"
+                      : visibleViewingTransaction.state === "partially_settled"
                         ? "Parcial"
                         : "Cancelada"}
                 </dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Data do fato</dt>
-                <dd className="mt-1 font-medium">{viewingTransaction.occurredOn}</dd>
+                <dd className="mt-1 font-medium">{visibleViewingTransaction.occurredOn}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Versão auditável</dt>
-                <dd className="mt-1 font-medium">v{viewingTransaction.version}</dd>
+                <dd className="mt-1 font-medium">v{visibleViewingTransaction.version}</dd>
               </div>
             </dl>
           ) : null}
@@ -1066,7 +1117,7 @@ function FinanceDashboard({
       </Dialog>
 
       <Dialog
-        open={viewingStatement !== null}
+        open={visibleViewingStatement !== null}
         onOpenChange={(open) => {
           if (!open) setViewingStatement(null);
         }}
@@ -1078,30 +1129,33 @@ function FinanceDashboard({
               Compras aumentam o total. Pagamentos reduzem apenas o valor em aberto.
             </DialogDescription>
           </DialogHeader>
-          {viewingStatement ? (
+          {visibleViewingStatement ? (
             <div className="flex flex-col gap-4">
               <dl className="grid grid-cols-3 gap-3 rounded-lg bg-muted/50 p-3 text-sm">
                 <div>
                   <dt className="text-muted-foreground">Total</dt>
                   <dd className="mt-1 font-semibold">
                     {formatMoneyMinor(
-                      viewingStatement.total.minor,
-                      viewingStatement.total.currency,
+                      visibleViewingStatement.total.minor,
+                      visibleViewingStatement.total.currency,
                     )}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Pago</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.paid.minor, viewingStatement.paid.currency)}
+                    {formatMoneyMinor(
+                      visibleViewingStatement.paid.minor,
+                      visibleViewingStatement.paid.currency,
+                    )}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Em aberto</dt>
                   <dd className="mt-1 font-semibold">
                     {formatMoneyMinor(
-                      viewingStatement.openAmount.minor,
-                      viewingStatement.openAmount.currency,
+                      visibleViewingStatement.openAmount.minor,
+                      visibleViewingStatement.openAmount.currency,
                     )}
                   </dd>
                 </div>
@@ -1173,7 +1227,7 @@ function FinanceDashboard({
       </Dialog>
 
       <Dialog
-        open={pendingStatementAction !== null}
+        open={visiblePendingStatementAction !== null}
         onOpenChange={(open) => {
           if (!open && busyStatementId === null) setPendingStatementAction(null);
         }}
@@ -1181,21 +1235,24 @@ function FinanceDashboard({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {pendingStatementAction?.type === "reopen" ? "Reabrir fatura?" : "Fechar fatura?"}
+              {visiblePendingStatementAction?.type === "reopen"
+                ? "Reabrir fatura?"
+                : "Fechar fatura?"}
             </DialogTitle>
             <DialogDescription>
-              {pendingStatementAction?.type === "reopen"
+              {visiblePendingStatementAction?.type === "reopen"
                 ? "Esta fatura voltará a aceitar lançamentos. A reabertura é bloqueada quando já existem pagamentos."
                 : "O período e o total ficam congelados. Novas compras serão direcionadas para o próximo ciclo."}
             </DialogDescription>
           </DialogHeader>
-          {pendingStatementAction ? (
+          {visiblePendingStatementAction ? (
             <p className="rounded-lg bg-muted/50 p-3 text-sm">
-              Fatura com vencimento em {pendingStatementAction.statement.dueOn} · valor em aberto{" "}
+              Fatura com vencimento em {visiblePendingStatementAction.statement.dueOn} · valor em
+              aberto{" "}
               <strong>
                 {formatMoneyMinor(
-                  pendingStatementAction.statement.openAmount.minor,
-                  pendingStatementAction.statement.openAmount.currency,
+                  visiblePendingStatementAction.statement.openAmount.minor,
+                  visiblePendingStatementAction.statement.openAmount.currency,
                 )}
               </strong>
             </p>
@@ -1207,17 +1264,17 @@ function FinanceDashboard({
             <Button
               disabled={busyStatementId !== null}
               onClick={() => {
-                if (pendingStatementAction) {
+                if (visiblePendingStatementAction) {
                   void runStatementAction(
-                    pendingStatementAction.type,
-                    pendingStatementAction.statement,
+                    visiblePendingStatementAction.type,
+                    visiblePendingStatementAction.statement,
                   );
                 }
               }}
             >
               {busyStatementId
                 ? "Salvando…"
-                : pendingStatementAction?.type === "reopen"
+                : visiblePendingStatementAction?.type === "reopen"
                   ? "Reabrir fatura"
                   : "Fechar fatura"}
             </Button>
