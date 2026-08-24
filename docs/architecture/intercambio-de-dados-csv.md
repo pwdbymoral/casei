@@ -61,8 +61,9 @@ canônica.
 
 ## Proteção de exportação
 
-`protectCsvFormula` e `serializeCsv` prefixam com apóstrofo textos que começam
-com espaço/tab/quebra de linha seguido de `=`, `+`, `-` ou `@`. O resultado
+`protectCsvFormula` e `serializeCsv` sempre prefixam com apóstrofo textos que
+começam com espaço/tab/quebra de linha seguido de `=`, `+`, `-` ou `@`; o
+serializador público não oferece opt-out. O resultado
 expõe também o `logicalValue`, permitindo que DATA-005 preserve o valor lógico
 no manifesto sem entregar uma célula executável a planilhas.
 

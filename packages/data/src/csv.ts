@@ -873,7 +873,6 @@ export function serializeCsvCell(value: string): string {
 
 export interface SerializeCsvOptions {
   readonly delimiter?: CsvDelimiter;
-  readonly protectFormulas?: boolean;
 }
 
 /** Serializes rows with CRLF and RFC4180 quoting; it never evaluates cells. */
@@ -887,8 +886,7 @@ export function serializeCsv(
     .map((row) =>
       row
         .map((cell) => {
-          const protectedCell =
-            options.protectFormulas === false ? cell : protectCsvFormula(cell).value;
+          const protectedCell = protectCsvFormula(cell).value;
           return serializeCsvCell(protectedCell);
         })
         .join(delimiter),
