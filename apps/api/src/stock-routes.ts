@@ -10,6 +10,7 @@ import {
   stockShoppingListQuerySchema,
   updateStockProductSchema,
 } from "@casei/contracts";
+import { IdempotencyConflictError } from "@casei/database";
 import type { Hono, MiddlewareHandler } from "hono";
 import { ApiHttpError, errorResponse, notFoundError, validationError } from "./http/index.js";
 import { parseJsonBody, parseQuery } from "./http/parsing.js";
@@ -207,6 +208,9 @@ function parseDomainId(value: string | undefined): string {
 }
 
 export function stockErrorToHttp(error: unknown): unknown {
+  if (error instanceof IdempotencyConflictError) {
+    return new ApiHttpError(409, "idempotency_conflict");
+  }
   if (error instanceof StockNotFoundError) return notFoundError();
   if (error instanceof StockPermissionError) return new ApiHttpError(403, "permission_denied");
   if (error instanceof StockVersionConflictError) {

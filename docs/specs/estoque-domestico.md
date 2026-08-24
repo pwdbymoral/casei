@@ -41,15 +41,24 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 
 ### Contrato da implementação STOCK-003
 
-`GET /v1/workspaces/:workspaceId/stock/shopping` materializa entradas automáticas para produtos ativos
-com estado `missing`/`low` e preferência `shoppingAuto`, além de itens livres persistidos. A chave
-normalizada do nome possui unicidade parcial por espaço enquanto o item não estiver comprado; uma
-colisão concorrente retorna o item já existente. `POST /stock/shopping/:itemId/purchased` exige
-`If-Match` e `Idempotency-Key`. Seu corpo sempre explicita `addToStock`; somente `true` cria uma
-movimentação `entry`, com quantidade positiva editável, na mesma transação que marca o item comprado.
-Itens livres podem ser concluídos, mas não podem criar movimentação de estoque. A migration `0007`
+`GET /v1/workspaces/:workspaceId/stock/shopping` é uma leitura pura: não insere itens nem eventos,
+inclusive para `viewer`. A leitura combina itens livres e automáticos materializados com uma projeção
+dos produtos automáticos atualmente `missing` ou `low` que ainda não possuem uma linha em
+`shopping_item`; essa projeção é somente leitura e usa o ID/version do produto para manter o
+contrato de compra/`If-Match`. Entradas automáticas também são sincronizadas por comandos de escrita
+que alteram o estado do produto, sem duplicar uma projeção já ativa. A chave normalizada do nome
+possui unicidade parcial por espaço enquanto o item não estiver comprado; uma colisão concorrente
+retorna o item já existente. `POST /stock/shopping/:itemId/purchased` exige `If-Match` e
+`Idempotency-Key`. Seu corpo sempre explicita `addToStock`; somente `true` cria uma movimentação
+`entry`, com quantidade positiva editável, na mesma transação que marca o item comprado e reprocessa
+a sincronização automática. Quando um item automático é concluído com `addToStock: false`, ele não
+reaparece enquanto não houver uma nova movimentação real no produto relacionado. Itens livres podem
+ser concluídos, mas não podem criar movimentação de estoque. A migration `0007`
 mantém eventos de lista append-only, RLS por espaço e constraints de fonte, unidade, quantidade e
-estado comprado.
+estado comprado. Se um item livre já existente tiver o mesmo nome de um produto que se torna
+`low`/`missing`, o comando do produto o reconcilia em uma única linha automática, preservando ID,
+histórico e versão; enquanto o produto não for candidato, o item livre continua visível. Eventos
+somente são removidos por cascade quando o workspace inteiro é purgado após a janela de recuperação.
 
 ## Busca e uso no mercado
 
@@ -73,4 +82,5 @@ estado comprado.
 - [ ] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
 - [x] Lista automática e item livre convivem sem duplicação.
 - [x] Concluir compra só altera estoque após confirmação explícita.
+- [x] A leitura autenticada da lista não muta dados; compra automática sem entrada não reaparece até uma movimentação real.
 - [x] Busca e lista permanecem utilizáveis em telefone e teclado, com alvos de toque e reflow responsivo; o modo avançado tabular fica para STOCK-004.

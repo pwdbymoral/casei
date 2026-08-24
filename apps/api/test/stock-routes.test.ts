@@ -1,7 +1,8 @@
-import type { Pool } from "@casei/database";
+import { IdempotencyConflictError, type Pool } from "@casei/database";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { IdentityService } from "../src/identity-service.js";
+import { stockErrorToHttp } from "../src/stock-routes.js";
 import { type StockService, StockVersionConflictError } from "../src/stock-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
@@ -60,6 +61,11 @@ function appFor(service: StockService) {
 }
 
 describe("stock HTTP boundary", () => {
+  it("maps idempotency conflicts to a stable 409 API error", () => {
+    const error = stockErrorToHttp(new IdempotencyConflictError());
+    expect(error).toMatchObject({ status: 409, code: "idempotency_conflict" });
+  });
+
   it("requires idempotency for creation and scopes list to authenticated workspace", async () => {
     const service = {
       listProducts: async (scope: { workspaceId: string; role: string }) => {
