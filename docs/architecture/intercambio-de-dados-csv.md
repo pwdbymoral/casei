@@ -1,0 +1,66 @@
+# Núcleo CSV de intercâmbio
+
+- Status: vigente
+- Spec: [intercâmbio de dados](../specs/intercambio-de-dados.md)
+- Pacote: `@casei/data`
+
+## Escopo
+
+`@casei/data` é o núcleo puro usado pelas fatias de importação. Ele não acessa
+filesystem, object storage, banco, sessão ou casos de uso. Recebe bytes ou texto
+já mantidos pelo chamador e devolve uma prévia imutável; nenhuma função aplica
+linhas ou cria registros. XLSX, armazenamento temporário, jobs e perfis
+persistidos permanecem nas fatias DATA-001, DATA-004 e DATA-006.
+
+## Limites e parsing
+
+`parseCsv` mede os bytes originais antes de decodificar. Os padrões do MVP são;
+o boundary do servidor pode fornecer limites positivos diferentes quando uma
+política operacional aprovada exigir:
+
+- 10.000.000 bytes por arquivo;
+- 50.000 linhas de dados, sem contar o cabeçalho;
+- 256 colunas e 1.000.000 bytes por célula.
+
+Os limites são validados como inteiros positivos antes de serem usados. UTF-8 estrito é tentado primeiro; bytes inválidos
+usam Latin-1 detectável. BOM UTF-8 é aceito, UTF-16 e bytes NUL são rejeitados.
+O parser implementa CSV RFC 4180 (aspas, aspas duplicadas, CRLF/LF e quebras de
+linha em campos), mantém linhas com largura incorreta para diagnóstico e nunca
+avalia conteúdo como fórmula ou código. Registros com campos vazios, inclusive
+`""` e linhas fisicamente vazias previstas pelo formato, são mantidos para que
+o preflight produza o resultado e o erro obrigatório daquela linha; uma quebra
+de linha final isolada não cria um registro adicional.
+
+O separador é detectado no cabeçalho entre vírgula, ponto e vírgula e TAB. Para
+um arquivo de uma coluna, `locale: "pt-BR"` escolhe ponto e vírgula como fallback
+para que uma vírgula decimal não seja confundida com separador. Datas com barra
+exigem locale explícito; valores monetários são convertidos por strings para
+minor units, sem `number` ou float.
+
+## Mapeamento e preflight
+
+`mapCsvColumns` compara chaves e aliases após normalização Unicode, caixa,
+acentos, pontuação e espaços. O cabeçalho original é preservado. Ambiguidades,
+colunas ausentes obrigatórias e mapeamentos duplicados são diagnósticos
+explícitos; colunas desconhecidas são aviso por padrão ou erro quando o fluxo
+escolhe `unknownColumns: "error"`.
+
+`preflightCsvImport` percorre todas as linhas antes de qualquer aplicação,
+valida campos com parsers fornecidos pelo domínio e retorna cada linha como
+`valid`, `duplicate` ou `invalid`, incluindo seus erros, avisos, valores
+normalizados e número de origem. Fingerprints SHA-256 incluem domínio, espaço
+opcional, nomes e valores normalizados. Coincidências são somente sugestões:
+repetir um fingerprint não remove nem invalida automaticamente uma linha. A
+API de fingerprint aceita somente valores escalares (`string`, `number`,
+`bigint`, `boolean`, `null` ou `undefined`); objetos e arrays são rejeitados
+para evitar que a ordem ou a forma de uma estrutura aninhada altere o contrato
+sem uma canonicalização de domínio explícita. Um domínio que precise incluir
+dados compostos deve convertê-los primeiro para uma representação escalar
+canônica.
+
+## Proteção de exportação
+
+`protectCsvFormula` e `serializeCsv` prefixam com apóstrofo textos que começam
+com espaço/tab/quebra de linha seguido de `=`, `+`, `-` ou `@`. O resultado
+expõe também o `logicalValue`, permitindo que DATA-005 preserve o valor lógico
+no manifesto sem entregar uma célula executável a planilhas.

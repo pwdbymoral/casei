@@ -1,6 +1,7 @@
 # Specification: importação e exportação de dados
 
 - Status: vigente; subordinada às [decisões de produto do MVP](mvp-casei.md#decisões-de-produto-aprovadas)
+- Núcleo técnico: [parser CSV e preflight](../architecture/intercambio-de-dados-csv.md)
 
 ## Contexto e objetivo
 
