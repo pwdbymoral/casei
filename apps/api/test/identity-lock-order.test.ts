@@ -111,4 +111,54 @@ describe("IdentityService workspace lock ordering", () => {
     expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
     expect(locks[1]).toMatch(/FROM workspace/);
   });
+
+  it("locks actor and target before workspace when removing a member", async () => {
+    const harness = poolFor();
+    const service = new IdentityService(harness.pool as never);
+
+    await expect(service.removeMember(scope, "user-a-target", 0)).resolves.toEqual({ version: 1 });
+
+    const locks = forUpdateStatements(harness.statements);
+    expect(locks[0]).toMatch(/FROM membership/);
+    expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
+    expect(locks[1]).toMatch(/FROM workspace/);
+  });
+
+  it("locks actor and target before workspace when changing a member role", async () => {
+    const harness = poolFor();
+    const service = new IdentityService(harness.pool as never);
+
+    await expect(
+      service.changeMemberRole(scope, "user-a-target", { role: "viewer" }, 0),
+    ).resolves.toEqual({ role: "viewer", version: 1 });
+
+    const locks = forUpdateStatements(harness.statements);
+    expect(locks[0]).toMatch(/FROM membership/);
+    expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
+    expect(locks[1]).toMatch(/FROM workspace/);
+  });
+
+  it("rechecks the actor role after locking members for removal", async () => {
+    const harness = poolFor({ actorRole: "member" });
+    const service = new IdentityService(harness.pool as never);
+
+    await expect(service.removeMember(scope, "user-a-target", 0)).rejects.toBeInstanceOf(
+      IdentityPermissionError,
+    );
+    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(
+      false,
+    );
+  });
+
+  it("rechecks the actor role after locking members for role changes", async () => {
+    const harness = poolFor({ actorRole: "member" });
+    const service = new IdentityService(harness.pool as never);
+
+    await expect(
+      service.changeMemberRole(scope, "user-a-target", { role: "viewer" }, 0),
+    ).rejects.toBeInstanceOf(IdentityPermissionError);
+    expect(harness.statements.some((statement) => statement.includes("UPDATE membership"))).toBe(
+      false,
+    );
+  });
 });
