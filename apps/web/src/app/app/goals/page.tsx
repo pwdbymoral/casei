@@ -399,7 +399,9 @@ export default function GoalsPage() {
       // Um gasto reduz a carteira compartilhada e pode descobrir outras metas.
       const refreshed = await load();
       if (refreshed === null) {
-        setFormError("A alteração foi salva, mas não conseguimos atualizar todas as metas. Tente recarregar.");
+        setFormError(
+          "A alteração foi salva, mas não conseguimos atualizar todas as metas. Tente recarregar.",
+        );
         return;
       }
       setAction(null);
@@ -416,7 +418,9 @@ export default function GoalsPage() {
         const current = refreshed?.find((goal) => goal.id === action.goal.id);
         if (current) {
           setAction({ ...action, goal: current });
-          setFormError("A meta mudou enquanto você revisava. Atualizamos os dados; tente novamente.");
+          setFormError(
+            "A meta mudou enquanto você revisava. Atualizamos os dados; tente novamente.",
+          );
         } else {
           setFormError("A meta mudou, mas não conseguimos atualizar os dados. Tente recarregar.");
         }
