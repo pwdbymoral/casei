@@ -734,4 +734,106 @@ describe("finance HTTP composition", () => {
     expect(reopened.headers.get("etag")).toBe('"v2"');
     await expect(reopened.json()).resolves.toMatchObject({ id: statementId, state: "open" });
   });
+
+  it("mounts loan creation and principal payment with version headers", async () => {
+    let paymentCall: { id: string; key: string; version: number; input: unknown } | undefined;
+    const fakeService = {
+      createLoan: async () => ({
+        replayed: false,
+        loan: {
+          id: transactionId,
+          workspaceId,
+          direction: "lent",
+          counterparty: "Ana",
+          principal: { currency: "BRL", minor: "1000" },
+          paid: { currency: "BRL", minor: "0" },
+          remaining: { currency: "BRL", minor: "1000" },
+          occurredOn: "2026-08-23",
+          dueOn: null,
+          status: "open",
+          version: 0,
+        },
+      }),
+      payLoan: async (
+        _scope: unknown,
+        id: string,
+        key: string,
+        version: number,
+        input: unknown,
+      ) => {
+        paymentCall = { id, key, version, input };
+        return {
+          replayed: false,
+          response: {
+            loan: {
+              id,
+              workspaceId,
+              direction: "lent",
+              counterparty: "Ana",
+              principal: { currency: "BRL", minor: "1000" },
+              paid: { currency: "BRL", minor: "250" },
+              remaining: { currency: "BRL", minor: "750" },
+              occurredOn: "2026-08-23",
+              dueOn: null,
+              status: "open",
+              version: 1,
+            },
+            payment: {
+              id: statementItemId,
+              loanId: id,
+              amount: { currency: "BRL", minor: "250" },
+              occurredOn: "2026-08-24",
+            },
+          },
+        };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "owner" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const created = await app.request(`http://localhost/v1/workspaces/${workspaceId}/loans`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "loan-route-create" },
+      body: JSON.stringify({
+        direction: "lent",
+        counterparty: "Ana",
+        principal: { currency: "BRL", minor: "1000" },
+      }),
+    });
+    expect(created.status).toBe(201);
+    expect(created.headers.get("etag")).toBe('"v0"');
+
+    const paid = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/loans/${transactionId}/payments`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "loan-route-payment",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ amount: { currency: "BRL", minor: "250" } }),
+      },
+    );
+    expect(paid.status).toBe(200);
+    expect(paid.headers.get("etag")).toBe('"v1"');
+    expect(paymentCall).toMatchObject({
+      id: transactionId,
+      key: "loan-route-payment",
+      version: 0,
+      input: { amount: { currency: "BRL", minor: "250" } },
+    });
+  });
 });

@@ -121,13 +121,17 @@ uma reversão estorna todos os deltas publicados atomicamente.
 
 ### Empréstimo concedido
 
-Ao emprestar, a carteira diminui e nasce um recebível; não há despesa. Reembolsos aumentam a carteira e reduzem o recebível; não são receita. O cadastro exige contraparte identificável por nome livre, principal, data e plano de pagamento opcional.
+Ao emprestar, a carteira diminui e nasce um recebível; não há despesa. O cadastro exige contraparte identificável por nome livre, principal, data e vencimento opcional. O contrato começa `open` e exibe saldo principal restante.
 
 ### Empréstimo recebido
 
-Ao tomar emprestado, a carteira aumenta e nasce uma obrigação; não há receita. Pagamentos diminuem carteira e obrigação; não são despesa. Juros ou tarifas, quando existirem, são despesas separadas vinculadas ao empréstimo.
+Ao tomar emprestado, a carteira aumenta e nasce uma obrigação; não há receita. Pagamentos diminuem carteira e obrigação; não são despesa. O contrato também exige contraparte, principal, data e vencimento opcional.
 
-Pagamentos podem ser parciais. Saldo do contrato nunca fica negativo; excedente exige correção ou registro separado. Perdão/baixa exige confirmação e gera receita ou despesa explícita conforme a direção.
+Pagamentos de principal podem ser parciais ou totais. Saldo do contrato nunca fica negativo; excedente é rejeitado e deve ser corrigido ou registrado como um novo fato. O pagamento total transita o contrato para `settled`. O MVP não cadastra nem calcula juros, tarifas, perdão ou baixa; esses comportamentos exigem uma decisão e uma fatia posterior.
+
+Na API, `POST /v1/workspaces/:workspaceId/loans` cria o contrato com `Idempotency-Key`. `POST /v1/workspaces/:workspaceId/loans/:loanId/payments` exige `Idempotency-Key` e `If-Match: "v<version>"`, aceita valor positivo e data civil opcional (hoje no fuso do espaço quando omitida), e retorna o saldo/status atualizados. Cada pagamento publica somente o principal efetivamente pago. Retry reproduz a resposta sem outro evento ou movimento; concorrência usa a versão do contrato e não permite saldo negativo.
+
+Principal concedido publica `wallet → loan receivable`; recebimento do reembolso publica `loan receivable → wallet`. Principal recebido publica `loan payable → wallet`; seu pagamento publica `wallet → loan payable`. Essas contas não são `income` nem `expense`, e portanto empréstimos não entram no resultado econômico.
 
 ### Ajuste de saldo
 

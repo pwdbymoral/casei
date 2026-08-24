@@ -5,6 +5,7 @@ import {
   createCreditCardSchema,
   createGoalSchema,
   createInstallmentPlanSchema,
+  createLoanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
@@ -13,6 +14,7 @@ import {
   goalSpendSchema,
   goalTransitionSchema,
   insightWindowQuerySchema,
+  loanPaymentSchema,
   paginationQuerySchema,
   payStatementSchema,
   recurrenceTransitionSchema,
@@ -65,6 +67,8 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   for (const path of [
     "/workspaces/:workspaceId/transactions",
     "/workspaces/:workspaceId/transactions/*",
+    "/workspaces/:workspaceId/loans",
+    "/workspaces/:workspaceId/loans/*",
     "/workspaces/:workspaceId/categories",
     "/workspaces/:workspaceId/categories/*",
     "/workspaces/:workspaceId/cards",
@@ -224,6 +228,48 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     );
     context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
     return context.json(result.transaction, result.replayed ? 200 : 201);
+  });
+
+  router.post("/workspaces/:workspaceId/loans", async (context) => {
+    const input = await parseJsonBody(context, createLoanSchema);
+    const result = await service.createLoan(
+      scopeOf(context),
+      input,
+      requiredIdempotencyKey(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.loan.version);
+    return context.json(result.loan, result.replayed ? 200 : 201);
+  });
+
+  router.get("/workspaces/:workspaceId/loans", async (context) => {
+    const query = parseQuery(context, paginationQuerySchema);
+    const items = await service.listLoans(scopeOf(context), query.limit);
+    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+  });
+
+  router.get("/workspaces/:workspaceId/loans/:loanId", async (context) => {
+    const loanId = parseDomainId(context.req.param("loanId"));
+    const loan = await service.getLoan(scopeOf(context), loanId);
+    if (!loan) throw notFoundError();
+    setVersionHeaders(context, loan.version);
+    return context.json(loan);
+  });
+
+  router.post("/workspaces/:workspaceId/loans/:loanId/payments", async (context) => {
+    const loanId = parseDomainId(context.req.param("loanId"));
+    const expectedVersion = requireIfMatch(context);
+    const input = await parseJsonBody(context, loanPaymentSchema);
+    const result = await service.payLoan(
+      scopeOf(context),
+      loanId,
+      requiredIdempotencyKey(context),
+      expectedVersion,
+      input,
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.response.loan.version);
+    return context.json(result.response);
   });
 
   router.get("/workspaces/:workspaceId/transactions", async (context) => {

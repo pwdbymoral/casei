@@ -15,6 +15,61 @@ export interface CanonicalPostingAccounts {
   readonly cardLiability?: string;
 }
 
+export type LoanDirection = "lent" | "borrowed";
+
+export interface LoanPostingAccounts {
+  readonly wallet: string;
+  readonly loan: string;
+}
+
+/** Principal exchange: a lent loan becomes a receivable; a borrowed loan a payable. */
+export function canonicalLoanPrincipalPostings(input: {
+  direction: LoanDirection;
+  amount: Money;
+  accounts: LoanPostingAccounts;
+}): readonly LedgerPosting[] {
+  assertPositiveLoanAmount(input.amount);
+  const walletAmount = input.direction === "lent" ? -input.amount.minor : input.amount.minor;
+  const loanAmount = -walletAmount;
+  return [
+    {
+      accountId: input.accounts.wallet,
+      amount: Money.fromTrusted(walletAmount, input.amount.currency),
+    },
+    {
+      accountId: input.accounts.loan,
+      amount: Money.fromTrusted(loanAmount, input.amount.currency),
+    },
+  ];
+}
+
+/** Principal repayment: reverses the original cash/receivable or cash/payable direction. */
+export function canonicalLoanPaymentPostings(input: {
+  direction: LoanDirection;
+  amount: Money;
+  accounts: LoanPostingAccounts;
+}): readonly LedgerPosting[] {
+  assertPositiveLoanAmount(input.amount);
+  const walletAmount = input.direction === "lent" ? input.amount.minor : -input.amount.minor;
+  const loanAmount = -walletAmount;
+  return [
+    {
+      accountId: input.accounts.wallet,
+      amount: Money.fromTrusted(walletAmount, input.amount.currency),
+    },
+    {
+      accountId: input.accounts.loan,
+      amount: Money.fromTrusted(loanAmount, input.amount.currency),
+    },
+  ];
+}
+
+function assertPositiveLoanAmount(amount: Money): void {
+  if (amount.minor <= 0n) {
+    throw new DomainError("validation_failed", "O valor do empréstimo deve ser positivo.");
+  }
+}
+
 /** Canonical double-entry effects used by wallet, card purchases and payments. */
 export function canonicalTransactionPostings(input: {
   kind: "income" | "expense" | "transfer" | "adjustment";

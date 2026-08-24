@@ -1,7 +1,9 @@
 import {
+  createLoanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
   insightWindowQuerySchema,
+  loanPaymentSchema,
   payStatementSchema,
   recurrenceTransitionSchema,
   safeToSpendQuerySchema,
@@ -49,6 +51,30 @@ describe("finance contracts", () => {
         amount: { currency: "BRL", minor: "100" },
       }),
     ).not.toHaveProperty("occurredOn");
+  });
+
+  it("validates the simple IOU contract and principal payment", () => {
+    expect(
+      createLoanSchema.parse({
+        direction: "lent",
+        counterparty: "Ana",
+        principal: { currency: "BRL", minor: "1000" },
+        occurredOn: "2028-02-29",
+        dueOn: "2028-03-31",
+      }),
+    ).toMatchObject({ direction: "lent", counterparty: "Ana" });
+    expect(loanPaymentSchema.parse({ amount: { currency: "BRL", minor: "250" } })).toEqual({
+      amount: { currency: "BRL", minor: "250" },
+    });
+    expect(() =>
+      createLoanSchema.parse({
+        direction: "borrowed",
+        counterparty: "Ana",
+        principal: { currency: "BRL", minor: "1000" },
+        occurredOn: "2028-03-01",
+        dueOn: "2028-02-29",
+      }),
+    ).toThrow("anterior");
   });
 
   it("validates recurrence bounds and variable estimates", () => {

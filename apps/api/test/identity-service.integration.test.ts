@@ -495,6 +495,74 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         ),
       ).resolves.toMatchObject({ rows: [{ attempts: 5 }] });
 
+      const purgeAccounts = await pool.query<{ wallet_id: string; loan_id: string }>(
+        `WITH wallet AS (
+           INSERT INTO financial_account (workspace_id, kind, name, currency_code)
+           VALUES ($1, 'wallet', 'Carteira purge', 'EUR') RETURNING id
+         ), loan AS (
+           INSERT INTO financial_account (workspace_id, kind, name, currency_code)
+           VALUES ($1, 'loan_receivable', 'Purge receivable', 'EUR') RETURNING id
+         )
+         SELECT wallet.id AS wallet_id, loan.id AS loan_id FROM wallet, loan`,
+        [workspaceId],
+      );
+      const purgeAccount = purgeAccounts.rows[0];
+      if (!purgeAccount) throw new Error("purge accounts were not created");
+      const principalEvent = await pool.query<{ id: string }>(
+        `INSERT INTO ledger_event
+          (workspace_id, event_type, currency_code, status, occurred_on, published_at)
+         VALUES ($1, 'loan.principal.lent.v1', 'EUR', 'draft', '2030-01-01', now())
+         RETURNING id`,
+        [workspaceId],
+      );
+      const principalEventId = principalEvent.rows[0]?.id;
+      if (!principalEventId) throw new Error("purge principal event was not created");
+      await pool.query(
+        `INSERT INTO ledger_entry
+          (workspace_id, event_id, account_id, currency_code, amount_minor)
+         VALUES ($1, $2, $3, 'EUR', -100), ($1, $2, $4, 'EUR', 100)`,
+        [workspaceId, principalEventId, purgeAccount.wallet_id, purgeAccount.loan_id],
+      );
+      await pool.query(
+        `UPDATE ledger_event SET status = 'published', published_at = now() WHERE id = $1`,
+        [principalEventId],
+      );
+      const paymentEvent = await pool.query<{ id: string }>(
+        `INSERT INTO ledger_event
+          (workspace_id, event_type, currency_code, status, occurred_on, published_at)
+         VALUES ($1, 'loan.payment.received.v1', 'EUR', 'draft', '2030-01-02', now())
+         RETURNING id`,
+        [workspaceId],
+      );
+      const paymentEventId = paymentEvent.rows[0]?.id;
+      if (!paymentEventId) throw new Error("purge payment event was not created");
+      await pool.query(
+        `INSERT INTO ledger_entry
+          (workspace_id, event_id, account_id, currency_code, amount_minor)
+         VALUES ($1, $2, $3, 'EUR', 50), ($1, $2, $4, 'EUR', -50)`,
+        [workspaceId, paymentEventId, purgeAccount.wallet_id, purgeAccount.loan_id],
+      );
+      await pool.query(
+        `UPDATE ledger_event SET status = 'published', published_at = now() WHERE id = $1`,
+        [paymentEventId],
+      );
+      const purgeLoan = await pool.query<{ id: string }>(
+        `INSERT INTO loan_contract
+          (workspace_id, direction, counterparty, principal_minor, paid_minor, currency_code,
+           occurred_on, due_on, principal_event_id, status, version)
+         VALUES ($1, 'lent', 'Purge counterparty', 100, 50, 'EUR', '2030-01-01', '2030-02-01', $2, 'open', 1)
+         RETURNING id`,
+        [workspaceId, principalEventId],
+      );
+      const purgeLoanId = purgeLoan.rows[0]?.id;
+      if (!purgeLoanId) throw new Error("purge loan was not created");
+      await pool.query(
+        `INSERT INTO loan_payment
+          (workspace_id, loan_id, amount_minor, currency_code, occurred_on, ledger_event_id)
+         VALUES ($1, $2, 50, 'EUR', '2030-01-02', $3)`,
+        [workspaceId, purgeLoanId, paymentEventId],
+      );
+
       const onboardingResults = await Promise.all([
         service.createOnboarding(
           { userId: onboardingId, email: `${onboardingId}@example.test` },
@@ -661,6 +729,18 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       await expect(
         pool.query(`SELECT id FROM goal_reservation_movement WHERE workspace_id = $1`, [
           workspaceId,
+        ]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(`SELECT id FROM loan_contract WHERE workspace_id = $1`, [workspaceId]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(`SELECT id FROM loan_payment WHERE workspace_id = $1`, [workspaceId]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(`SELECT id FROM ledger_event WHERE id IN ($1, $2)`, [
+          principalEventId,
+          paymentEventId,
         ]),
       ).resolves.toMatchObject({ rows: [] });
       await expect(
