@@ -24,15 +24,28 @@ export interface UnitOfWorkContext {
   scope: CommandScope;
 }
 
+export interface UnitOfWorkOptions {
+  isolationLevel?: "repeatable read" | "serializable";
+  readOnly?: boolean;
+}
+
 /** Runs a command in one database transaction and applies the RLS context locally. */
 export async function withUnitOfWork<T>(
   pool: Pool,
   scope: CommandScope,
   callback: (context: UnitOfWorkContext) => Promise<T>,
+  options: UnitOfWorkOptions = {},
 ): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    if (options.isolationLevel || options.readOnly) {
+      const characteristics = [
+        options.isolationLevel ? `ISOLATION LEVEL ${options.isolationLevel.toUpperCase()}` : null,
+        options.readOnly ? "READ ONLY" : null,
+      ].filter((value): value is string => value !== null);
+      await client.query(`SET TRANSACTION ${characteristics.join(", ")}`);
+    }
     if (scope.applicationRole) {
       await client.query(`SET LOCAL ROLE ${quoteIdentifier(scope.applicationRole)}`);
     }

@@ -21,6 +21,7 @@ import {
 } from "./http/index.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
+import { InsightService } from "./insight-service.js";
 import { configureStockRoutes } from "./stock-routes.js";
 import { StockService } from "./stock-service.js";
 
@@ -57,6 +58,8 @@ export interface FinanceAppOptions {
   applicationRole?: string;
   /** Secret used to sign private finance list cursors. */
   cursorSecret?: string;
+  /** Injectable read model boundary; production uses the finance pool. */
+  insightService?: InsightService;
 }
 
 export interface StockAppOptions {
@@ -139,6 +142,11 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
         new GoalService(options.finance.pool, {
           applicationRole: options.finance.applicationRole,
           cursorSecret: options.finance.cursorSecret,
+        }),
+      insightService:
+        options.finance.insightService ??
+        new InsightService(options.finance.pool, {
+          applicationRole: options.finance.applicationRole,
         }),
       scopeMiddleware: async (context, next) => {
         if (!actorMiddleware || !scopeMiddleware)
