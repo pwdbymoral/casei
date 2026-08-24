@@ -588,6 +588,12 @@ describe("StockService membership revalidation", () => {
       service.updateProduct(scope, productId, { name: "Arroz livre", unit: "unit" }, 0),
     ).rejects.toBeInstanceOf(StockConflictError);
     expect(harness.statements.some((sql) => /UPDATE stock_product/i.test(sql))).toBe(false);
+    const nameLock = harness.statements.findIndex((sql) => /pg_advisory_xact_lock/i.test(sql));
+    const productLock = harness.statements.findIndex(
+      (sql) => /FROM stock_product/i.test(sql) && /FOR UPDATE/i.test(sql),
+    );
+    expect(nameLock).toBeGreaterThanOrEqual(0);
+    expect(productLock).toBeGreaterThan(nameLock);
   });
 
   it("rejects restoring an archived product that collides with an active free item", async () => {
@@ -657,7 +663,13 @@ describe("StockService membership revalidation", () => {
     const readStatements = harness.statements.slice(beforeRead);
     expect(readStatements.some((sql) => /INSERT INTO shopping_item/i.test(sql))).toBe(false);
     expect(readStatements.some((sql) => /shopping_item_event/i.test(sql))).toBe(false);
-    expect(readStatements.some((sql) => /\$2::text AS last_changed_by/i.test(sql))).toBe(false);
+    const listQuery = readStatements.find((sql) => /WITH visible_items/i.test(sql));
+    expect(listQuery).toBeDefined();
+    expect(listQuery).toMatch(/NULL::text AS last_changed_by/i);
+    expect(listQuery).not.toMatch(/\$2::text AS last_changed_by/i);
+    expect(listQuery).toMatch(/AND \(\$2::boolean OR i\.purchased = false\)/i);
+    expect(listQuery).not.toMatch(/AND \(\$3::boolean/i);
+    expect(listQuery).toMatch(/LIMIT \$3/i);
     expect(first).toHaveLength(1);
     const firstItem = first[0];
     expect(firstItem).toMatchObject({

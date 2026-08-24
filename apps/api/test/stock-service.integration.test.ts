@@ -80,6 +80,40 @@ describe("STOCK autorização PostgreSQL", () => {
           WHERE workspace_id = $1 AND user_id = $2`,
         [workspaceId, memberId],
       );
+
+      const ownerScope = {
+        ...scope,
+        actorId: ownerId,
+        role: "owner" as const,
+        correlationId: `stock-owner-correlation-${suffix}`,
+      };
+      const concurrentCollision = await Promise.allSettled([
+        service.updateProduct(
+          scope,
+          created.product.id,
+          { name: "Feijão" },
+          created.product.version,
+        ),
+        service.createShoppingItem(ownerScope, { name: "Feijão" }, "stock-shopping-collision-0001"),
+      ]);
+      expect(concurrentCollision.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(concurrentCollision.filter((result) => result.status === "rejected")).toHaveLength(1);
+      const productCollision = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM stock_product
+          WHERE workspace_id = $1 AND name_normalized = 'feijao' AND archived = false`,
+        [workspaceId],
+      );
+      const itemCollision = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM shopping_item
+          WHERE workspace_id = $1 AND name_normalized = 'feijao' AND purchased = false`,
+        [workspaceId],
+      );
+      expect(
+        Number(productCollision.rows[0]?.count ?? 0) + Number(itemCollision.rows[0]?.count ?? 0),
+      ).toBeLessThanOrEqual(1);
+
       const lockClient = await pool.connect();
       try {
         await lockClient.query("BEGIN");

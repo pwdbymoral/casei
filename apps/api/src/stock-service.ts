@@ -212,6 +212,7 @@ export class StockService {
           key: idempotencyKey,
           request: parsed,
           execute: async () => {
+            await lockShoppingName(client, scope, normalized.key);
             let product: StockProductView;
             try {
               const result = await client.query<StockProductRow>(
@@ -309,9 +310,12 @@ export class StockService {
     return this.withUnitOfWork(
       scope,
       async ({ client }) => {
+        const requestedName = parsed.name ? normalizeProductName(parsed.name) : null;
+        if (requestedName) await lockShoppingName(client, scope, requestedName.key);
         const current = await lockProduct(client, scope, productId);
         assertExpectedVersion(current.version, expectedVersion);
-        const normalized = normalizeProductName(parsed.name ?? current.name);
+        const normalized = requestedName ?? normalizeProductName(current.name);
+        if (!requestedName) await lockShoppingName(client, scope, normalized.key);
         const values = normalizeUpdateInput(parsed, current);
         if (values.unit === "other" && !values.unitLabel) {
           throw new StockConflictError("Informe o rótulo da unidade.");
@@ -488,6 +492,7 @@ export class StockService {
               );
               if (collision.rowCount)
                 throw new StockConflictError("Já existe um produto ativo com esse nome.");
+              await lockShoppingName(client, scope, normalizeProductName(current.name).key);
               await assertNoFreeShoppingNameCollision(
                 client,
                 scope,
@@ -665,7 +670,7 @@ export class StockService {
             LEFT JOIN stock_product p
               ON p.workspace_id = i.workspace_id AND p.id = i.product_id
            WHERE i.workspace_id = $1
-             AND ($3::boolean OR i.purchased = false)
+             AND ($2::boolean OR i.purchased = false)
              AND (i.purchased OR ((i.source = 'free') OR (i.source = 'automatic' AND p.id IS NOT NULL
                   AND p.shopping_auto = true
                   AND (p.marked_missing OR p.quantity_milli = 0
@@ -739,6 +744,7 @@ export class StockService {
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
+          await lockShoppingName(client, scope, normalized.key);
           const existing = await findActiveShoppingItem(client, scope, normalized.key);
           if (existing) {
             return {
@@ -1113,6 +1119,18 @@ async function findActiveShoppingItem(
   return result.rows[0] ?? null;
 }
 
+/** Serializes product/free-item operations on the same workspace/name key. */
+async function lockShoppingName(
+  client: PoolClient,
+  scope: StockScope,
+  nameNormalized: string,
+): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, [
+    scope.workspaceId,
+    nameNormalized,
+  ]);
+}
+
 async function assertNoFreeShoppingNameCollision(
   client: PoolClient,
   scope: StockScope,
@@ -1324,6 +1342,7 @@ async function insertBulkProduct(
   const normalized = normalizeProductName(values.name);
   const quantityMilli = bulkQuantity(values.quantity);
   const minimumMilli = bulkQuantity(values.minimum);
+  await lockShoppingName(client, scope, normalized.key);
   try {
     const inserted = await client.query<StockProductRow>(
       `INSERT INTO stock_product
@@ -1374,6 +1393,7 @@ async function updateBulkProduct(
   values: StockBulkProductValues,
 ): Promise<string> {
   const normalized = normalizeProductName(values.name);
+  await lockShoppingName(client, scope, normalized.key);
   const currentQuantity = normalizeStockValue(current.quantity_milli);
   const nextQuantity =
     values.quantity === undefined ? currentQuantity : bulkQuantity(values.quantity);

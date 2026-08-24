@@ -65,8 +65,8 @@ export type CreateStockProductInput = {
 };
 
 export type UpdateStockProductInput = {
-  name: string;
-  unit: StockUnit;
+  name?: string;
+  unit?: StockUnit;
   unitLabel?: string | null;
   minimum?: string | null;
   shoppingAuto?: boolean;
@@ -570,6 +570,17 @@ export function createFixtureStockAdapter(): StockAdapter {
       if (input.note !== undefined) current.note = input.note;
       current.state = deriveFixtureState(current.quantity, current.minimum, current.markedMissing);
       current.version += 1;
+      const shoppingItems = shoppingByWorkspace.get(product.workspaceId) ?? [];
+      for (const item of shoppingItems) {
+        if (item.productId !== current.id || item.source !== "automatic" || item.purchased)
+          continue;
+        item.name = current.name;
+        item.unit = current.unit;
+        item.unitLabel = current.unitLabel;
+        item.note = current.note;
+        item.version = current.version;
+        item.lastChangedBy = "user_fixture_marina";
+      }
       return { ...current };
     },
     async createMovement(_workspaceId, product, input) {
@@ -642,7 +653,7 @@ export function createFixtureStockAdapter(): StockAdapter {
           note: product.note,
           purchased: false,
           purchasedAt: null,
-          lastChangedBy: "user_fixture_marina",
+          lastChangedBy: null,
           version: 0,
         });
       }
