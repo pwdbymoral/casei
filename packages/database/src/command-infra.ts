@@ -509,7 +509,7 @@ export class PostgresJobWorker {
 
   private async assertAuthorized(job: JobRecord): Promise<void> {
     if (!job.workspaceId || !job.actorId) {
-      if (job.requiredCapability !== "system.purge") throw new JobAuthorizationError();
+      if (!isSystemJob(job)) throw new JobAuthorizationError();
       return;
     }
     await withUnitOfWork(
@@ -544,7 +544,7 @@ export class PostgresJobWorker {
       },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        if (!isSystemPurgeJob(job)) {
+        if (!isSystemJob(job)) {
           await assertMembership(
             client,
             job,
@@ -555,7 +555,7 @@ export class PostgresJobWorker {
           client,
           beforeTransition: async () => {
             await assertLeaseFenced(client, job);
-            if (!isSystemPurgeJob(job)) {
+            if (!isSystemJob(job)) {
               await assertMembership(
                 client,
                 job,
@@ -590,10 +590,10 @@ export class PostgresJobWorker {
 
   private async markSucceeded(job: JobRecord): Promise<boolean> {
     if (!job.workspaceId) return false;
-    const systemPurge = isSystemPurgeJob(job);
+    const systemJob = isSystemJob(job);
     return withUnitOfWork(
       this.pool,
-      systemPurge
+      systemJob
         ? { applicationRole: this.options.applicationRole }
         : {
             workspaceId: job.workspaceId,
@@ -602,7 +602,7 @@ export class PostgresJobWorker {
           },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        if (!systemPurge) {
+        if (!systemJob) {
           try {
             await assertMembership(
               client,
@@ -722,12 +722,16 @@ function handlerKey(jobType: string, version: number): string {
 
 const defaultCapabilityAuthorizer: CapabilityAuthorizer = ({ role }) => role === "owner";
 
-function isSystemPurgeJob(job: JobRecord): boolean {
+function isSystemJob(job: JobRecord): boolean {
   return (
-    job.jobType === "workspace.purge" &&
-    job.jobVersion === 1 &&
-    job.requiredCapability === "system.purge" &&
-    job.actorId === null
+    (job.jobType === "workspace.purge" &&
+      job.jobVersion === 1 &&
+      job.requiredCapability === "system.purge" &&
+      job.actorId === null) ||
+    (job.jobType === "recurrence.expand" &&
+      job.jobVersion === 1 &&
+      job.requiredCapability === "system.recurrence" &&
+      job.actorId === null)
   );
 }
 
