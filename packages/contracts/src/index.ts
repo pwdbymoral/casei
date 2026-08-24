@@ -396,10 +396,11 @@ export const insightWindowQuerySchema = z
     from: civilDateSchema.optional(),
     to: civilDateSchema.optional(),
   })
-  .refine(
-    (query) => !query.from || !query.to || query.from <= query.to,
-    "from must not be after to",
-  );
+  .refine((query) => {
+    const effectiveFrom = query.from ?? query.asOf;
+    const effectiveTo = query.to ?? query.asOf;
+    return !effectiveFrom || !effectiveTo || effectiveFrom <= effectiveTo;
+  }, "from must not be after to");
 export type InsightWindowQuery = z.infer<typeof insightWindowQuerySchema>;
 
 export const safeToSpendQuerySchema = z.object({

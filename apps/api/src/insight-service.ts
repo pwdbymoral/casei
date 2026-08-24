@@ -90,6 +90,17 @@ export function calculateSafeToSpendAmounts(input: SafeToSpendCalculationInput):
   return calculateSafeToSpend(input);
 }
 
+export function resolveInsightWindow(input: { asOf: string; from?: string; to?: string }): {
+  from: string;
+  to: string;
+} {
+  const parsed = insightWindowQuerySchema.parse(input);
+  return {
+    from: parsed.from ?? input.asOf,
+    to: parsed.to ?? input.asOf,
+  };
+}
+
 interface WorkspaceConfig {
   currency: string;
   timezone: string;
@@ -163,8 +174,7 @@ export class InsightService {
     return this.withScopedClient(scope, async (client) => {
       const config = await this.workspaceConfig(client, scope.workspaceId);
       const asOf = parsed.asOf ?? this.today(config.timezone);
-      const from = parsed.from ?? asOf;
-      const to = parsed.to ?? asOf;
+      const { from, to } = resolveInsightWindow({ ...parsed, asOf });
       return toFinancialReadModel(
         await this.loadSnapshot(client, scope.workspaceId, config, { asOf, from, to }),
       );
@@ -317,8 +327,8 @@ export class InsightService {
       [workspaceId, config.currency, dates.asOf],
     );
     const stock = await client.query<InsightNumericRow>(
-      `SELECT COUNT(*) FILTER (WHERE marked_missing = true) AS missing_count,
-              COUNT(*) FILTER (WHERE marked_missing = false AND quantity_milli IS NOT NULL AND minimum_milli IS NOT NULL AND quantity_milli < minimum_milli) AS low_count
+      `SELECT COUNT(*) FILTER (WHERE marked_missing = true OR quantity_milli = 0) AS missing_count,
+              COUNT(*) FILTER (WHERE quantity_milli > 0 AND minimum_milli IS NOT NULL AND quantity_milli <= minimum_milli) AS low_count
          FROM stock_product
         WHERE workspace_id = $1 AND archived = false`,
       [workspaceId],

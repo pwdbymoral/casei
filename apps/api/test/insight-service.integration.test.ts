@@ -59,7 +59,7 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
         plannedOutflow: { currency: "BRL", minor: "575" },
         overdueOutflow: { currency: "BRL", minor: "25" },
       });
-      expect(model.stock).toEqual({ missingCount: 1, lowCount: 1 });
+      expect(model.stock).toEqual({ missingCount: 2, lowCount: 2 });
     } finally {
       await fixture.close();
     }
@@ -236,6 +236,11 @@ async function createFixture(options: { withOpening?: boolean } = {}) {
     await pool.query(
       `INSERT INTO stock_product (workspace_id, name, name_normalized, quantity_milli, minimum_milli)
        VALUES ($1, 'Feijão', 'feijao', 1, 2)`,
+      [workspaceId],
+    );
+    await pool.query(
+      `INSERT INTO stock_product (workspace_id, name, name_normalized, quantity_milli, minimum_milli)
+       VALUES ($1, 'Leite zero', 'leite-zero', 0, 3), ($1, 'Sal', 'sal', 2, 2)`,
       [workspaceId],
     );
 
