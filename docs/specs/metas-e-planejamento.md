@@ -52,6 +52,17 @@ O indicador responde “quanto posso gastar sem consumir reservas ou deixar comp
 - O valor bruto negativo também é mostrado na explicação como déficit previsto; o CTA muda de `Ver quanto posso gastar` para `Revisar déficit`.
 - O indicador nunca é apresentado quando faltam saldo inicial e eventos suficientes; nesse caso, mostra passos objetivos para aumentar a confiança.
 
+No backend do MVP, a leitura reconstruível fica disponível em
+`GET /v1/workspaces/{workspaceId}/insights/financial` e o cálculo em
+`GET /v1/workspaces/{workspaceId}/insights/safe-to-spend`. Ambos aceitam datas civis
+determinísticas; o segundo aceita `horizonDays` entre 1 e 365. A resposta do valor
+seguro inclui `gross`, `safe`, `available`, `confidence` e o breakdown de saldo,
+entradas, saídas da carteira, faturas, reservas cobertas/descobertas e margem.
+Quando ainda não há evento publicado de abertura ou conferência de saldo para
+sustentar o saldo, `available` é `false` e os valores `safe`/`gross` são nulos,
+mesmo que o breakdown mostre os dados observados. A UI deve transformar a razão
+de baixa confiança em ação objetiva.
+
 ### Confiança
 
 - **Alta:** saldo foi conferido recentemente e todos os eventos variáveis do horizonte têm estimativa.

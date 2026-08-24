@@ -394,6 +394,25 @@ const civilDateSchema = z
 
 export { civilDateSchema };
 
+export const insightWindowQuerySchema = z
+  .object({
+    asOf: civilDateSchema.optional(),
+    from: civilDateSchema.optional(),
+    to: civilDateSchema.optional(),
+  })
+  .refine((query) => {
+    const effectiveFrom = query.from ?? query.asOf;
+    const effectiveTo = query.to ?? query.asOf;
+    return !effectiveFrom || !effectiveTo || effectiveFrom <= effectiveTo;
+  }, "from must not be after to");
+export type InsightWindowQuery = z.infer<typeof insightWindowQuerySchema>;
+
+export const safeToSpendQuerySchema = z.object({
+  asOf: civilDateSchema.optional(),
+  horizonDays: z.coerce.number().int().min(1).max(365).default(30),
+});
+export type SafeToSpendQuery = z.infer<typeof safeToSpendQuerySchema>;
+
 const minorAmountSchema = z
   .string()
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")

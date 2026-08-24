@@ -1,8 +1,10 @@
 import {
   createRecurrenceSchema,
   createTransactionSchema,
+  insightWindowQuerySchema,
   payStatementSchema,
   recurrenceTransitionSchema,
+  safeToSpendQuerySchema,
   settleTransactionSchema,
   transactionListQuerySchema,
   updateCreditCardSchema,
@@ -89,6 +91,23 @@ describe("finance contracts", () => {
 
     expect(() =>
       transactionListQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
+    ).toThrow();
+  });
+
+  it("parses deterministic insight windows and safe-to-spend horizons", () => {
+    expect(insightWindowQuerySchema.parse({ from: "2026-08-01", to: "2026-08-31" })).toEqual({
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+    expect(safeToSpendQuerySchema.parse({ horizonDays: "45" })).toEqual({ horizonDays: 45 });
+    expect(() =>
+      insightWindowQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
+    ).toThrow();
+    expect(() =>
+      insightWindowQuerySchema.parse({ asOf: "2026-09-01", from: "2026-09-02" }),
+    ).toThrow();
+    expect(() =>
+      insightWindowQuerySchema.parse({ asOf: "2026-09-01", to: "2026-08-31" }),
     ).toThrow();
   });
 

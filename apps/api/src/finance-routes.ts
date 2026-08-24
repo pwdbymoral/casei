@@ -12,10 +12,12 @@ import {
   goalReleaseSchema,
   goalSpendSchema,
   goalTransitionSchema,
+  insightWindowQuerySchema,
   paginationQuerySchema,
   payStatementSchema,
   recurrenceTransitionSchema,
   reopenStatementSchema,
+  safeToSpendQuerySchema,
   settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
@@ -45,10 +47,12 @@ import {
 import { parseJsonBody, parseOptionalJsonBody, parseQuery } from "./http/parsing.js";
 import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiEnv } from "./http/types.js";
+import type { InsightService } from "./insight-service.js";
 
 export interface FinanceRoutesOptions {
   service: FinanceService;
   goalService?: GoalService;
+  insightService?: InsightService;
   scopeMiddleware: MiddlewareHandler<ApiEnv>;
 }
 
@@ -56,6 +60,7 @@ export interface FinanceRoutesOptions {
 export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRoutesOptions): void {
   const { service } = options;
   const { goalService } = options;
+  const { insightService } = options;
   router.onError((error, context) => errorResponse(context, financeErrorToHttp(error)));
   for (const path of [
     "/workspaces/:workspaceId/transactions",
@@ -72,8 +77,24 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     "/workspaces/:workspaceId/installments/*",
     "/workspaces/:workspaceId/goals",
     "/workspaces/:workspaceId/goals/*",
+    "/workspaces/:workspaceId/insights",
+    "/workspaces/:workspaceId/insights/*",
   ]) {
     router.use(path, options.scopeMiddleware);
+  }
+
+  if (insightService) {
+    router.get("/workspaces/:workspaceId/insights/financial", async (context) => {
+      const query = parseQuery(context, insightWindowQuerySchema);
+      const model = await insightService.getFinancialReadModel(scopeOf(context), query);
+      return context.json(model);
+    });
+
+    router.get("/workspaces/:workspaceId/insights/safe-to-spend", async (context) => {
+      const query = parseQuery(context, safeToSpendQuerySchema);
+      const model = await insightService.getSafeToSpend(scopeOf(context), query);
+      return context.json(model);
+    });
   }
 
   if (goalService) {
