@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { clearStockOfflineSnapshot } from "@/lib/stock";
 import { cn } from "@/lib/utils";
 import {
   clearWorkspaceClientState,
@@ -142,6 +143,7 @@ function WorkspaceSelect({
     setError(null);
     try {
       const nextSession = await adapter.switchWorkspace(workspaceId);
+      if (session.activeWorkspaceId) clearStockOfflineSnapshot(session.activeWorkspaceId);
       onChanged(nextSession);
       // The active space is a cache boundary; restart at Hoje in its scope.
       router.replace("/app");
@@ -264,10 +266,11 @@ export function AppShell({
 
   useEffect(() => {
     if (forcedStatus !== "permission") return;
+    if (session?.activeWorkspaceId) clearStockOfflineSnapshot(session.activeWorkspaceId);
     clearWorkspaceClientState();
     setSession(null);
     setScopeRevoked(true);
-  }, [forcedStatus]);
+  }, [forcedStatus, session?.activeWorkspaceId]);
 
   const visibleStatus =
     forcedStatus && ["error", "permission", "offline"].includes(forcedStatus)
@@ -290,6 +293,7 @@ export function AppShell({
     try {
       if (onLogout) await onLogout();
       else await adapter.signOut?.();
+      if (session?.activeWorkspaceId) clearStockOfflineSnapshot(session.activeWorkspaceId);
       clearWorkspaceClientState();
       setSession(null);
       router.replace("/");

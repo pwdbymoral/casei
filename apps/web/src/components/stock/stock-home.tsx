@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import {
   canWriteStock,
   type StockAdapter,
+  StockAdapterError,
   type StockMovement,
   type StockMovementKind,
   type StockProduct,
@@ -41,7 +42,6 @@ export function StockHome() {
     () => stockAdapterForEnvironment({ fixtures: fixtureMode }),
     [fixtureMode],
   );
-  const writable = canWriteStock(role);
   const [products, setProducts] = useState<StockProduct[]>([]);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -60,6 +60,7 @@ export function StockHome() {
   const [historyProduct, setHistoryProduct] = useState<StockProduct | null>(null);
   const [history, setHistory] = useState<StockMovement[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const writable = canWriteStock(role) && status !== "offline";
   const generation = useRef(0);
   const mutationToken = useRef(0);
 
@@ -74,11 +75,21 @@ export function StockHome() {
       });
       if (current !== generation.current) return;
       setProducts(next);
-      setStatus(next.length ? "success" : "empty");
+      setStatus(
+        adapter.lastReadWasCached || globalThis.navigator?.onLine === false
+          ? "offline"
+          : next.length
+            ? "success"
+            : "empty",
+      );
     } catch (cause) {
       if (current !== generation.current) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar o estoque.");
-      setStatus("error");
+      setStatus(
+        cause instanceof StockAdapterError && cause.code === "offline_required"
+          ? "offline"
+          : "error",
+      );
     }
   }, [adapter, query, showArchived, workspaceId]);
 
@@ -92,19 +103,23 @@ export function StockHome() {
 
   async function mutate(
     key: string,
-    operation: () => Promise<StockProduct | { product: StockProduct }>,
+    operation: (idempotencyKey: string) => Promise<StockProduct | { product: StockProduct }>,
   ) {
     const requestGeneration = generation.current;
     const currentMutation = ++mutationToken.current;
+    const operationKey = `stock-${globalThis.crypto.randomUUID()}`;
     setBusy(key);
     setError(null);
     try {
-      await operation();
+      await operation(operationKey);
       if (requestGeneration === generation.current && currentMutation === mutationToken.current)
         await load();
     } catch (cause) {
-      if (requestGeneration === generation.current && currentMutation === mutationToken.current)
+      if (requestGeneration === generation.current && currentMutation === mutationToken.current) {
+        if (cause instanceof StockAdapterError && cause.code === "offline_required")
+          setStatus("offline");
         setError(cause instanceof Error ? cause.message : "Não foi possível atualizar o estoque.");
+      }
     } finally {
       if (currentMutation === mutationToken.current) setBusy(null);
     }
@@ -113,13 +128,17 @@ export function StockHome() {
   async function createProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newName.trim()) return;
-    await mutate("new", async () => {
-      const product = await adapter.createProduct(workspaceId, {
-        name: newName,
-        unit: newUnit,
-        quantity: newQuantity || null,
-        minimum: newMinimum || null,
-      });
+    await mutate("new", async (operationKey) => {
+      const product = await adapter.createProduct(
+        workspaceId,
+        {
+          name: newName,
+          unit: newUnit,
+          quantity: newQuantity || null,
+          minimum: newMinimum || null,
+        },
+        operationKey,
+      );
       setNewName("");
       setNewQuantity("");
       setNewMinimum("");
@@ -131,8 +150,8 @@ export function StockHome() {
 
   async function quick(product: StockProduct, kind: "entry" | "consume" | "correction") {
     const quantity = kind === "correction" ? amount : amount || "1";
-    await mutate(product.id, () =>
-      adapter.createMovement(workspaceId, product, { kind, quantity }),
+    await mutate(product.id, (operationKey) =>
+      adapter.createMovement(workspaceId, product, { kind, quantity }, operationKey),
     );
   }
 
@@ -318,7 +337,14 @@ export function StockHome() {
           }
         />
       ) : null}
-      {status === "success" ? (
+      {status === "offline" ? (
+        <AsyncState
+          status="offline"
+          title="Você está offline"
+          description="Mostrando o último snapshot salvo. Adicionar, movimentar ou arquivar exige conexão."
+        />
+      ) : null}
+      {status === "success" || status === "offline" ? (
         <div className="grid gap-4 md:grid-cols-2">
           {visibleProducts.map((product) => (
             <StockProductCard
@@ -329,15 +355,15 @@ export function StockHome() {
               amount={amount}
               onMove={(kind) => void quick(product, kind)}
               onMissing={() =>
-                void mutate(product.id, () =>
-                  adapter.markMissing(workspaceId, product, !product.markedMissing),
+                void mutate(product.id, (operationKey) =>
+                  adapter.markMissing(workspaceId, product, !product.markedMissing, operationKey),
                 )
               }
               onArchive={() =>
-                void mutate(product.id, () =>
+                void mutate(product.id, (operationKey) =>
                   product.archived
-                    ? adapter.restore(workspaceId, product)
-                    : adapter.archive(workspaceId, product),
+                    ? adapter.restore(workspaceId, product, operationKey)
+                    : adapter.archive(workspaceId, product, operationKey),
                 )
               }
               onHistory={() => void openHistory(product)}

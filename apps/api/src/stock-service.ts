@@ -130,59 +130,61 @@ export class StockService {
     input: unknown,
     idempotencyKey: string,
   ): Promise<{ replayed: boolean; product: StockProductView }> {
-    assertStockCapability(scope);
     const parsed = createStockProductSchema.parse(input);
     const normalized = normalizeProductName(parsed.name);
     if (!normalized.display) throw new StockConflictError("O nome do produto é obrigatório.");
     const values = normalizeStockInput(parsed);
-    const result = await this.withUnitOfWork(scope, async ({ client }) =>
-      executeIdempotent(client, {
-        scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products`,
-        key: idempotencyKey,
-        request: parsed,
-        execute: async () => {
-          let product: StockProductView;
-          try {
-            const result = await client.query<StockProductRow>(
-              `INSERT INTO stock_product
+    const result = await this.withUnitOfWork(
+      scope,
+      async ({ client }) =>
+        executeIdempotent(client, {
+          scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products`,
+          key: idempotencyKey,
+          request: parsed,
+          execute: async () => {
+            let product: StockProductView;
+            try {
+              const result = await client.query<StockProductRow>(
+                `INSERT INTO stock_product
                 (workspace_id, name, name_normalized, unit, unit_label, quantity_milli,
                  minimum_milli, category, location, note)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                RETURNING id, workspace_id, name, unit, unit_label, quantity_milli,
                          minimum_milli, marked_missing, category, location, note, archived, version`,
-              [
-                scope.workspaceId,
-                normalized.display,
-                normalized.key,
-                values.unit,
-                values.unitLabel,
-                values.quantityMilli,
-                values.minimumMilli,
-                values.category,
-                values.location,
-                values.note,
-              ],
-            );
-            const row = result.rows[0];
-            if (!row) throw new Error("Produto não foi criado.");
-            product = toProductView(row);
-            if (values.quantityMilli !== null) {
-              await client.query(
-                `INSERT INTO stock_movement
+                [
+                  scope.workspaceId,
+                  normalized.display,
+                  normalized.key,
+                  values.unit,
+                  values.unitLabel,
+                  values.quantityMilli,
+                  values.minimumMilli,
+                  values.category,
+                  values.location,
+                  values.note,
+                ],
+              );
+              const row = result.rows[0];
+              if (!row) throw new Error("Produto não foi criado.");
+              product = toProductView(row);
+              if (values.quantityMilli !== null) {
+                await client.query(
+                  `INSERT INTO stock_movement
                   (workspace_id, product_id, kind, quantity_milli, before_milli, after_milli, author_id)
                  VALUES ($1, $2, 'entry', $3, NULL, $3, $4)`,
-                [scope.workspaceId, row.id, values.quantityMilli, scope.actorId],
-              );
+                  [scope.workspaceId, row.id, values.quantityMilli, scope.actorId],
+                );
+              }
+            } catch (error) {
+              if (isUniqueViolation(error)) {
+                throw new StockConflictError("Já existe um produto ativo com esse nome.");
+              }
+              throw error;
             }
-          } catch (error) {
-            if (isUniqueViolation(error)) {
-              throw new StockConflictError("Já existe um produto ativo com esse nome.");
-            }
-            throw error;
-          }
-          return { statusCode: 201, response: product as unknown as JsonValue };
-        },
-      }),
+            return { statusCode: 201, response: product as unknown as JsonValue };
+          },
+        }),
+      "write",
     );
     return { replayed: result.replayed, product: result.response as unknown as StockProductView };
   }
@@ -231,54 +233,57 @@ export class StockService {
     input: unknown,
     expectedVersion: number,
   ): Promise<StockProductView> {
-    assertStockCapability(scope);
     const parsed = updateStockProductSchema.parse(input);
     const normalized = normalizeProductName(parsed.name);
     const values = normalizeUpdateInput(parsed);
-    return this.withUnitOfWork(scope, async ({ client }) => {
-      const current = await lockProduct(client, scope, productId);
-      assertExpectedVersion(current.version, expectedVersion);
-      if (current.unit !== values.unit) {
-        const movement = await client.query<{ id: string }>(
-          "SELECT id FROM stock_movement WHERE workspace_id = $1 AND product_id = $2 LIMIT 1",
-          [scope.workspaceId, productId],
-        );
-        if (movement.rowCount) {
-          throw new StockConflictError("A unidade não pode mudar depois do primeiro movimento.");
+    return this.withUnitOfWork(
+      scope,
+      async ({ client }) => {
+        const current = await lockProduct(client, scope, productId);
+        assertExpectedVersion(current.version, expectedVersion);
+        if (current.unit !== values.unit) {
+          const movement = await client.query<{ id: string }>(
+            "SELECT id FROM stock_movement WHERE workspace_id = $1 AND product_id = $2 LIMIT 1",
+            [scope.workspaceId, productId],
+          );
+          if (movement.rowCount) {
+            throw new StockConflictError("A unidade não pode mudar depois do primeiro movimento.");
+          }
         }
-      }
-      try {
-        const result = await client.query<StockProductRow>(
-          `UPDATE stock_product
+        try {
+          const result = await client.query<StockProductRow>(
+            `UPDATE stock_product
               SET name = $3, name_normalized = $4, unit = $5, unit_label = $6,
                   minimum_milli = $7, category = $8, location = $9, note = $10,
                   version = version + 1, updated_at = now()
             WHERE workspace_id = $1 AND id = $2 AND version = $11
             RETURNING id, workspace_id, name, unit, unit_label, quantity_milli, minimum_milli,
                       marked_missing, category, location, note, archived, version`,
-          [
-            scope.workspaceId,
-            productId,
-            normalized.display,
-            normalized.key,
-            values.unit,
-            values.unitLabel,
-            values.minimumMilli,
-            values.category,
-            values.location,
-            values.note,
-            expectedVersion,
-          ],
-        );
-        const row = result.rows[0];
-        if (!row) throw new StockVersionConflictError(current.version);
-        return toProductView(row);
-      } catch (error) {
-        if (isUniqueViolation(error))
-          throw new StockConflictError("Já existe um produto ativo com esse nome.");
-        throw error;
-      }
-    });
+            [
+              scope.workspaceId,
+              productId,
+              normalized.display,
+              normalized.key,
+              values.unit,
+              values.unitLabel,
+              values.minimumMilli,
+              values.category,
+              values.location,
+              values.note,
+              expectedVersion,
+            ],
+          );
+          const row = result.rows[0];
+          if (!row) throw new StockVersionConflictError(current.version);
+          return toProductView(row);
+        } catch (error) {
+          if (isUniqueViolation(error))
+            throw new StockConflictError("Já existe um produto ativo com esse nome.");
+          throw error;
+        }
+      },
+      "write",
+    );
   }
 
   async setArchived(
@@ -288,53 +293,55 @@ export class StockService {
     idempotencyKey: string,
     expectedVersion: number,
   ): Promise<{ replayed: boolean; product: StockProductView }> {
-    assertStockCapability(scope);
-    const result = await this.withUnitOfWork(scope, async ({ client }) =>
-      executeIdempotent(client, {
-        scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products/${productId}/${archived ? "archive" : "restore"}`,
-        key: idempotencyKey,
-        request: { productId, archived, expectedVersion },
-        execute: async () => {
-          const current = await lockProduct(client, scope, productId);
-          assertExpectedVersion(current.version, expectedVersion);
-          if (!archived) {
-            const collision = await client.query<{ id: string }>(
-              `SELECT id FROM stock_product
+    const result = await this.withUnitOfWork(
+      scope,
+      async ({ client }) =>
+        executeIdempotent(client, {
+          scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products/${productId}/${archived ? "archive" : "restore"}`,
+          key: idempotencyKey,
+          request: { productId, archived, expectedVersion },
+          execute: async () => {
+            const current = await lockProduct(client, scope, productId);
+            assertExpectedVersion(current.version, expectedVersion);
+            if (!archived) {
+              const collision = await client.query<{ id: string }>(
+                `SELECT id FROM stock_product
                 WHERE workspace_id = $1 AND name_normalized = $2 AND archived = false AND id <> $3
                 LIMIT 1`,
-              [
-                scope.workspaceId,
-                current.name
-                  .trim()
-                  .replace(/\s+/gu, " ")
-                  .normalize("NFD")
-                  .replace(/\p{Diacritic}/gu, "")
-                  .toLocaleLowerCase("pt-BR"),
-                productId,
-              ],
-            );
-            if (collision.rowCount)
-              throw new StockConflictError("Já existe um produto ativo com esse nome.");
-          }
-          let updated: { rows: StockProductRow[] };
-          try {
-            updated = await client.query<StockProductRow>(
-              `UPDATE stock_product SET archived = $3, version = version + 1, updated_at = now()
+                [
+                  scope.workspaceId,
+                  current.name
+                    .trim()
+                    .replace(/\s+/gu, " ")
+                    .normalize("NFD")
+                    .replace(/\p{Diacritic}/gu, "")
+                    .toLocaleLowerCase("pt-BR"),
+                  productId,
+                ],
+              );
+              if (collision.rowCount)
+                throw new StockConflictError("Já existe um produto ativo com esse nome.");
+            }
+            let updated: { rows: StockProductRow[] };
+            try {
+              updated = await client.query<StockProductRow>(
+                `UPDATE stock_product SET archived = $3, version = version + 1, updated_at = now()
                 WHERE workspace_id = $1 AND id = $2 AND version = $4
                 RETURNING id, workspace_id, name, unit, unit_label, quantity_milli, minimum_milli,
                           marked_missing, category, location, note, archived, version`,
-              [scope.workspaceId, productId, archived, expectedVersion],
-            );
-          } catch (error) {
-            if (isUniqueViolation(error))
-              throw new StockConflictError("Já existe um produto ativo com esse nome.");
-            throw error;
-          }
-          const row = updated.rows[0];
-          if (!row) throw new StockVersionConflictError(current.version);
-          return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
-        },
-      }),
+                [scope.workspaceId, productId, archived, expectedVersion],
+              );
+            } catch (error) {
+              if (isUniqueViolation(error))
+                throw new StockConflictError("Já existe um produto ativo com esse nome.");
+              throw error;
+            }
+            const row = updated.rows[0];
+            if (!row) throw new StockVersionConflictError(current.version);
+            return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
+          },
+        }),
+      "write",
     );
     return { replayed: result.replayed, product: result.response as unknown as StockProductView };
   }
@@ -346,7 +353,6 @@ export class StockService {
     idempotencyKey: string,
     expectedVersion: number,
   ): Promise<{ replayed: boolean; product: StockProductView; movement: StockMovementView }> {
-    assertStockCapability(scope);
     const parsed = createStockMovementSchema.parse(input);
     if (
       parsed.kind !== "correction" &&
@@ -354,69 +360,72 @@ export class StockService {
     ) {
       throw new StockConflictError("A quantidade precisa ser maior que zero.");
     }
-    const result = await this.withUnitOfWork(scope, async ({ client }) =>
-      executeIdempotent(client, {
-        scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products/${productId}/movements`,
-        key: idempotencyKey,
-        request: { productId, ...parsed, expectedVersion },
-        execute: async () => {
-          const current = await lockProduct(client, scope, productId);
-          assertExpectedVersion(current.version, expectedVersion);
-          if (current.archived)
-            throw new StockConflictError("Produto arquivado não aceita movimentações.");
-          const quantityMilli = parseStockQuantity(parsed.quantity, {
-            allowZero: parsed.kind === "correction",
-          });
-          if (
-            current.quantity_milli === null &&
-            parsed.kind !== "entry" &&
-            parsed.kind !== "correction"
-          ) {
-            throw new StockConflictError("Defina uma quantidade antes de consumir ou descartar.");
-          }
-          const afterMilli = stockMovementAfter({
-            kind: parsed.kind,
-            beforeMilli: normalizeStockValue(current.quantity_milli),
-            quantityMilli,
-          });
-          const movementResult = await client.query<StockMovementRow>(
-            `INSERT INTO stock_movement
+    const result = await this.withUnitOfWork(
+      scope,
+      async ({ client }) =>
+        executeIdempotent(client, {
+          scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products/${productId}/movements`,
+          key: idempotencyKey,
+          request: { productId, ...parsed, expectedVersion },
+          execute: async () => {
+            const current = await lockProduct(client, scope, productId);
+            assertExpectedVersion(current.version, expectedVersion);
+            if (current.archived)
+              throw new StockConflictError("Produto arquivado não aceita movimentações.");
+            const quantityMilli = parseStockQuantity(parsed.quantity, {
+              allowZero: parsed.kind === "correction",
+            });
+            if (
+              current.quantity_milli === null &&
+              parsed.kind !== "entry" &&
+              parsed.kind !== "correction"
+            ) {
+              throw new StockConflictError("Defina uma quantidade antes de consumir ou descartar.");
+            }
+            const afterMilli = stockMovementAfter({
+              kind: parsed.kind,
+              beforeMilli: normalizeStockValue(current.quantity_milli),
+              quantityMilli,
+            });
+            const movementResult = await client.query<StockMovementRow>(
+              `INSERT INTO stock_movement
               (workspace_id, product_id, kind, quantity_milli, before_milli, after_milli, reason, author_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING id, workspace_id, product_id, kind, quantity_milli, before_milli,
                        after_milli, reason, author_id, occurred_at`,
-            [
-              scope.workspaceId,
-              productId,
-              parsed.kind,
-              quantityMilli,
-              normalizeStockValue(current.quantity_milli),
-              afterMilli,
-              parsed.reason ?? null,
-              scope.actorId,
-            ],
-          );
-          const movementRow = movementResult.rows[0];
-          if (!movementRow) throw new Error("Movimentação não foi criada.");
-          const productResult = await client.query<StockProductRow>(
-            `UPDATE stock_product SET quantity_milli = $3, marked_missing = false,
+              [
+                scope.workspaceId,
+                productId,
+                parsed.kind,
+                quantityMilli,
+                normalizeStockValue(current.quantity_milli),
+                afterMilli,
+                parsed.reason ?? null,
+                scope.actorId,
+              ],
+            );
+            const movementRow = movementResult.rows[0];
+            if (!movementRow) throw new Error("Movimentação não foi criada.");
+            const productResult = await client.query<StockProductRow>(
+              `UPDATE stock_product SET quantity_milli = $3, marked_missing = false,
                 version = version + 1, updated_at = now()
               WHERE workspace_id = $1 AND id = $2 AND version = $4
               RETURNING id, workspace_id, name, unit, unit_label, quantity_milli, minimum_milli,
                         marked_missing, category, location, note, archived, version`,
-            [scope.workspaceId, productId, afterMilli, expectedVersion],
-          );
-          const productRow = productResult.rows[0];
-          if (!productRow) throw new StockVersionConflictError(current.version);
-          return {
-            statusCode: 201,
-            response: {
-              product: toProductView(productRow),
-              movement: toMovementView(movementRow),
-            } as unknown as JsonValue,
-          };
-        },
-      }),
+              [scope.workspaceId, productId, afterMilli, expectedVersion],
+            );
+            const productRow = productResult.rows[0];
+            if (!productRow) throw new StockVersionConflictError(current.version);
+            return {
+              statusCode: 201,
+              response: {
+                product: toProductView(productRow),
+                movement: toMovementView(movementRow),
+              } as unknown as JsonValue,
+            };
+          },
+        }),
+      "write",
     );
     const response = result.response as unknown as {
       product: StockProductView;
@@ -432,28 +441,30 @@ export class StockService {
     idempotencyKey: string,
     expectedVersion: number,
   ): Promise<{ replayed: boolean; product: StockProductView }> {
-    assertStockCapability(scope);
     const parsed = markStockMissingSchema.parse(input);
-    const result = await this.withUnitOfWork(scope, async ({ client }) =>
-      executeIdempotent(client, {
-        scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products/${productId}/missing`,
-        key: idempotencyKey,
-        request: { productId, ...parsed, expectedVersion },
-        execute: async () => {
-          const current = await lockProduct(client, scope, productId);
-          assertExpectedVersion(current.version, expectedVersion);
-          const updated = await client.query<StockProductRow>(
-            `UPDATE stock_product SET marked_missing = $3, version = version + 1, updated_at = now()
+    const result = await this.withUnitOfWork(
+      scope,
+      async ({ client }) =>
+        executeIdempotent(client, {
+          scope: `${scope.actorId}:${scope.workspaceId}:POST:/stock/products/${productId}/missing`,
+          key: idempotencyKey,
+          request: { productId, ...parsed, expectedVersion },
+          execute: async () => {
+            const current = await lockProduct(client, scope, productId);
+            assertExpectedVersion(current.version, expectedVersion);
+            const updated = await client.query<StockProductRow>(
+              `UPDATE stock_product SET marked_missing = $3, version = version + 1, updated_at = now()
               WHERE workspace_id = $1 AND id = $2 AND version = $4
               RETURNING id, workspace_id, name, unit, unit_label, quantity_milli, minimum_milli,
                         marked_missing, category, location, note, archived, version`,
-            [scope.workspaceId, productId, parsed.missing, expectedVersion],
-          );
-          const row = updated.rows[0];
-          if (!row) throw new StockVersionConflictError(current.version);
-          return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
-        },
-      }),
+              [scope.workspaceId, productId, parsed.missing, expectedVersion],
+            );
+            const row = updated.rows[0];
+            if (!row) throw new StockVersionConflictError(current.version);
+            return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
+          },
+        }),
+      "write",
     );
     return { replayed: result.replayed, product: result.response as unknown as StockProductView };
   }
@@ -483,6 +494,7 @@ export class StockService {
   private withUnitOfWork<T>(
     scope: StockScope,
     callback: (context: { client: PoolClient }) => Promise<T>,
+    capability: "read" | "write" = "read",
   ) {
     return withUnitOfWork(
       this.pool,
@@ -492,13 +504,36 @@ export class StockService {
         correlationId: scope.correlationId,
         applicationRole: this.applicationRole,
       },
-      callback,
+      async ({ client }) => {
+        const membership = await assertStockMembership(client, scope);
+        if (capability === "write" && membership.role === "viewer") {
+          throw new StockPermissionError();
+        }
+        return callback({ client });
+      },
     );
   }
 }
 
-function assertStockCapability(scope: StockScope): void {
-  if (scope.role === "viewer") throw new StockPermissionError();
+async function assertStockMembership(
+  client: PoolClient,
+  scope: StockScope,
+): Promise<{ role: StockScope["role"] }> {
+  const workspace = await client.query<{ status: string }>(
+    `SELECT status FROM workspace WHERE id = $1 FOR UPDATE`,
+    [scope.workspaceId],
+  );
+  if (workspace.rows[0]?.status !== "active") throw new StockPermissionError();
+  const result = await client.query<{ role: StockScope["role"]; status: string }>(
+    `SELECT role, status
+       FROM membership
+      WHERE workspace_id = $1 AND user_id = $2
+      FOR UPDATE`,
+    [scope.workspaceId, scope.actorId],
+  );
+  const membership = result.rows[0];
+  if (membership?.status !== "active") throw new StockPermissionError();
+  return membership;
 }
 
 function assertExpectedVersion(actual: number, expected: number): void {

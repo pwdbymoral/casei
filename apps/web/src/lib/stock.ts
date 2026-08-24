@@ -61,7 +61,12 @@ export interface StockAdapter {
     workspaceId: string,
     options?: { query?: string; includeArchived?: boolean },
   ): Promise<StockProduct[]>;
-  createProduct(workspaceId: string, input: CreateStockProductInput): Promise<StockProduct>;
+  /** One key belongs to one logical operation and is reused by its retries. */
+  createProduct(
+    workspaceId: string,
+    input: CreateStockProductInput,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
   updateProduct(
     workspaceId: string,
     product: StockProduct,
@@ -71,18 +76,36 @@ export interface StockAdapter {
     workspaceId: string,
     product: StockProduct,
     input: { kind: StockMovementKind; quantity: string; reason?: string | null },
+    idempotencyKey?: string,
   ): Promise<{ product: StockProduct; movement: StockMovement }>;
-  markMissing(workspaceId: string, product: StockProduct, missing: boolean): Promise<StockProduct>;
-  archive(workspaceId: string, product: StockProduct): Promise<StockProduct>;
-  restore(workspaceId: string, product: StockProduct): Promise<StockProduct>;
+  markMissing(
+    workspaceId: string,
+    product: StockProduct,
+    missing: boolean,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
+  archive(
+    workspaceId: string,
+    product: StockProduct,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
+  restore(
+    workspaceId: string,
+    product: StockProduct,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
   listMovements(workspaceId: string, productId: string): Promise<StockMovement[]>;
+  readonly lastReadWasCached?: boolean;
 }
+
+export type StockAdapterErrorCode = "request_failed" | "offline_required";
 
 export class StockAdapterError extends Error {
   constructor(
     message: string,
     readonly status?: number,
     readonly currentVersion?: number,
+    readonly code: StockAdapterErrorCode = "request_failed",
   ) {
     super(message);
     this.name = "StockAdapterError";
@@ -109,20 +132,106 @@ export const unauthenticatedStockAdapter: StockAdapter = {
 
 type JsonPage<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
 
+const stockSnapshotPrefix = "casei:stock:snapshot:v1:";
+
+function stockStorage(): Storage | null {
+  try {
+    return typeof globalThis.localStorage === "undefined" ? null : globalThis.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function stockSnapshotKey(
+  workspaceId: string,
+  options: { query?: string; includeArchived?: boolean },
+): string {
+  return `${stockSnapshotPrefix}${workspaceId}:${encodeURIComponent(
+    JSON.stringify({
+      query: options.query?.trim() ?? "",
+      includeArchived: Boolean(options.includeArchived),
+    }),
+  )}`;
+}
+
+function readStockSnapshot(
+  workspaceId: string,
+  options: { query?: string; includeArchived?: boolean },
+): StockProduct[] | null {
+  const store = stockStorage();
+  if (!store) return null;
+  try {
+    const value = store.getItem(stockSnapshotKey(workspaceId, options));
+    if (!value) return null;
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? (parsed as StockProduct[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStockSnapshot(
+  workspaceId: string,
+  options: { query?: string; includeArchived?: boolean },
+  products: StockProduct[],
+): void {
+  try {
+    stockStorage()?.setItem(stockSnapshotKey(workspaceId, options), JSON.stringify(products));
+  } catch {
+    // Storage is an enhancement; quota/security errors must not break online reads.
+  }
+}
+
+/** Removes private snapshots when the authenticated workspace ends. */
+export function clearStockOfflineSnapshot(workspaceId: string): void {
+  const store = stockStorage();
+  if (!store) return;
+  const prefix = `${stockSnapshotPrefix}${workspaceId}:`;
+  try {
+    for (let index = store.length - 1; index >= 0; index -= 1) {
+      const key = store.key(index);
+      if (key?.startsWith(prefix)) store.removeItem(key);
+    }
+  } catch {
+    // A storage implementation may become unavailable during logout/navigation.
+  }
+}
+
 export function createHttpStockAdapter(
   options: { baseUrl?: string; fetch?: typeof globalThis.fetch } = {},
 ): StockAdapter {
   const request = options.fetch ?? globalThis.fetch;
   const baseUrl = options.baseUrl ?? "";
+  let lastReadWasCached = false;
+
   async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (init.body) headers.set("Content-Type", "application/json");
-    const response = await request(`${baseUrl}/v1${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-    });
+    const method = (init.method ?? "GET").toUpperCase();
+    if (method !== "GET" && globalThis.navigator?.onLine === false) {
+      throw new StockAdapterError(
+        "Esta ação precisa de conexão.",
+        undefined,
+        undefined,
+        "offline_required",
+      );
+    }
+    let response: Response;
+    try {
+      response = await request(`${baseUrl}/v1${path}`, {
+        ...init,
+        headers,
+        credentials: "include",
+      });
+    } catch {
+      throw new StockAdapterError(
+        "Esta ação precisa de conexão.",
+        undefined,
+        undefined,
+        "offline_required",
+      );
+    }
     const payload = (await response.json().catch(() => null)) as
       | T
       | { error?: { message?: string; currentVersion?: number } }
@@ -142,18 +251,38 @@ export function createHttpStockAdapter(
   const path = (workspaceId: string, suffix = "") =>
     `/workspaces/${encodeURIComponent(workspaceId)}/stock/products${suffix}`;
   return {
+    get lastReadWasCached() {
+      return lastReadWasCached;
+    },
     async listProducts(workspaceId, options = {}) {
       const params = new URLSearchParams();
       if (options.query) params.set("query", options.query);
       if (options.includeArchived) params.set("includeArchived", "true");
       const query = params.toString();
-      return (await call<JsonPage<StockProduct>>(`${path(workspaceId)}${query ? `?${query}` : ""}`))
-        .items;
+      try {
+        const products = (
+          await call<JsonPage<StockProduct>>(`${path(workspaceId)}${query ? `?${query}` : ""}`)
+        ).items;
+        writeStockSnapshot(workspaceId, options, products);
+        lastReadWasCached = false;
+        return products;
+      } catch (error) {
+        const cached =
+          error instanceof StockAdapterError && error.code === "offline_required"
+            ? readStockSnapshot(workspaceId, options)
+            : null;
+        if (cached) {
+          lastReadWasCached = true;
+          return cached;
+        }
+        lastReadWasCached = false;
+        throw error;
+      }
     },
-    createProduct: (workspaceId, input) =>
+    createProduct: (workspaceId, input, commandKey) =>
       call<StockProduct>(path(workspaceId), {
         method: "POST",
-        headers: { "Idempotency-Key": key() },
+        headers: { "Idempotency-Key": commandKey ?? key() },
         body: JSON.stringify(input),
       }),
     updateProduct: (workspaceId, product, input) =>
@@ -162,31 +291,43 @@ export function createHttpStockAdapter(
         headers: { "If-Match": `"v${product.version}"` },
         body: JSON.stringify(input),
       }),
-    async createMovement(workspaceId, product, input) {
+    async createMovement(workspaceId, product, input, commandKey) {
       return call<{ product: StockProduct; movement: StockMovement }>(
         path(workspaceId, `/${product.id}/movements`),
         {
           method: "POST",
-          headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+          headers: {
+            "Idempotency-Key": commandKey ?? key(),
+            "If-Match": `"v${product.version}"`,
+          },
           body: JSON.stringify(input),
         },
       );
     },
-    markMissing: (workspaceId, product, missing) =>
+    markMissing: (workspaceId, product, missing, commandKey) =>
       call<StockProduct>(path(workspaceId, `/${product.id}/missing`), {
         method: "POST",
-        headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+        headers: {
+          "Idempotency-Key": commandKey ?? key(),
+          "If-Match": `"v${product.version}"`,
+        },
         body: JSON.stringify({ missing }),
       }),
-    archive: (workspaceId, product) =>
+    archive: (workspaceId, product, commandKey) =>
       call<StockProduct>(path(workspaceId, `/${product.id}/archive`), {
         method: "POST",
-        headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+        headers: {
+          "Idempotency-Key": commandKey ?? key(),
+          "If-Match": `"v${product.version}"`,
+        },
       }),
-    restore: (workspaceId, product) =>
+    restore: (workspaceId, product, commandKey) =>
       call<StockProduct>(path(workspaceId, `/${product.id}/restore`), {
         method: "POST",
-        headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+        headers: {
+          "Idempotency-Key": commandKey ?? key(),
+          "If-Match": `"v${product.version}"`,
+        },
       }),
     async listMovements(workspaceId, productId) {
       return (await call<JsonPage<StockMovement>>(path(workspaceId, `/${productId}/movements`)))
