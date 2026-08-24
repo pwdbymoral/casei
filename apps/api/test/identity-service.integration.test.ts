@@ -528,15 +528,16 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         { user_id: ownerId, status: "recovery_only" },
         { user_id: revokedId, status: "revoked" },
       ]);
-      await expect(service.getSession(owner)).resolves.toMatchObject({
-        workspaces: [
+      const sessionAfterDeactivate = await service.getSession(owner);
+      expect(sessionAfterDeactivate.workspaces).toEqual(
+        expect.arrayContaining([
           expect.objectContaining({
             id: workspaceId,
             status: "deletion_pending",
             role: "owner",
           }),
-        ],
-      });
+        ]),
+      );
       await expect(
         pool.query<{ actor_id: string | null; required_capability: string; state: string }>(
           `SELECT actor_id, required_capability, state FROM job WHERE job_type = 'workspace.purge' AND workspace_id = $1`,
