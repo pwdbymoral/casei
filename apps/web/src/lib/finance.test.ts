@@ -4,6 +4,7 @@ import {
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
   createRequestGuard,
+  statementItemAmountPrefix,
 } from "./finance";
 
 describe("finance adapter", () => {
@@ -55,6 +56,50 @@ describe("finance adapter", () => {
     });
     const after = await adapter.listTransactions("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201");
     expect(after).toHaveLength(before.length + 1);
+  });
+
+  it("keeps statement pagination metadata and loads a second page over fifty items", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const cardId = "019b5d9e-3c12-7a10-8d47-7b5b5dd7a210";
+    const statementId = "019b5d9e-3c12-7a11-8d47-7b5b5dd7a211";
+    for (let index = 0; index < 51; index += 1) {
+      await adapter.createTransaction(workspaceId, {
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+        cardId,
+      });
+    }
+
+    const first = await adapter.listStatementItems(workspaceId, statementId, { limit: 50 });
+    expect(first.items).toHaveLength(50);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBe("fixture:50");
+
+    const second = await adapter.listStatementItems(workspaceId, statementId, {
+      limit: 50,
+      cursor: first.nextCursor,
+    });
+    expect(second.items).toHaveLength(1);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("maps the HTTP statement page without dropping its cursor", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      expect(input).toBe(
+        "/v1/workspaces/workspace/statements/statement/items?cursor=cursor-1&limit=2",
+      );
+      return Response.json({
+        items: [],
+        page: { nextCursor: "cursor-2", hasMore: true },
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+
+    await expect(
+      adapter.listStatementItems("workspace", "statement", { cursor: "cursor-1", limit: 2 }),
+    ).resolves.toEqual({ items: [], nextCursor: "cursor-2", hasMore: true });
   });
 
   it("uses version preconditions for explicit statement reopening", async () => {
@@ -138,5 +183,12 @@ describe("finance adapter", () => {
     expect(guard.isCurrent(second)).toBe(true);
     guard.invalidate();
     expect(guard.isCurrent(second)).toBe(false);
+  });
+
+  it("does not give canceled composition items a misleading financial sign", () => {
+    expect(statementItemAmountPrefix({ type: "purchase", state: "canceled" })).toBe("Cancelada · ");
+    expect(statementItemAmountPrefix({ type: "payment", state: "canceled" })).toBe("Cancelada · ");
+    expect(statementItemAmountPrefix({ type: "purchase", state: "posted" })).toBe("+");
+    expect(statementItemAmountPrefix({ type: "payment", state: "posted" })).toBe("−");
   });
 });

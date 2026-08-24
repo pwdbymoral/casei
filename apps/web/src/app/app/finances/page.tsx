@@ -37,6 +37,7 @@ import {
   financeAdapterForEnvironment,
   type Statement,
   type StatementItem,
+  statementItemAmountPrefix,
   type Transaction,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
@@ -109,7 +110,10 @@ function FinanceDashboard({
   const [busyStatementId, setBusyStatementId] = useState<string | null>(null);
   const [viewingStatement, setViewingStatement] = useState<Statement | null>(null);
   const [statementItems, setStatementItems] = useState<StatementItem[]>([]);
+  const [statementItemsNextCursor, setStatementItemsNextCursor] = useState<string | null>(null);
+  const [statementItemsHasMore, setStatementItemsHasMore] = useState(false);
   const [loadingStatementItems, setLoadingStatementItems] = useState(false);
+  const [loadingMoreStatementItems, setLoadingMoreStatementItems] = useState(false);
   const [pendingStatementAction, setPendingStatementAction] = useState<{
     type: "close" | "reopen";
     statement: Statement;
@@ -246,40 +250,59 @@ function FinanceDashboard({
 
   const viewingStatementId = viewingStatement?.id;
 
+  const loadStatementItems = useCallback(
+    async (statementId: string, cursor: string | undefined, append: boolean) => {
+      const request = statementItemsRequest.begin();
+      if (append) {
+        setLoadingMoreStatementItems(true);
+      } else {
+        setStatementItems([]);
+        setStatementItemsNextCursor(null);
+        setStatementItemsHasMore(false);
+        setLoadingStatementItems(true);
+      }
+      setError(null);
+      try {
+        const page = await adapter.listStatementItems(workspaceId, statementId, {
+          cursor,
+          limit: 50,
+        });
+        if (!statementItemsRequest.isCurrent(request)) return;
+        setStatementItems((current) => (append ? [...current, ...page.items] : page.items));
+        setStatementItemsNextCursor(page.nextCursor);
+        setStatementItemsHasMore(page.hasMore);
+      } catch (cause) {
+        if (!statementItemsRequest.isCurrent(request)) return;
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar a composição.",
+        );
+        if (!append) setViewingStatement(null);
+      } finally {
+        if (statementItemsRequest.isCurrent(request)) {
+          if (append) {
+            setLoadingMoreStatementItems(false);
+          } else {
+            setLoadingStatementItems(false);
+          }
+        }
+      }
+    },
+    [adapter, statementItemsRequest, workspaceId],
+  );
+
   useEffect(() => {
     if (!viewingStatementId) {
       statementItemsRequest.invalidate();
       setStatementItems([]);
+      setStatementItemsNextCursor(null);
+      setStatementItemsHasMore(false);
       setLoadingStatementItems(false);
+      setLoadingMoreStatementItems(false);
       return;
     }
-    const request = statementItemsRequest.begin();
-    let active = true;
-    setStatementItems([]);
-    setLoadingStatementItems(true);
-    setError(null);
-    void adapter
-      .listStatementItems(workspaceId, viewingStatementId)
-      .then((items) => {
-        if (active && statementItemsRequest.isCurrent(request)) setStatementItems(items);
-      })
-      .catch((cause) => {
-        if (!active || !statementItemsRequest.isCurrent(request)) return;
-        setError(
-          cause instanceof Error ? cause.message : "Não foi possível carregar a composição.",
-        );
-        setViewingStatement(null);
-      })
-      .finally(() => {
-        if (active && statementItemsRequest.isCurrent(request)) {
-          setLoadingStatementItems(false);
-        }
-      });
-    return () => {
-      active = false;
-      statementItemsRequest.invalidate();
-    };
-  }, [adapter, statementItemsRequest, viewingStatementId, workspaceId]);
+    void loadStatementItems(viewingStatementId, undefined, false);
+    return () => statementItemsRequest.invalidate();
+  }, [loadStatementItems, statementItemsRequest, viewingStatementId]);
 
   async function payStatement(statement: Statement) {
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
@@ -720,29 +743,54 @@ function FinanceDashboard({
                 </p>
               ) : (
                 <ul className="max-h-72 divide-y overflow-y-auto">
-                  {statementItems.map((item) => (
-                    <li
-                      key={item.id}
-                      className="flex items-start justify-between gap-3 py-3 first:pt-0 last:pb-0"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">
-                          {item.description ||
-                            (item.type === "payment" ? "Pagamento de fatura" : "Compra")}
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          {item.type === "payment" ? "Pagamento" : "Compra"} · {item.occurredOn}
-                          {item.state === "canceled" ? " · Cancelada" : ""}
-                        </p>
-                      </div>
-                      <span className="shrink-0 font-semibold">
-                        {item.type === "payment" ? "−" : "+"}
-                        {formatMoneyMinor(item.amount.minor)}
-                      </span>
-                    </li>
-                  ))}
+                  {statementItems.map((item) => {
+                    const canceled = item.state === "canceled";
+                    const kindLabel = item.type === "payment" ? "Pagamento" : "Compra";
+                    return (
+                      <li
+                        key={item.id}
+                        className="flex items-start justify-between gap-3 py-3 first:pt-0 last:pb-0"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">
+                            {item.description ||
+                              (item.type === "payment" ? "Pagamento de fatura" : "Compra")}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {kindLabel}
+                            {canceled ? " cancelada" : ""} · {item.occurredOn}
+                          </p>
+                        </div>
+                        <span
+                          className={
+                            canceled
+                              ? "shrink-0 text-sm text-muted-foreground line-through"
+                              : "shrink-0 font-semibold"
+                          }
+                        >
+                          {statementItemAmountPrefix(item)}
+                          {formatMoneyMinor(item.amount.minor)}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
+              {statementItemsHasMore ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="self-start"
+                  disabled={loadingMoreStatementItems || loadingStatementItems}
+                  onClick={() => {
+                    if (statementItemsNextCursor && viewingStatementId) {
+                      void loadStatementItems(viewingStatementId, statementItemsNextCursor, true);
+                    }
+                  }}
+                >
+                  {loadingMoreStatementItems ? "Carregando mais…" : "Carregar mais itens"}
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <DialogFooter>

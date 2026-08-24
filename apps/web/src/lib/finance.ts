@@ -56,6 +56,17 @@ export type StatementItem = {
   amount: Money;
 };
 
+export type StatementItemsPage = {
+  items: StatementItem[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type StatementItemsQuery = {
+  cursor?: string | null;
+  limit?: number;
+};
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -93,7 +104,11 @@ export type FinanceAdapter = {
     },
   ): Promise<CreditCard>;
   listStatements(workspaceId: string, cardId?: string): Promise<Statement[]>;
-  listStatementItems(workspaceId: string, statementId: string): Promise<StatementItem[]>;
+  listStatementItems(
+    workspaceId: string,
+    statementId: string,
+    query?: StatementItemsQuery,
+  ): Promise<StatementItemsPage>;
   closeStatement(workspaceId: string, statement: Statement): Promise<Statement>;
   reopenStatement(workspaceId: string, statement: Statement): Promise<Statement>;
   payStatement(
@@ -178,7 +193,8 @@ export function createHttpFinanceAdapter(
   }
 
   const idempotencyKey = () => `web-${crypto.randomUUID()}`;
-  const list = async <T>(path: string) => (await call<JsonResponse<T>>(path)).items;
+  const listPage = async <T>(path: string) => call<JsonResponse<T>>(path);
+  const list = async <T>(path: string) => (await listPage<T>(path)).items;
 
   return {
     listTransactions: (workspaceId) => list<Transaction>(`/workspaces/${workspaceId}/transactions`),
@@ -200,8 +216,19 @@ export function createHttpFinanceAdapter(
       list<Statement>(
         `/workspaces/${workspaceId}/statements${cardId ? `?cardId=${encodeURIComponent(cardId)}` : ""}`,
       ),
-    listStatementItems: (workspaceId, statementId) =>
-      list<StatementItem>(`/workspaces/${workspaceId}/statements/${statementId}/items`),
+    listStatementItems: (workspaceId, statementId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const search = params.toString();
+      return listPage<StatementItem>(
+        `/workspaces/${workspaceId}/statements/${statementId}/items${search ? `?${search}` : ""}`,
+      ).then((response) => ({
+        items: response.items,
+        nextCursor: response.page.nextCursor,
+        hasMore: response.page.hasMore,
+      }));
+    },
     closeStatement: (workspaceId, statement) =>
       call<Statement>(`/workspaces/${workspaceId}/statements/${statement.id}/close`, {
         method: "POST",
@@ -345,8 +372,8 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     },
     listStatements: async (_workspaceId, cardId) =>
       statements.filter((statement) => !cardId || statement.cardId === cardId),
-    listStatementItems: async (_workspaceId, statementId) =>
-      transactions
+    listStatementItems: async (_workspaceId, statementId, query = {}) => {
+      const allItems = transactions
         .filter((transaction) => transaction.statementId === statementId)
         .map((transaction) => ({
           id: transaction.id,
@@ -357,7 +384,20 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           description: transaction.description,
           occurredOn: transaction.occurredOn,
           amount: transaction.amount,
-        })),
+        }));
+      const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+      const offset = query.cursor?.startsWith("fixture:")
+        ? Number.parseInt(query.cursor.slice("fixture:".length), 10)
+        : 0;
+      const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+      const items = allItems.slice(start, start + limit);
+      const hasMore = start + limit < allItems.length;
+      return {
+        items,
+        nextCursor: hasMore ? `fixture:${start + limit}` : null,
+        hasMore,
+      };
+    },
     closeStatement: async (_workspaceId, statement) => {
       const value = { ...statement, state: "closed" as const, version: statement.version + 1 };
       const index = statements.findIndex(({ id }) => id === statement.id);
@@ -410,6 +450,11 @@ export function financeAdapterForEnvironment(): FinanceAdapter {
 
 export function canWriteFinance(role: WorkspaceRole): boolean {
   return role !== "viewer";
+}
+
+export function statementItemAmountPrefix(item: Pick<StatementItem, "type" | "state">): string {
+  if (item.state === "canceled") return "Cancelada · ";
+  return item.type === "payment" ? "−" : "+";
 }
 
 export function createRequestGuard() {
