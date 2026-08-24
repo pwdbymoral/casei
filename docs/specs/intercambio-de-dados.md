@@ -17,7 +17,11 @@ Planilhas reduzem o custo de adoção e garantem portabilidade. Importação pre
 O núcleo `@casei/data` converte CSV e uma planilha XLSX visível selecionada para
 uma prévia tabular comum. Workbooks com mais de uma planilha exigem seleção
 explícita; fórmulas sem valor armazenado, macros, links externos, criptografia
-ou expansão ZIP acima do limite geram erro antes de qualquer mutação.
+ou expansão ZIP acima do limite geram erro antes de qualquer mutação. A
+expansão é medida pelo conteúdo realmente descompactado com limite rígido e o
+tamanho declarado no ZIP precisa coincidir com os bytes produzidos; declarações
+inconsistentes não são aceitas. Células numéricas fora da precisão decimal
+segura também geram erro explícito, em vez de arredondamento silencioso.
 
 ## Importação
 

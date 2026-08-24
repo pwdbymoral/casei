@@ -31,7 +31,8 @@ export type CsvImportErrorCode =
   | "external_link_detected"
   | "sheet_selection_required"
   | "sheet_not_found"
-  | "formula_without_cached_value";
+  | "formula_without_cached_value"
+  | "numeric_precision_loss";
 
 /**
  * Public parser error. The message intentionally does not include raw file

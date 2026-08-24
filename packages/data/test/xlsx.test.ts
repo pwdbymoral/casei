@@ -1,3 +1,5 @@
+import { deflateRawSync } from "node:zlib";
+
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
 
@@ -15,18 +17,37 @@ async function workbookBytes(configure: (workbook: ExcelJS.Workbook) => void): P
 }
 
 function storedZip(entryNames: readonly string[]): Uint8Array {
+  return storedZipEntries(entryNames.map((name) => ({ name, payload: new Uint8Array() })));
+}
+
+function storedZipEntries(
+  entries: readonly {
+    name: string;
+    payload: Uint8Array;
+    declaredUncompressedSize?: number;
+    compression?: 0 | 8;
+  }[],
+): Uint8Array {
   const encoder = new TextEncoder();
   const chunks: Uint8Array[] = [];
   const central: Uint8Array[] = [];
   let offset = 0;
-  for (const name of entryNames) {
+  for (const entry of entries) {
+    const { name, payload } = entry;
+    const compression = entry.compression ?? 0;
+    const compressedPayload = compression === 8 ? new Uint8Array(deflateRawSync(payload)) : payload;
     const nameBytes = encoder.encode(name);
-    const local = new Uint8Array(30 + nameBytes.length);
+    const declaredUncompressedSize = entry.declaredUncompressedSize ?? payload.byteLength;
+    const local = new Uint8Array(30 + nameBytes.length + compressedPayload.byteLength);
     const localView = new DataView(local.buffer);
     localView.setUint32(0, 0x04034b50, true);
     localView.setUint16(4, 20, true);
+    localView.setUint16(8, compression, true);
+    localView.setUint32(18, compressedPayload.byteLength, true);
+    localView.setUint32(22, declaredUncompressedSize, true);
     localView.setUint16(26, nameBytes.length, true);
     local.set(nameBytes, 30);
+    local.set(compressedPayload, 30 + nameBytes.length);
     chunks.push(local);
 
     const record = new Uint8Array(46 + nameBytes.length);
@@ -34,6 +55,9 @@ function storedZip(entryNames: readonly string[]): Uint8Array {
     recordView.setUint32(0, 0x02014b50, true);
     recordView.setUint16(4, 20, true);
     recordView.setUint16(6, 20, true);
+    recordView.setUint16(10, compression, true);
+    recordView.setUint32(20, compressedPayload.byteLength, true);
+    recordView.setUint32(24, declaredUncompressedSize, true);
     recordView.setUint16(28, nameBytes.length, true);
     recordView.setUint32(42, offset, true);
     record.set(nameBytes, 46);
@@ -46,8 +70,8 @@ function storedZip(entryNames: readonly string[]): Uint8Array {
   const end = new Uint8Array(22);
   const endView = new DataView(end.buffer);
   endView.setUint32(0, 0x06054b50, true);
-  endView.setUint16(8, entryNames.length, true);
-  endView.setUint16(10, entryNames.length, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
   endView.setUint32(12, centralSize, true);
   endView.setUint32(16, centralOffset, true);
   chunks.push(end);
@@ -108,6 +132,33 @@ describe("parser XLSX seguro", () => {
     });
   });
 
+  it("rejeita tamanho ZIP declarado inconsistente antes do load", async () => {
+    const input = storedZipEntries([
+      {
+        name: "xl/workbook.xml",
+        payload: Uint8Array.from([1, 2, 3]),
+        declaredUncompressedSize: 1,
+      },
+    ]);
+
+    await expect(parseXlsx(input)).rejects.toMatchObject({ code: "invalid_xlsx" });
+  });
+
+  it("limita a inflação real mesmo quando o ZIP declara uma expansão pequena", async () => {
+    const input = storedZipEntries([
+      {
+        name: "xl/workbook.xml",
+        payload: new TextEncoder().encode("x".repeat(1_024)),
+        compression: 8,
+        declaredUncompressedSize: 1,
+      },
+    ]);
+
+    await expect(parseXlsx(input, { maxUncompressedBytes: 64 })).rejects.toMatchObject({
+      code: "file_too_large",
+    });
+  });
+
   it("impõe limite de linhas, células e bytes descompactados", async () => {
     const input = await workbookBytes((workbook) => {
       const sheet = workbook.addWorksheet("Dados");
@@ -161,5 +212,37 @@ describe("parser XLSX seguro", () => {
     await expect(parseXlsx(input)).rejects.toMatchObject({
       code: "formula_without_cached_value",
     });
+  });
+
+  it("rejeita inteiros grandes e decimais longos sem precisão segura", async () => {
+    const largeInteger = await workbookBytes((workbook) => {
+      const sheet = workbook.addWorksheet("Dados");
+      sheet.addRow(["valor"]);
+      sheet.addRow([Number.MAX_SAFE_INTEGER + 1]);
+    });
+    await expect(parseXlsx(largeInteger)).rejects.toMatchObject({
+      code: "numeric_precision_loss",
+    });
+
+    const longDecimal = await workbookBytes((workbook) => {
+      const sheet = workbook.addWorksheet("Dados");
+      sheet.addRow(["valor"]);
+      sheet.addRow([Number.parseFloat("0.12345678901234567")]);
+    });
+    await expect(parseXlsx(longDecimal)).rejects.toMatchObject({
+      code: "numeric_precision_loss",
+    });
+  });
+
+  it("não arredonda para zero um decimal pequeno dentro da precisão segura", async () => {
+    const input = await workbookBytes((workbook) => {
+      const sheet = workbook.addWorksheet("Dados");
+      sheet.addRow(["valor"]);
+      sheet.addRow([1e-20]);
+    });
+
+    const parsed = await parseXlsx(input, { locale: "pt-BR" });
+
+    expect(parsed.rows[0]?.cells).toEqual(["0,00000000000000000001"]);
   });
 });

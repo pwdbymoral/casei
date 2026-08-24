@@ -41,12 +41,19 @@ minor units, sem `number` ou float.
 
 `parseXlsx` lê uma única planilha visível selecionada por nome ou índice; quando
 o workbook tem mais de uma planilha, a seleção é obrigatória. O parser mede os
-bytes originais, inspeciona o diretório ZIP antes da descompressão, rejeita
-criptografia, caminhos inválidos, VBA, links externos, métodos de compressão
-inesperados e expansão acima do limite. ExcelJS `4.4.0` é usado somente para
-materializar o workbook já limitado. Células de fórmula usam exclusivamente o
-resultado armazenado; fórmula sem cache, erro de célula, tipo desconhecido,
-linha/célula excessiva ou cabeçalho inválido gera diagnóstico sem avaliação.
+bytes originais, inspeciona o diretório ZIP e cada cabeçalho local antes do
+load, descompacta cada entrada com um limite rígido de saída e compara os bytes
+reais com os tamanhos declarados. Assim, um tamanho pequeno forjado no
+diretório central não permite burlar o orçamento nem faz o ExcelJS receber o
+arquivo. Ele rejeita criptografia, caminhos inválidos, VBA, links externos,
+métodos de compressão inesperados e expansão acima do limite. ExcelJS `4.4.0`
+é usado somente para materializar o workbook já validado. Células de fórmula
+usam exclusivamente o resultado armazenado; fórmula sem cache, erro de célula,
+tipo desconhecido, linha/célula excessiva ou cabeçalho inválido gera
+diagnóstico sem avaliação. Números inteiros não seguros e decimais com mais de
+15 dígitos significativos geram `numeric_precision_loss`, porque o lexema XML
+não é exposto pelo modelo numérico do ExcelJS e não pode ser arredondado
+silenciosamente.
 
 ## Mapeamento e preflight
 

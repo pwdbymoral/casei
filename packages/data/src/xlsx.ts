@@ -1,3 +1,5 @@
+import { inflateRawSync } from "node:zlib";
+
 import ExcelJS from "exceljs";
 
 import {
@@ -37,8 +39,13 @@ export const DEFAULT_XLSX_LIMITS = Object.freeze({
 
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
+const ZIP_LOCAL_SIGNATURE = 0x04034b50;
 const ZIP_MAX_COMMENT_BYTES = 65_535;
 const ZIP_ENTRY_FIXED_BYTES = 46;
+const ZIP_LOCAL_FIXED_BYTES = 30;
+
+/** IEEE-754 doubles safely preserve at least this many decimal digits. */
+const MAX_SAFE_DECIMAL_DIGITS = 15;
 
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {
   const resolved = value ?? fallback;
@@ -94,12 +101,13 @@ function validateZipPath(name: string): void {
 }
 
 /**
- * Checks ZIP metadata before ExcelJS inflates anything. XLSX is a ZIP format;
- * names are sufficient to reject VBA and external-link parts, while the
- * uncompressed-size budget bounds expansion before the workbook is loaded.
+ * Checks ZIP metadata and inflates each entry with a hard output bound before
+ * ExcelJS sees the archive. The central-directory size is only a claim: the
+ * local header, payload bounds, actual inflater output, and claimed size must
+ * all agree before the workbook loader is invoked.
  */
 function inspectXlsxContainer(bytes: Uint8Array, maxUncompressedBytes: number): void {
-  if (bytes.length < 4 || readU32(bytes, 0) !== 0x04034b50) {
+  if (bytes.length < 4 || readU32(bytes, 0) !== ZIP_LOCAL_SIGNATURE) {
     throw importError("invalid_xlsx", "O arquivo não é um XLSX válido.");
   }
 
@@ -158,18 +166,111 @@ function inspectXlsxContainer(bytes: Uint8Array, maxUncompressedBytes: number): 
     if (/(?:^|\/)externalLinks(?:\/|$)/iu.test(name)) {
       throw importError("external_link_detected", "XLSX com links externos não é aceito.");
     }
-    expandedBytes += uncompressedSize;
+    const localOffset = readU32(bytes, offset + 42);
+    if (uncompressedSize > maxUncompressedBytes) {
+      throw importError("file_too_large", "Uma entrada descompactada do XLSX excede o limite.");
+    }
+    const actualUncompressedSize = inspectZipEntryPayload(bytes, centralOffset, {
+      flags,
+      compression,
+      compressedSize,
+      uncompressedSize,
+      localOffset,
+      name,
+      expandedBytes,
+      maxUncompressedBytes,
+    });
+    expandedBytes += actualUncompressedSize;
     if (!Number.isSafeInteger(expandedBytes) || expandedBytes > maxUncompressedBytes) {
       throw importError("file_too_large", "O conteúdo descompactado do XLSX excede o limite.");
-    }
-    if (compressedSize > bytes.length || uncompressedSize > maxUncompressedBytes) {
-      throw importError("file_too_large", "Uma entrada descompactada do XLSX excede o limite.");
     }
     offset += recordLength;
   }
   if (offset !== centralOffset + centralSize) {
     throw importError("invalid_xlsx", "O diretório ZIP do XLSX está inconsistente.");
   }
+}
+
+interface ZipEntryPayload {
+  readonly flags: number;
+  readonly compression: number;
+  readonly compressedSize: number;
+  readonly uncompressedSize: number;
+  readonly localOffset: number;
+  readonly name: string;
+  readonly expandedBytes: number;
+  readonly maxUncompressedBytes: number;
+}
+
+function invalidZipEntry(message: string): CsvImportError {
+  return importError("invalid_xlsx", message);
+}
+
+function inspectZipEntryPayload(
+  bytes: Uint8Array,
+  centralDirectoryOffset: number,
+  entry: ZipEntryPayload,
+): number {
+  const localOffset = entry.localOffset;
+  if (
+    localOffset + ZIP_LOCAL_FIXED_BYTES > centralDirectoryOffset ||
+    readU32(bytes, localOffset) !== ZIP_LOCAL_SIGNATURE
+  ) {
+    throw invalidZipEntry("A entrada ZIP do XLSX possui cabeçalho local inválido.");
+  }
+
+  const localFlags = readU16(bytes, localOffset + 6);
+  const localCompression = readU16(bytes, localOffset + 8);
+  const localNameLength = readU16(bytes, localOffset + 26);
+  const localExtraLength = readU16(bytes, localOffset + 28);
+  const localRecordLength = ZIP_LOCAL_FIXED_BYTES + localNameLength + localExtraLength;
+  const dataStart = localOffset + localRecordLength;
+  const dataEnd = dataStart + entry.compressedSize;
+  if (
+    dataStart > centralDirectoryOffset ||
+    dataEnd > centralDirectoryOffset ||
+    dataEnd > bytes.length ||
+    dataEnd < dataStart
+  ) {
+    throw invalidZipEntry("A entrada ZIP do XLSX está fora dos limites do arquivo.");
+  }
+  const localName = decodeZipName(
+    bytes.slice(localOffset + ZIP_LOCAL_FIXED_BYTES, dataStart - localExtraLength),
+  );
+  if (localName !== entry.name || localCompression !== entry.compression) {
+    throw invalidZipEntry("O cabeçalho local e o diretório ZIP do XLSX divergem.");
+  }
+  if ((localFlags & 0x0001) !== 0 || (localFlags & 0x0001) !== (entry.flags & 0x0001)) {
+    throw importError("unsupported_format", "XLSX criptografado não é aceito.");
+  }
+
+  const payload = bytes.subarray(dataStart, dataEnd);
+  let actualSize: number;
+  if (entry.compression === 0) {
+    actualSize = payload.byteLength;
+  } else {
+    const remainingBudget = entry.maxUncompressedBytes - entry.expandedBytes;
+    if (remainingBudget < 1 && payload.byteLength > 0) {
+      throw importError("file_too_large", "O conteúdo descompactado do XLSX excede o limite.");
+    }
+    try {
+      actualSize = inflateRawSync(payload, { maxOutputLength: remainingBudget }).byteLength;
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ERR_BUFFER_TOO_LARGE"
+      ) {
+        throw importError("file_too_large", "O conteúdo descompactado do XLSX excede o limite.");
+      }
+      throw invalidZipEntry("Uma entrada ZIP do XLSX não pôde ser descompactada.");
+    }
+  }
+  if (actualSize !== entry.uncompressedSize) {
+    throw invalidZipEntry("O tamanho declarado de uma entrada ZIP do XLSX é inconsistente.");
+  }
+  return actualSize;
 }
 
 function dateToCellText(value: Date): string {
@@ -179,14 +280,47 @@ function dateToCellText(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
+function significantDecimalDigits(value: number): number {
+  const coefficient = value.toString().toLowerCase().split("e")[0] ?? "";
+  const digits = coefficient.replace(/^[+-]/u, "").replace(".", "").replace(/^0+/u, "");
+  return digits.length || 1;
+}
+
+function expandDecimalExponent(value: number): string {
+  const source = value.toString().toLowerCase();
+  const exponentSeparator = source.indexOf("e");
+  if (exponentSeparator < 0) return source;
+
+  const coefficient = source.slice(0, exponentSeparator);
+  const exponent = Number.parseInt(source.slice(exponentSeparator + 1), 10);
+  const sign = coefficient.startsWith("-") ? "-" : "";
+  const unsignedCoefficient = coefficient.replace(/^[+-]/u, "");
+  const decimalPosition = unsignedCoefficient.indexOf(".");
+  const digits = unsignedCoefficient.replace(".", "");
+  const originalPosition = decimalPosition < 0 ? digits.length : decimalPosition;
+  const newPosition = originalPosition + exponent;
+
+  if (newPosition <= 0) return `${sign}0.${"0".repeat(-newPosition)}${digits}`;
+  if (newPosition >= digits.length)
+    return `${sign}${digits}${"0".repeat(newPosition - digits.length)}`;
+  return `${sign}${digits.slice(0, newPosition)}.${digits.slice(newPosition)}`;
+}
+
 function numberToCellText(value: number, locale: CsvLocale | undefined): string {
   if (!Number.isFinite(value)) {
     throw importError("invalid_xlsx", "O XLSX contém um número inválido.");
   }
-  return new Intl.NumberFormat(locale === "pt-BR" ? "pt-BR" : "en-US", {
-    useGrouping: false,
-    maximumFractionDigits: 15,
-  }).format(value);
+  if (
+    (Number.isInteger(value) && !Number.isSafeInteger(value)) ||
+    (!Number.isInteger(value) && significantDecimalDigits(value) > MAX_SAFE_DECIMAL_DIGITS)
+  ) {
+    throw importError(
+      "numeric_precision_loss",
+      "O XLSX contém um número cuja precisão não pode ser preservada com segurança.",
+    );
+  }
+  const decimal = locale === "pt-BR" ? "," : ".";
+  return expandDecimalExponent(value).replace(".", decimal);
 }
 
 function isCellError(value: unknown): value is { error: string } {
