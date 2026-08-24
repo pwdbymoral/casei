@@ -1,6 +1,6 @@
 import { DomainError } from "./errors.js";
 import { Money } from "./money.js";
-import { addLocalDateDays, type LocalDate, parseLocalDate } from "./time.js";
+import { addLocalDateDays, addLocalDateMonths, type LocalDate, parseLocalDate } from "./time.js";
 
 export interface LedgerPosting {
   readonly accountId: string;
@@ -13,6 +13,61 @@ export interface CanonicalPostingAccounts {
   readonly expense: string;
   readonly adjustment: string;
   readonly cardLiability?: string;
+}
+
+export type LoanDirection = "lent" | "borrowed";
+
+export interface LoanPostingAccounts {
+  readonly wallet: string;
+  readonly loan: string;
+}
+
+/** Principal exchange: a lent loan becomes a receivable; a borrowed loan a payable. */
+export function canonicalLoanPrincipalPostings(input: {
+  direction: LoanDirection;
+  amount: Money;
+  accounts: LoanPostingAccounts;
+}): readonly LedgerPosting[] {
+  assertPositiveLoanAmount(input.amount);
+  const walletAmount = input.direction === "lent" ? -input.amount.minor : input.amount.minor;
+  const loanAmount = -walletAmount;
+  return [
+    {
+      accountId: input.accounts.wallet,
+      amount: Money.fromTrusted(walletAmount, input.amount.currency),
+    },
+    {
+      accountId: input.accounts.loan,
+      amount: Money.fromTrusted(loanAmount, input.amount.currency),
+    },
+  ];
+}
+
+/** Principal repayment: reverses the original cash/receivable or cash/payable direction. */
+export function canonicalLoanPaymentPostings(input: {
+  direction: LoanDirection;
+  amount: Money;
+  accounts: LoanPostingAccounts;
+}): readonly LedgerPosting[] {
+  assertPositiveLoanAmount(input.amount);
+  const walletAmount = input.direction === "lent" ? input.amount.minor : -input.amount.minor;
+  const loanAmount = -walletAmount;
+  return [
+    {
+      accountId: input.accounts.wallet,
+      amount: Money.fromTrusted(walletAmount, input.amount.currency),
+    },
+    {
+      accountId: input.accounts.loan,
+      amount: Money.fromTrusted(loanAmount, input.amount.currency),
+    },
+  ];
+}
+
+function assertPositiveLoanAmount(amount: Money): void {
+  if (amount.minor <= 0n) {
+    throw new DomainError("validation_failed", "O valor do empréstimo deve ser positivo.");
+  }
 }
 
 /** Canonical double-entry effects used by wallet, card purchases and payments. */
@@ -156,27 +211,44 @@ export function generateRecurrenceDates(
   return result;
 }
 
+/** Generates an anchored recurrence through an inclusive civil-date horizon. */
+export function generateRecurrenceDatesUntil(
+  frequency: RecurrenceFrequency,
+  start: string,
+  until: string,
+  interval = 1,
+  maxOccurrences = 10_000,
+): readonly string[] {
+  const parsedStart = parseLocalDate(start);
+  const parsedUntil = parseLocalDate(until);
+  if (!parsedStart.ok || !parsedUntil.ok) {
+    throw new DomainError("validation_failed", "A recorrência precisa de datas civis válidas.");
+  }
+  if (!Number.isInteger(interval) || interval < 1) {
+    throw new DomainError("validation_failed", "O intervalo da recorrência deve ser positivo.");
+  }
+  if (!Number.isInteger(maxOccurrences) || maxOccurrences < 1 || maxOccurrences > 10_000) {
+    throw new DomainError("validation_failed", "O limite da recorrência é inválido.");
+  }
+  const result: string[] = [];
+  for (let index = 0; index < maxOccurrences; index += 1) {
+    const current =
+      index === 0
+        ? parsedStart.value
+        : addRecurrence(parsedStart.value, frequency, interval * index);
+    if (current > parsedUntil.value) break;
+    result.push(current);
+  }
+  return result;
+}
+
 function addRecurrence(
   date: LocalDate,
   frequency: RecurrenceFrequency,
   interval: number,
 ): LocalDate {
   if (frequency === "weekly") return addLocalDateDays(date, 7 * interval);
-  const [yearText, monthText, dayText] = date.split("-");
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const targetMonth = month - 1 + (frequency === "annual" ? 12 * interval : interval);
-  const target = new Date(Date.UTC(year, targetMonth, 1));
-  const targetYear = target.getUTCFullYear();
-  const targetMonthNumber = target.getUTCMonth() + 1;
-  const lastDay = new Date(Date.UTC(targetYear, targetMonthNumber, 0)).getUTCDate();
-  const day = Math.min(Number(dayText), lastDay);
-  const result = `${targetYear.toString().padStart(4, "0")}-${targetMonthNumber
-    .toString()
-    .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
-  const parsed = parseLocalDate(result);
-  if (!parsed.ok) throw new RangeError("recurrence result must be a valid date");
-  return parsed.value;
+  return addLocalDateMonths(date, (frequency === "annual" ? 12 : 1) * interval);
 }
 
 export interface StatementDates {

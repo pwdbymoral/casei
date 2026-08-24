@@ -27,6 +27,7 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 
 - Cadastro único começa por nome e oferece detalhes progressivos: quantidade, unidade, mínimo, categoria, local e nota.
 - Cadastro em lote aceita uma linha por produto e também colagem tabular. A prévia separa novos, atualizações, duplicatas e erros antes de confirmar.
+- O núcleo aceita nomes em linhas simples ou colagem TAB/semicolons com cabeçalho; a confirmação usa `POST /v1/workspaces/:workspaceId/stock/products/bulk` com `valid_only` ou `all_or_nothing` e o hash da prévia. Linhas inválidas nunca são aplicadas silenciosamente.
 - Modo avançado usa tabela editável com navegação por teclado, seleção em lote, filtros e ações explícitas; nenhuma ação essencial depende de drag.
 - Atualização em lote exige prévia quando altera quantidades ou arquiva produtos.
 
@@ -59,6 +60,26 @@ estado comprado. Se um item livre já existente tiver o mesmo nome de um produto
 `low`/`missing`, o comando do produto o reconcilia em uma única linha automática, preservando ID,
 histórico e versão; enquanto o produto não for candidato, o item livre continua visível. Eventos
 somente são removidos por cascade quando o workspace inteiro é purgado após a janela de recuperação.
+Quando um produto é editado, uma linha automática ativa acompanha seu nome normalizado, unidade,
+rótulo e versão. Se o novo nome colidir com um item livre ativo, a edição retorna conflito
+recuperável antes de alterar o produto, pois o MVP não possui merge silencioso de linhas.
+O mesmo bloqueio se aplica ao restauro de um produto arquivado cujo nome já esteja em um item livre
+ativo; concluir ou remover a solicitação livre é a forma explícita de resolver a colisão.
+`PATCH /stock/products/:productId` aceita atualização parcial: campos omitidos preservam o valor
+atual, enquanto `null` limpa campos anuláveis explicitamente. Uma projeção automática que ainda não
+foi materializada não possui autoria de lista; nesse caso `lastChangedBy` é `null`, e nunca o usuário
+que apenas fez a leitura.
+
+### Contrato da implementação STOCK-006
+
+`POST /stock/shopping/:itemId/purchased` aceita `expenseTransactionId` opcional. Quando informado,
+o comando valida, na mesma transação da conclusão, uma transação `expense` não cancelada do mesmo
+espaço e grava somente a referência. O Casei não cria, altera, estorna ou escolhe uma despesa
+automaticamente, não compara o valor da despesa com os itens e não distribui o valor por produto.
+O vínculo é exposto como `expenseTransactionId` na linha concluída e não pode ser alterado por uma
+segunda conclusão; reprocessamentos usam a idempotência do comando. Sem o campo (ou com `null`), a
+conclusão não consulta nem cria lançamentos financeiros. A chave estrangeira composta impede vínculo
+entre espaços e o purge autorizado do espaço remove a referência antes da cascata.
 
 ## Busca e uso no mercado
 
@@ -73,6 +94,10 @@ somente são removidos por cascade quando o workspace inteiro é purgado após a
 - Duplicatas encontradas após concorrência retornam conflito recuperável.
 - Arquivar categoria não arquiva produtos.
 - Produto na lista continua acessível se for arquivado, com orientação para remover ou restaurar.
+- Renomear um produto não pode criar duas entradas ativas para a mesma solicitação de compra:
+  se o novo nome já estiver em um item livre ativo, a alteração é rejeitada com conflito
+  recuperável; o usuário deve concluir/remover o item livre antes de renomear o produto.
+- Restaurar produto arquivado com item livre ativo homônimo também retorna conflito recuperável.
 
 ## Critérios de aceitação
 

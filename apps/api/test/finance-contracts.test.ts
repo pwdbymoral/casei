@@ -1,8 +1,15 @@
 import {
+  createLoanSchema,
+  createRecurrenceSchema,
   createTransactionSchema,
+  insightWindowQuerySchema,
+  loanPaymentSchema,
   payStatementSchema,
+  recurrenceTransitionSchema,
+  safeToSpendQuerySchema,
   settleTransactionSchema,
   transactionListQuerySchema,
+  updateCreditCardSchema,
 } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 
@@ -46,6 +53,56 @@ describe("finance contracts", () => {
     ).not.toHaveProperty("occurredOn");
   });
 
+  it("validates the simple IOU contract and principal payment", () => {
+    expect(
+      createLoanSchema.parse({
+        direction: "lent",
+        counterparty: "Ana",
+        principal: { currency: "BRL", minor: "1000" },
+        occurredOn: "2028-02-29",
+        dueOn: "2028-03-31",
+      }),
+    ).toMatchObject({ direction: "lent", counterparty: "Ana" });
+    expect(loanPaymentSchema.parse({ amount: { currency: "BRL", minor: "250" } })).toEqual({
+      amount: { currency: "BRL", minor: "250" },
+    });
+    expect(() =>
+      createLoanSchema.parse({
+        direction: "borrowed",
+        counterparty: "Ana",
+        principal: { currency: "BRL", minor: "1000" },
+        occurredOn: "2028-03-01",
+        dueOn: "2028-02-29",
+      }),
+    ).toThrow("anterior");
+  });
+
+  it("validates recurrence bounds and variable estimates", () => {
+    expect(
+      createRecurrenceSchema.parse({
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+        frequency: "monthly",
+        startOn: "2026-01-31",
+        variable: true,
+        estimatedAmount: { currency: "BRL", minor: "120" },
+      }),
+    ).toMatchObject({ variable: true, estimatedAmount: { minor: "120" } });
+    expect(() =>
+      createRecurrenceSchema.parse({
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+        frequency: "monthly",
+        startOn: "2026-03-01",
+        endOn: "2026-02-28",
+      }),
+    ).toThrow("posterior");
+    expect(recurrenceTransitionSchema.parse({})).toEqual({});
+    expect(recurrenceTransitionSchema.parse({ effectiveOn: "2028-02-29" })).toEqual({
+      effectiveOn: "2028-02-29",
+    });
+  });
+
   it("parses timeline filters and rejects an inverted period", () => {
     expect(
       transactionListQuerySchema.parse({
@@ -61,5 +118,35 @@ describe("finance contracts", () => {
     expect(() =>
       transactionListQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
     ).toThrow();
+  });
+
+  it("parses deterministic insight windows and safe-to-spend horizons", () => {
+    expect(insightWindowQuerySchema.parse({ from: "2026-08-01", to: "2026-08-31" })).toEqual({
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+    expect(safeToSpendQuerySchema.parse({ horizonDays: "45" })).toEqual({ horizonDays: 45 });
+    expect(() =>
+      insightWindowQuerySchema.parse({ from: "2026-09-01", to: "2026-08-01" }),
+    ).toThrow();
+    expect(() =>
+      insightWindowQuerySchema.parse({ asOf: "2026-09-01", from: "2026-09-02" }),
+    ).toThrow();
+    expect(() =>
+      insightWindowQuerySchema.parse({ asOf: "2026-09-01", to: "2026-08-31" }),
+    ).toThrow();
+  });
+
+  it("accepts partial card configuration updates and preserves explicit clearing", () => {
+    expect(updateCreditCardSchema.parse({ closingDay: 31, holder: null, limit: null })).toEqual({
+      closingDay: 31,
+      holder: null,
+      limit: null,
+    });
+    expect(() => updateCreditCardSchema.parse({})).toThrow();
+    expect(() => updateCreditCardSchema.parse({ lastFour: "123" })).toThrow();
+    expect(() => updateCreditCardSchema.parse({ limit: { currency: "BRL", minor: "-1" } })).toThrow(
+      "greater than or equal to zero",
+    );
   });
 });

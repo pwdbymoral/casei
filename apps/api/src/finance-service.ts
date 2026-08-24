@@ -1,25 +1,47 @@
 import {
   type CreateTransactionInput,
+  categoryTransitionSchema,
   createCategorySchema,
   createCreditCardSchema,
   createInstallmentPlanSchema,
+  createLoanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  loanPaymentSchema,
+  recurrenceTransitionSchema,
   settleTransactionSchema,
   type TransactionListQuery,
+  updateCategorySchema,
+  updateCreditCardSchema,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
-import { executeIdempotent, type JsonValue, withUnitOfWork } from "@casei/database";
 import {
+  executeIdempotent,
+  type JobRecord,
+  type JsonValue,
+  PostgresJobWorker,
+  withUnitOfWork,
+} from "@casei/database";
+import {
+  addLocalDateDays,
+  addLocalDateMonths,
   assertBalancedLedgerEvent,
+  type Clock,
   calculateStatementDates,
   canonicalCardPaymentPostings,
+  canonicalLoanPaymentPostings,
+  canonicalLoanPrincipalPostings,
   canonicalTransactionPostings,
   distributeInstallments,
+  fixedClock,
   generateRecurrenceDates,
+  generateRecurrenceDatesUntil,
   Money,
   parseLocalDate,
+  parseTimeZone,
+  systemClock,
+  todayInTimeZone,
 } from "@casei/domain";
 import { decodeCursor, encodeCursor, InvalidCursorError } from "./http/cursor.js";
 
@@ -36,6 +58,8 @@ export interface FinanceServiceOptions {
   applicationRole?: string;
   /** Secret used to sign private list cursors. */
   cursorSecret?: string;
+  /** Clock used for civil defaults and deterministic recurrence jobs. */
+  clock?: Clock;
 }
 
 export interface TransactionView {
@@ -53,6 +77,32 @@ export interface TransactionView {
   cardId: string | null;
   statementId: string | null;
   version: number;
+}
+
+export interface LoanView {
+  id: string;
+  workspaceId: string;
+  direction: "lent" | "borrowed";
+  counterparty: string;
+  principal: { currency: string; minor: string };
+  paid: { currency: string; minor: string };
+  remaining: { currency: string; minor: string };
+  occurredOn: string;
+  dueOn: string | null;
+  status: "open" | "settled";
+  version: number;
+}
+
+export interface LoanPaymentView {
+  id: string;
+  loanId: string;
+  amount: { currency: string; minor: string };
+  occurredOn: string;
+}
+
+export interface LoanPaymentResponse {
+  loan: LoanView;
+  payment: LoanPaymentView;
 }
 
 export interface CategoryView {
@@ -89,6 +139,52 @@ export interface StatementView {
   paid: { currency: string; minor: string };
   openAmount: { currency: string; minor: string };
   version: number;
+}
+
+export interface RecurrenceView {
+  id: string;
+  workspaceId: string;
+  kind: "income" | "expense";
+  amount: { currency: string; minor: string };
+  frequency: "weekly" | "monthly" | "annual";
+  interval: number;
+  startOn: string;
+  endOn: string | null;
+  maxOccurrences: number | null;
+  variable: boolean;
+  estimatedAmount: { currency: string; minor: string } | null;
+  description: string;
+  pausedOn: string | null;
+  version: number;
+}
+
+export interface RecurrenceCreateResponse {
+  id: string;
+  frequency: RecurrenceView["frequency"];
+  occurrences: string[];
+}
+
+interface RecurrenceRuleRow {
+  id: string;
+  workspace_id: string;
+  kind: "income" | "expense";
+  amount_minor: string;
+  frequency: "weekly" | "monthly" | "annual";
+  interval: number;
+  start_on: string;
+  end_on: string | null;
+  max_occurrences: number | null;
+  variable: boolean;
+  estimated_minor: string | null;
+  description: string;
+  status: "active" | "archived";
+  paused_on: string | null;
+  version: number;
+}
+
+interface RecurrenceJobPayload {
+  workspaceId: string;
+  asOf: string;
 }
 
 export interface StatementItemView {
@@ -217,6 +313,21 @@ interface TransactionRow {
   version: number;
 }
 
+interface LoanRow {
+  id: string;
+  workspace_id: string;
+  direction: "lent" | "borrowed";
+  counterparty: string;
+  principal_minor: string | bigint;
+  paid_minor: string | bigint;
+  currency_code: string;
+  occurred_on: string;
+  due_on: string | null;
+  principal_event_id: string;
+  status: "open" | "settled";
+  version: number;
+}
+
 interface FinanceAuditRow {
   id: string;
   transaction_id: string;
@@ -236,6 +347,7 @@ interface FinanceAuditRow {
 export class FinanceService {
   private readonly applicationRole: string;
   private readonly cursorSecret: string;
+  private readonly clock: Clock;
 
   constructor(
     private readonly pool: Pool,
@@ -247,6 +359,240 @@ export class FinanceService {
       throw new Error("CASEI_CURSOR_SECRET is required in production");
     }
     this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
+    this.clock = options.clock ?? systemClock;
+  }
+
+  async createLoan(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; loan: LoanView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = createLoanSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/loans`,
+        key: idempotencyKey,
+        request: parsed,
+        execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (parsed.principal.currency !== currency) {
+            throw new FinanceConflictError("A moeda do empréstimo difere da carteira.");
+          }
+          const occurredOn =
+            parsed.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
+          if (parsed.dueOn && parsed.dueOn < occurredOn) {
+            throw new FinanceConflictError(
+              "O vencimento não pode ser anterior à data do empréstimo.",
+            );
+          }
+          const ids = await client.query<{ loan_id: string; event_id: string }>(
+            `SELECT uuidv7() AS loan_id, uuidv7() AS event_id`,
+          );
+          const loanId = ids.rows[0]?.loan_id;
+          const eventId = ids.rows[0]?.event_id;
+          if (!loanId || !eventId) throw new Error("loan identifiers were not generated");
+          await client.query(
+            `INSERT INTO loan_contract
+              (id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+               currency_code, occurred_on, due_on, principal_event_id, status, version)
+             VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'open', 0)`,
+            [
+              loanId,
+              scope.workspaceId,
+              parsed.direction,
+              parsed.counterparty,
+              BigInt(parsed.principal.minor),
+              currency,
+              occurredOn,
+              parsed.dueOn ?? null,
+              eventId,
+            ],
+          );
+          const wallet = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "wallet",
+            "Carteira",
+            currency,
+          );
+          const loanAccount = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            loanAccountKind(parsed.direction),
+            loanAccountName(loanId),
+            currency,
+          );
+          const postings = canonicalLoanPrincipalPostings({
+            direction: parsed.direction,
+            amount: Money.fromTrusted(BigInt(parsed.principal.minor), currency as never),
+            accounts: { wallet, loan: loanAccount },
+          });
+          await this.publishLoanEvent(
+            client,
+            scope,
+            eventId,
+            loanEventType(parsed.direction, "principal"),
+            currency,
+            postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
+            occurredOn,
+          );
+          const row = await this.getLoanRow(client, scope.workspaceId, loanId);
+          if (!row) throw new Error("loan contract was not created");
+          const loan = toLoanView(row);
+          await this.recordLoanAudit(client, scope, loanId, "loan.created", null, loan);
+          return { statusCode: 201, response: loan as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      loan: result.response as unknown as LoanView,
+    };
+  }
+
+  async getLoan(scope: FinanceScope, id: string): Promise<LoanView | null> {
+    return this.withScopedClient(scope, async (client) => {
+      const row = await this.getLoanRow(client, scope.workspaceId, id);
+      return row ? toLoanView(row) : null;
+    });
+  }
+
+  async listLoans(scope: FinanceScope, limit = 50): Promise<LoanView[]> {
+    return this.withScopedClient(scope, async (client) => {
+      const boundedLimit = Math.min(Math.max(limit, 1), 100);
+      const result = await client.query<LoanRow>(
+        `SELECT id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+                currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+                principal_event_id, status, version
+           FROM loan_contract
+          WHERE workspace_id = $1
+          ORDER BY status ASC, due_on ASC NULLS LAST, occurred_on DESC, id DESC
+          LIMIT $2`,
+        [scope.workspaceId, boundedLimit],
+      );
+      return result.rows.map(toLoanView);
+    });
+  }
+
+  async payLoan(
+    scope: FinanceScope,
+    loanId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+    input: unknown,
+  ): Promise<{ replayed: boolean; response: LoanPaymentResponse }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = loanPaymentSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/loans/${loanId}/payments`,
+        key: idempotencyKey,
+        request: { loanId, expectedVersion, parsed },
+        execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          const current = await client.query<LoanRow>(
+            `SELECT id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+                    currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+                    principal_event_id, status, version
+               FROM loan_contract
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, loanId],
+          );
+          const row = current.rows[0];
+          if (!row) throw new FinanceNotFoundError();
+          if (row.version !== expectedVersion) throw new VersionConflictError(row.version);
+          if (row.status !== "open") {
+            throw new FinanceConflictError("O empréstimo já está liquidado.");
+          }
+          if (row.currency_code !== currency || parsed.amount.currency !== row.currency_code) {
+            throw new FinanceConflictError("A moeda do pagamento difere do empréstimo.");
+          }
+          const principal = BigInt(row.principal_minor);
+          const paid = BigInt(row.paid_minor);
+          const amount = BigInt(parsed.amount.minor);
+          const remaining = principal - paid;
+          if (amount > remaining) {
+            throw new FinanceConflictError("O pagamento excede o saldo do empréstimo.");
+          }
+          const occurredOn =
+            parsed.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
+          if (occurredOn < row.occurred_on) {
+            throw new FinanceConflictError(
+              "A data do pagamento não pode ser anterior à data do empréstimo.",
+            );
+          }
+          const ids = await client.query<{ payment_id: string; event_id: string }>(
+            `SELECT uuidv7() AS payment_id, uuidv7() AS event_id`,
+          );
+          const paymentId = ids.rows[0]?.payment_id;
+          const eventId = ids.rows[0]?.event_id;
+          if (!paymentId || !eventId)
+            throw new Error("loan payment identifiers were not generated");
+          const wallet = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "wallet",
+            "Carteira",
+            currency,
+          );
+          const loanAccount = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            loanAccountKind(row.direction),
+            loanAccountName(row.id),
+            currency,
+          );
+          const postings = canonicalLoanPaymentPostings({
+            direction: row.direction,
+            amount: Money.fromTrusted(amount, currency as never),
+            accounts: { wallet, loan: loanAccount },
+          });
+          await this.publishLoanEvent(
+            client,
+            scope,
+            eventId,
+            loanEventType(row.direction, "payment"),
+            currency,
+            postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
+            occurredOn,
+          );
+          await client.query(
+            `INSERT INTO loan_payment
+              (id, workspace_id, loan_id, amount_minor, currency_code, occurred_on, ledger_event_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [paymentId, scope.workspaceId, loanId, amount, currency, occurredOn, eventId],
+          );
+          const nextPaid = paid + amount;
+          const updated = await client.query<LoanRow>(
+            `UPDATE loan_contract
+                SET paid_minor = $3, status = CASE WHEN $3 = principal_minor THEN 'settled' ELSE 'open' END,
+                    version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $4
+              RETURNING id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+                        currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+                        principal_event_id, status, version`,
+            [scope.workspaceId, loanId, nextPaid, expectedVersion],
+          );
+          const next = updated.rows[0];
+          if (!next) throw new VersionConflictError();
+          const loan = toLoanView(next);
+          const payment: LoanPaymentView = {
+            id: paymentId,
+            loanId,
+            amount: { currency, minor: amount.toString() },
+            occurredOn,
+          };
+          await this.recordLoanAudit(client, scope, loanId, "loan.payment", toLoanView(row), loan);
+          return { statusCode: 200, response: { loan, payment } as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as LoanPaymentResponse,
+    };
   }
 
   async createTransaction(
@@ -937,16 +1283,220 @@ export class FinanceService {
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
-          const result = await client.query(
-            `INSERT INTO finance_category (workspace_id, name, kind) VALUES ($1, $2, $3) RETURNING id, workspace_id, name, kind, archived, version`,
-            [scope.workspaceId, parsed.name, parsed.kind],
-          );
+          const result = await client
+            .query<{
+              id: string;
+              workspace_id: string;
+              name: string;
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+              version: number;
+            }>(
+              `INSERT INTO finance_category (workspace_id, name, kind) VALUES ($1, $2, $3) RETURNING id, workspace_id, name, kind, archived, version`,
+              [scope.workspaceId, parsed.name, parsed.kind],
+            )
+            .catch((error: unknown) => {
+              if (isUniqueViolation(error)) {
+                throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+              }
+              throw error;
+            });
           const row = result.rows[0];
           if (!row) throw new Error("category insert failed");
+          await this.recordCategoryAudit(client, scope, row.id, "category.created", {
+            before: {},
+            after: { name: row.name, kind: row.kind, archived: row.archived },
+          });
           return { statusCode: 201, response: toCategoryView(row) as unknown as JsonValue };
         },
       }),
     );
+  }
+
+  async updateCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = updateCategorySchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/categories/${categoryId}`,
+        key: idempotencyKey,
+        request: { categoryId, expectedVersion, ...parsed },
+        execute: async () => {
+          const currentResult = await client.query<{
+            id: string;
+            workspace_id: string;
+            name: string;
+            kind: "income" | "expense" | "both";
+            archived: boolean;
+            version: number;
+          }>(
+            `SELECT id, workspace_id, name, kind, archived, version
+               FROM finance_category
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, categoryId],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
+          if (current.archived) throw new FinanceConflictError("A categoria está arquivada.");
+          const nextName = parsed.name ?? current.name;
+          const nextKind = parsed.kind ?? current.kind;
+          await assertCategoryNameAvailable(client, scope.workspaceId, nextName, categoryId);
+          if (nextKind !== current.kind) {
+            const incompatible = await client.query<{ count: string }>(
+              `SELECT count(*)::text AS count
+                 FROM finance_transaction
+                WHERE workspace_id = $1 AND category_id = $2
+                  AND ((kind = 'income' AND $3::text = 'expense')
+                    OR (kind = 'expense' AND $3::text = 'income'))`,
+              [scope.workspaceId, categoryId, nextKind],
+            );
+            if (Number(incompatible.rows[0]?.count ?? "0") > 0) {
+              throw new FinanceConflictError(
+                "A categoria já possui lançamentos incompatíveis com este tipo.",
+              );
+            }
+          }
+          const updated = await client
+            .query<{
+              id: string;
+              workspace_id: string;
+              name: string;
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+              version: number;
+            }>(
+              `UPDATE finance_category
+                  SET name = $3, kind = $4, version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $5
+                RETURNING id, workspace_id, name, kind, archived, version`,
+              [scope.workspaceId, categoryId, nextName, nextKind, expectedVersion],
+            )
+            .catch((error: unknown) => {
+              if (isUniqueViolation(error)) {
+                throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+              }
+              throw error;
+            });
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          await this.recordCategoryAudit(client, scope, categoryId, "category.updated", {
+            before: { name: current.name, kind: current.kind, archived: current.archived },
+            after: { name: row.name, kind: row.kind, archived: row.archived },
+          });
+          return {
+            statusCode: 200,
+            response: { category: toCategoryView(row) } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    const response = result.response as unknown as { category: CategoryView };
+    return { replayed: result.replayed, category: response.category };
+  }
+
+  async archiveCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    return this.transitionCategory(scope, categoryId, "archive", idempotencyKey, expectedVersion);
+  }
+
+  async restoreCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    return this.transitionCategory(scope, categoryId, "restore", idempotencyKey, expectedVersion);
+  }
+
+  private async transitionCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    action: "archive" | "restore",
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    assertFinanceCapability(scope, "finance.write");
+    categoryTransitionSchema.parse({ confirm: true });
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/categories/${categoryId}/${action}`,
+        key: idempotencyKey,
+        request: { categoryId, expectedVersion, action },
+        execute: async () => {
+          const currentResult = await client.query<{
+            id: string;
+            workspace_id: string;
+            name: string;
+            kind: "income" | "expense" | "both";
+            archived: boolean;
+            version: number;
+          }>(
+            `SELECT id, workspace_id, name, kind, archived, version
+               FROM finance_category
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, categoryId],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
+          if (action === "restore")
+            await assertCategoryNameAvailable(client, scope.workspaceId, current.name, categoryId);
+          if (action === "archive" && current.archived) {
+            throw new FinanceConflictError("A categoria já está arquivada.");
+          }
+          if (action === "restore" && !current.archived) {
+            throw new FinanceConflictError("A categoria já está ativa.");
+          }
+          const archived = action === "archive";
+          const updated = await client
+            .query<{
+              id: string;
+              workspace_id: string;
+              name: string;
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+              version: number;
+            }>(
+              `UPDATE finance_category
+                  SET archived = $3, version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $4
+                RETURNING id, workspace_id, name, kind, archived, version`,
+              [scope.workspaceId, categoryId, archived, expectedVersion],
+            )
+            .catch((error: unknown) => {
+              if (isUniqueViolation(error)) {
+                throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+              }
+              throw error;
+            });
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          await this.recordCategoryAudit(client, scope, categoryId, `category.${action}`, {
+            before: { name: current.name, kind: current.kind, archived: current.archived },
+            after: { name: row.name, kind: row.kind, archived: row.archived },
+          });
+          return {
+            statusCode: 200,
+            response: { category: toCategoryView(row) } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    const response = result.response as unknown as { category: CategoryView };
+    return { replayed: result.replayed, category: response.category };
   }
 
   async createCard(scope: FinanceScope, input: unknown, idempotencyKey: string) {
@@ -981,6 +1531,144 @@ export class FinanceService {
         },
       }),
     );
+  }
+
+  async updateCard(
+    scope: FinanceScope,
+    cardId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; card: CreditCardView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = updateCreditCardSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/cards/${cardId}`,
+        key: idempotencyKey,
+        request: { cardId, expectedVersion, ...parsed },
+        execute: async () => {
+          const current = await lockCreditCard(client, scope.workspaceId, cardId);
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) {
+            throw new VersionConflictError(current.version);
+          }
+          const changesClosingCycle =
+            parsed.closingDay !== undefined && parsed.closingDay !== current.closing_day;
+          const changesDueCycle = parsed.dueDay !== undefined && parsed.dueDay !== current.due_day;
+          if (changesClosingCycle || changesDueCycle) {
+            // Existing purchases retain the cycle dates that were persisted when
+            // they were created. Changing the card rule while such a cycle is
+            // open would make the next purchase recalculate against a different
+            // rule and can create overlapping open invoices. Keep the operation
+            // explicit: the user must close/resolve the cycle before changing
+            // the rule.
+            const blocking = await client.query<{ blocked: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1
+                   FROM credit_statement s
+                  WHERE s.workspace_id = $1 AND s.card_id = $2 AND s.state = 'open'
+                    AND EXISTS (
+                      SELECT 1
+                        FROM finance_transaction t
+                       WHERE t.workspace_id = s.workspace_id
+                         AND t.statement_id = s.id
+                         AND t.kind = 'expense'
+                         AND t.state <> 'canceled'
+                    )
+               ) AS blocked`,
+              [scope.workspaceId, cardId],
+            );
+            if (blocking.rows[0]?.blocked) {
+              throw new FinanceConflictError(
+                "Feche ou resolva a fatura aberta antes de alterar o ciclo do cartão.",
+              );
+            }
+          }
+          if (parsed.limit && parsed.limit.currency !== current.currency_code) {
+            throw new FinanceConflictError("O limite do cartão deve usar a moeda do espaço.");
+          }
+          const updated = await client.query<CreditCardRow>(
+            `UPDATE credit_card
+                SET name = $3, closing_day = $4, due_day = $5, holder = $6, last_four = $7,
+                    limit_minor = $8, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $9
+              RETURNING id, workspace_id, name, closing_day, due_day, holder, last_four,
+                        limit_minor, currency_code, archived, version`,
+            [
+              scope.workspaceId,
+              cardId,
+              parsed.name ?? current.name,
+              parsed.closingDay ?? current.closing_day,
+              parsed.dueDay ?? current.due_day,
+              parsed.holder === undefined ? current.holder : parsed.holder,
+              parsed.lastFour === undefined ? current.last_four : parsed.lastFour,
+              parsed.limit === undefined
+                ? current.limit_minor
+                : parsed.limit === null
+                  ? null
+                  : BigInt(parsed.limit.minor),
+              expectedVersion,
+            ],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          return { statusCode: 200, response: toCreditCardView(row) as unknown as JsonValue };
+        },
+      }),
+    );
+    return { replayed: result.replayed, card: result.response as unknown as CreditCardView };
+  }
+
+  async archiveCard(
+    scope: FinanceScope,
+    cardId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; card: CreditCardView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/cards/${cardId}/archive`,
+        key: idempotencyKey,
+        request: { cardId, expectedVersion },
+        execute: async () => {
+          const current = await lockCreditCard(client, scope.workspaceId, cardId);
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) {
+            throw new VersionConflictError(current.version);
+          }
+          if (!current.archived) {
+            const blocking = await client.query<{ blocked: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1
+                   FROM credit_statement
+                  WHERE workspace_id = $1 AND card_id = $2 AND state <> 'canceled'
+                    AND (state = 'open' OR total_minor > paid_minor)
+               ) AS blocked`,
+              [scope.workspaceId, cardId],
+            );
+            if (blocking.rows[0]?.blocked) {
+              throw new FinanceConflictError(
+                "Quite o saldo e feche ou transfira a fatura antes de arquivar o cartão.",
+              );
+            }
+          }
+          const updated = await client.query<CreditCardRow>(
+            `UPDATE credit_card
+                SET archived = true, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $3
+              RETURNING id, workspace_id, name, closing_day, due_day, holder, last_four,
+                        limit_minor, currency_code, archived, version`,
+            [scope.workspaceId, cardId, expectedVersion],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          return { statusCode: 200, response: toCreditCardView(row) as unknown as JsonValue };
+        },
+      }),
+    );
+    return { replayed: result.replayed, card: result.response as unknown as CreditCardView };
   }
 
   async createCardPurchase(scope: FinanceScope, input: unknown, idempotencyKey: string) {
@@ -1189,10 +1877,14 @@ export class FinanceService {
     );
   }
 
-  async createRecurrence(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+  async createRecurrence(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; response: RecurrenceCreateResponse }> {
     assertFinanceCapability(scope, "finance.write");
     const parsed = createRecurrenceSchema.parse(input);
-    return this.withUnitOfWork(scope, async ({ client }) =>
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/recurrences`,
         key: idempotencyKey,
@@ -1205,17 +1897,28 @@ export class FinanceService {
           ) {
             throw new FinanceConflictError("A recorrência deve usar a moeda do espaço.");
           }
-          const count = parsed.maxOccurrences ?? 12;
-          const dates = generateRecurrenceDates(
-            parsed.frequency,
-            parsed.startOn,
-            count,
-            parsed.interval,
-          ).filter((date) => !parsed.endOn || date <= parsed.endOn);
+          const today = await this.workspaceToday(client, scope.workspaceId);
+          const dates = recurrenceDatesThrough(
+            {
+              frequency: parsed.frequency,
+              interval: parsed.interval,
+              start_on: parsed.startOn,
+              end_on: parsed.endOn ?? null,
+              max_occurrences: parsed.maxOccurrences ?? null,
+              paused_on: null,
+            },
+            today,
+          );
           const rule = await client.query<{ id: string }>(
-            `INSERT INTO recurrence_rule (workspace_id, frequency, interval, start_on, end_on, max_occurrences, variable, estimated_minor) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+            `INSERT INTO recurrence_rule
+              (workspace_id, kind, amount_minor, frequency, interval, start_on, end_on,
+               max_occurrences, variable, estimated_minor, description)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING id`,
             [
               scope.workspaceId,
+              parsed.kind,
+              BigInt(parsed.amount.minor),
               parsed.frequency,
               parsed.interval,
               parsed.startOn,
@@ -1223,56 +1926,364 @@ export class FinanceService {
               parsed.maxOccurrences ?? null,
               parsed.variable,
               parsed.estimatedAmount ? BigInt(parsed.estimatedAmount.minor) : null,
+              parsed.description,
             ],
           );
           const recurrenceId = rule.rows[0]?.id;
           if (!recurrenceId) throw new Error("recurrence rule insert failed");
+          const ruleData: RecurrenceRuleRow = {
+            id: recurrenceId,
+            workspace_id: scope.workspaceId,
+            kind: parsed.kind,
+            amount_minor: parsed.amount.minor,
+            frequency: parsed.frequency,
+            interval: parsed.interval,
+            start_on: parsed.startOn,
+            end_on: parsed.endOn ?? null,
+            max_occurrences: parsed.maxOccurrences ?? null,
+            variable: parsed.variable,
+            estimated_minor: parsed.estimatedAmount?.minor ?? null,
+            description: parsed.description,
+            status: "active",
+            paused_on: null,
+            version: 0,
+          };
           for (const date of dates) {
-            const transaction = await client.query<{ id: string }>(
-              `INSERT INTO finance_transaction (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, due_on, description, recurrence_id) VALUES ($1, $2, 'planned', 'wallet', $3, 0, $4, $5, $5, $6, $7) RETURNING id`,
-              [
-                scope.workspaceId,
-                parsed.kind,
-                BigInt(parsed.amount.minor),
-                parsed.amount.currency,
-                date,
-                parsed.description,
-                recurrenceId,
-              ],
-            );
-            const transactionId = transaction.rows[0]?.id;
-            if (!transactionId) throw new Error("recurrence transaction insert failed");
-            await this.recordTransactionAudit(
-              client,
-              scope,
-              transactionId,
-              "transaction.created",
-              null,
-              {
-                kind: parsed.kind,
-                state: "planned",
-                categoryId: null,
-                cardId: null,
-                statementId: null,
-                version: 0,
-              },
-            );
-            await client.query(
-              `INSERT INTO recurrence_occurrence (workspace_id, recurrence_id, transaction_id, occurrence_on) VALUES ($1, $2, $3, $4) ON CONFLICT (recurrence_id, occurrence_on) DO NOTHING`,
-              [scope.workspaceId, recurrenceId, transactionId, date],
-            );
+            await this.materializeRecurrenceOccurrence(client, scope, ruleData, date, currency);
           }
+          await this.enqueueRecurrenceExpansion(
+            client,
+            scope.workspaceId,
+            today,
+            scope.correlationId,
+          );
           return {
             statusCode: 201,
             response: {
               id: recurrenceId,
               frequency: parsed.frequency,
-              occurrences: dates,
-            } as JsonValue,
+              occurrences: [...dates],
+            } as unknown as JsonValue,
           };
         },
       }),
     );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as RecurrenceCreateResponse,
+    };
+  }
+
+  async transitionRecurrence(
+    scope: FinanceScope,
+    recurrenceId: string,
+    action: "pause" | "resume",
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; recurrence: RecurrenceView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = recurrenceTransitionSchema.parse(input);
+    return this.withUnitOfWork(scope, async ({ client }) => {
+      const result = await executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/recurrences/${recurrenceId}/${action}`,
+        key: idempotencyKey,
+        request: { action, recurrenceId, parsed, expectedVersion },
+        execute: async () => {
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          const current = await client.query<RecurrenceRuleRow>(
+            `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
+                    start_on::text AS start_on, end_on::text AS end_on,
+                    max_occurrences, variable, estimated_minor, description,
+                    status, paused_on::text AS paused_on, version
+               FROM recurrence_rule
+              WHERE workspace_id = $1 AND id = $2 AND status = 'active'
+              FOR UPDATE`,
+            [scope.workspaceId, recurrenceId],
+          );
+          const row = current.rows[0];
+          if (!row) throw new FinanceNotFoundError();
+          if (row.version !== expectedVersion) throw new VersionConflictError(row.version);
+          if (action === "pause") {
+            if (row.paused_on) {
+              throw new FinanceConflictError("A recorrência já está pausada.");
+            }
+            const effectiveOn =
+              parsed.effectiveOn ?? (await this.workspaceToday(client, scope.workspaceId));
+            if (effectiveOn < row.start_on) {
+              throw new FinanceConflictError("A pausa não pode começar antes da recorrência.");
+            }
+            await client.query(
+              `UPDATE recurrence_rule
+                  SET paused_on = $1, version = version + 1, updated_at = now()
+                WHERE workspace_id = $2 AND id = $3 AND version = $4`,
+              [effectiveOn, scope.workspaceId, recurrenceId, expectedVersion],
+            );
+            const canceled = await client.query<{
+              id: string;
+              kind: "income" | "expense";
+              state: string;
+              version: number;
+            }>(
+              `UPDATE finance_transaction
+                  SET state = 'canceled', version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND recurrence_id = $2
+                  AND occurred_on >= $3 AND state = 'planned'
+                RETURNING id, kind, state, version`,
+              [scope.workspaceId, recurrenceId, effectiveOn],
+            );
+            for (const transaction of canceled.rows) {
+              await this.recordTransactionAudit(
+                client,
+                scope,
+                transaction.id,
+                "transaction.canceled",
+                { kind: transaction.kind, state: "planned", version: transaction.version - 1 },
+                { kind: transaction.kind, state: transaction.state, version: transaction.version },
+              );
+            }
+          } else {
+            if (!row.paused_on) {
+              throw new FinanceConflictError("A recorrência já está ativa.");
+            }
+            if (parsed.effectiveOn) {
+              throw new FinanceConflictError("A retomada não aceita data efetiva.");
+            }
+            await client.query(
+              `UPDATE recurrence_rule
+                  SET paused_on = NULL, version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $3`,
+              [scope.workspaceId, recurrenceId, expectedVersion],
+            );
+          }
+          const updated = await client.query<RecurrenceRuleRow>(
+            `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
+                    start_on::text AS start_on, end_on::text AS end_on,
+                    max_occurrences, variable, estimated_minor, description,
+                    status, paused_on::text AS paused_on, version
+               FROM recurrence_rule
+              WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
+            [scope.workspaceId, recurrenceId],
+          );
+          const next = updated.rows[0];
+          if (!next) throw new Error("recurrence transition lost its row");
+          return {
+            statusCode: 200,
+            response: toRecurrenceView(next, currency) as unknown as JsonValue,
+          };
+        },
+      });
+      return {
+        replayed: result.replayed,
+        recurrence: result.response as unknown as RecurrenceView,
+      };
+    });
+  }
+
+  /** Builds the durable system worker used by the recurrence process. */
+  createRecurrenceWorker(): PostgresJobWorker {
+    return new PostgresJobWorker(
+      this.pool,
+      new Map([
+        [
+          "recurrence.expand:1",
+          async (job: JobRecord, context) => {
+            const payload = parseRecurrenceJobPayload(job.payload);
+            if (payload.workspaceId !== job.workspaceId)
+              throw new Error("recurrence job scope mismatch");
+            const parsedToday = parseLocalDate(payload.asOf);
+            if (!parsedToday.ok) throw new Error("recurrence job has an invalid civil date");
+            await context.runBatch(async ({ client, beforeTransition }) => {
+              const currency = await this.workspaceCurrency(client, payload.workspaceId);
+              const rules = await client.query<RecurrenceRuleRow>(
+                `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
+                        start_on::text AS start_on, end_on::text AS end_on,
+                        max_occurrences, variable, estimated_minor, description,
+                        status, paused_on::text AS paused_on, version
+                   FROM recurrence_rule
+                  WHERE workspace_id = $1 AND status = 'active'
+                  ORDER BY id
+                  FOR UPDATE`,
+                [payload.workspaceId],
+              );
+              const jobScope: FinanceScope = {
+                workspaceId: payload.workspaceId,
+                actorId: "system",
+                role: "owner",
+                correlationId: job.correlationId,
+              };
+              for (const rule of rules.rows) {
+                await beforeTransition();
+                const dates = recurrenceDatesThrough(rule, parsedToday.value);
+                for (const date of dates) {
+                  await this.materializeRecurrenceOccurrence(
+                    client,
+                    jobScope,
+                    rule,
+                    date,
+                    currency,
+                    { actorId: null, origin: "job" },
+                  );
+                }
+              }
+            });
+          },
+        ],
+      ]),
+      {
+        applicationRole: this.applicationRole,
+      },
+    );
+  }
+
+  /** Enqueues one idempotent expansion job per workspace and local civil day. */
+  async scheduleRecurrenceExpansions(at = this.clock.now()): Promise<number> {
+    const workspaces = await this.listActiveRecurrenceWorkspaces();
+    let scheduled = 0;
+    for (const row of workspaces.rows) {
+      await withUnitOfWork(
+        this.pool,
+        { workspaceId: row.workspace_id, applicationRole: this.applicationRole },
+        async ({ client }) => {
+          const today = await this.workspaceToday(client, row.workspace_id, at);
+          const result = await this.enqueueRecurrenceExpansion(
+            client,
+            row.workspace_id,
+            today,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            at,
+          );
+          scheduled += result;
+        },
+      );
+    }
+    return scheduled;
+  }
+
+  /**
+   * Lists active recurrence workspaces under the read-only system RLS policy.
+   * This is deliberately independent from `job`: old rules may have no seed
+   * job after an interrupted migration or a restored database.
+   */
+  private async listActiveRecurrenceWorkspaces(): Promise<{ rows: { workspace_id: string }[] }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(this.applicationRole)) {
+        throw new Error("Invalid PostgreSQL role identifier");
+      }
+      await client.query(`SET LOCAL ROLE "${this.applicationRole}"`);
+      await client.query(
+        `SELECT set_config('app.workspace_id', '', true),
+                set_config('app.actor_id', 'system', true),
+                set_config('app.correlation_id', '', true)`,
+      );
+      const result = await client.query<{ workspace_id: string }>(
+        `SELECT DISTINCT workspace_id
+           FROM recurrence_rule
+          WHERE status = 'active'
+          ORDER BY workspace_id`,
+      );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async enqueueRecurrenceExpansion(
+    client: PgPoolClient,
+    workspaceId: string,
+    asOf: string,
+    correlationId: string,
+    availableAt = this.clock.now(),
+  ): Promise<number> {
+    const result = await client.query(
+      `INSERT INTO job
+        (job_type, job_version, workspace_id, actor_id, required_capability,
+         idempotency_key, payload, available_at, correlation_id)
+       VALUES ('recurrence.expand', 1, $1, NULL, 'system.recurrence', $2, $3::jsonb, $4, $5)
+       ON CONFLICT (job_type, idempotency_key) DO NOTHING`,
+      [
+        workspaceId,
+        `recurrence-expand:${workspaceId}:${asOf}`,
+        JSON.stringify({ workspaceId, asOf } satisfies RecurrenceJobPayload),
+        availableAt,
+        correlationId,
+      ],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  private async materializeRecurrenceOccurrence(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    rule: RecurrenceRuleRow,
+    date: string,
+    currency: string,
+    auditOptions: { actorId: string | null; origin: "api" | "job" } = {
+      actorId: scope.actorId,
+      origin: "api",
+    },
+  ): Promise<string> {
+    const transaction = await client.query<{ id: string }>(
+      `INSERT INTO finance_transaction
+        (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code,
+         occurred_on, due_on, description, recurrence_id)
+       VALUES ($1, $2, 'planned', 'wallet', $3, 0, $4, $5, $5, $6, $7)
+       ON CONFLICT (workspace_id, recurrence_id, occurred_on)
+         WHERE recurrence_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [
+        rule.workspace_id,
+        rule.kind,
+        BigInt(rule.amount_minor),
+        currency,
+        date,
+        rule.description,
+        rule.id,
+      ],
+    );
+    const transactionId =
+      transaction.rows[0]?.id ??
+      (
+        await client.query<{ id: string }>(
+          `SELECT id FROM finance_transaction
+            WHERE workspace_id = $1 AND recurrence_id = $2 AND occurred_on = $3`,
+          [rule.workspace_id, rule.id, date],
+        )
+      ).rows[0]?.id;
+    if (!transactionId) throw new Error("recurrence transaction insert failed");
+    const occurrence = await client.query<{ id: string }>(
+      `INSERT INTO recurrence_occurrence
+        (workspace_id, recurrence_id, transaction_id, occurrence_on)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (recurrence_id, occurrence_on) DO NOTHING
+       RETURNING id`,
+      [rule.workspace_id, rule.id, transactionId, date],
+    );
+    if (transaction.rows[0]?.id && occurrence.rows[0]?.id) {
+      await this.recordTransactionAudit(
+        client,
+        scope,
+        transactionId,
+        "transaction.created",
+        null,
+        {
+          kind: rule.kind,
+          state: "planned",
+          categoryId: null,
+          cardId: null,
+          statementId: null,
+          version: 0,
+        },
+        auditOptions,
+      );
+    }
+    return transactionId;
   }
 
   private async insertTransaction(
@@ -1559,6 +2570,79 @@ export class FinanceService {
     return id;
   }
 
+  private async getLoanRow(
+    client: PgPoolClient,
+    workspaceId: string,
+    loanId: string,
+  ): Promise<LoanRow | null> {
+    const result = await client.query<LoanRow>(
+      `SELECT id, workspace_id, direction, counterparty, principal_minor, paid_minor,
+              currency_code, occurred_on::text AS occurred_on, due_on::text AS due_on,
+              principal_event_id, status, version
+         FROM loan_contract
+        WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, loanId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  private async publishLoanEvent(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    eventId: string,
+    eventType: string,
+    currency: string,
+    entries: readonly { accountId: string; amount: bigint }[],
+    occurredOn: string,
+  ): Promise<void> {
+    const postings = entries.map((entry) => ({
+      accountId: entry.accountId,
+      amount: Money.fromTrusted(entry.amount, currency as never),
+    }));
+    assertBalancedLedgerEvent(postings);
+    await client.query(
+      `INSERT INTO ledger_event
+        (id, workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at)
+       VALUES ($1, $2, NULL, $3, $4, 'published', $5, now())`,
+      [eventId, scope.workspaceId, eventType, currency, occurredOn],
+    );
+    for (const entry of entries) {
+      await client.query(
+        `INSERT INTO ledger_entry
+          (workspace_id, event_id, account_id, currency_code, amount_minor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [scope.workspaceId, eventId, entry.accountId, currency, entry.amount],
+      );
+    }
+  }
+
+  private async recordLoanAudit(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    loanId: string,
+    action: string,
+    before: unknown,
+    after: unknown,
+  ): Promise<void> {
+    const redactedBefore = redactFinanceAuditSnapshot(before);
+    const redactedAfter = redactFinanceAuditSnapshot(after);
+    await client.query(
+      `INSERT INTO audit_event
+        (category, action, actor_id, workspace_id, target_type, target_id,
+         origin, correlation_id, result, before_redacted, after_redacted)
+       VALUES ('finance', $1, $2, $3, 'loan_contract', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
+      [
+        action,
+        scope.actorId,
+        scope.workspaceId,
+        loanId,
+        scope.correlationId,
+        redactedBefore ? JSON.stringify(redactedBefore) : null,
+        redactedAfter ? JSON.stringify(redactedAfter) : null,
+      ],
+    );
+  }
+
   private async recordStatementAudit(
     client: PgPoolClient,
     scope: FinanceScope,
@@ -1581,6 +2665,7 @@ export class FinanceService {
     action: string,
     before: Record<string, unknown> | null = null,
     after: Record<string, unknown> | null = null,
+    options: { actorId?: string | null; origin?: "api" | "job" } = {},
   ): Promise<void> {
     const redactedBefore = redactFinanceAuditSnapshot(before);
     const redactedAfter = redactFinanceAuditSnapshot(after);
@@ -1588,15 +2673,40 @@ export class FinanceService {
       `INSERT INTO audit_event
          (category, action, actor_id, workspace_id, target_type, target_id,
           origin, correlation_id, result, before_redacted, after_redacted)
-       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
+       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, $5, $6, 'success', $7::jsonb, $8::jsonb)`,
+      [
+        action,
+        options.actorId === undefined ? scope.actorId : options.actorId,
+        scope.workspaceId,
+        transactionId,
+        options.origin ?? "api",
+        scope.correlationId,
+        redactedBefore ? JSON.stringify(redactedBefore) : null,
+        redactedAfter ? JSON.stringify(redactedAfter) : null,
+      ],
+    );
+  }
+
+  private async recordCategoryAudit(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    categoryId: string,
+    action: string,
+    snapshots: { before: Record<string, unknown>; after: Record<string, unknown> },
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO audit_event
+         (category, action, actor_id, workspace_id, target_type, target_id,
+          origin, correlation_id, result, before_redacted, after_redacted)
+       VALUES ('finance', $1, $2, $3, 'finance_category', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
       [
         action,
         scope.actorId,
         scope.workspaceId,
-        transactionId,
+        categoryId,
         scope.correlationId,
-        redactedBefore ? JSON.stringify(redactedBefore) : null,
-        redactedAfter ? JSON.stringify(redactedAfter) : null,
+        JSON.stringify(snapshots.before),
+        JSON.stringify(snapshots.after),
       ],
     );
   }
@@ -1613,23 +2723,22 @@ export class FinanceService {
     return result.rows[0]?.currency_code ?? "BRL";
   }
 
-  private async workspaceToday(client: PgPoolClient, workspaceId: string): Promise<string> {
+  private async workspaceToday(
+    client: PgPoolClient,
+    workspaceId: string,
+    at = this.clock.now(),
+  ): Promise<string> {
     const result = await client.query<{ timezone: string }>(
       `SELECT timezone FROM workspace_preference WHERE workspace_id = $1`,
       [workspaceId],
     );
     const timezone = result.rows[0]?.timezone ?? "UTC";
     try {
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: timezone,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).formatToParts(new Date());
-      const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-      const date = `${values.year}-${values.month}-${values.day}`;
-      if (!parseLocalDate(date).ok) throw new Error("invalid local date");
-      return date;
+      const parsedTimeZone = parseTimeZone(timezone);
+      if (!parsedTimeZone.ok) throw new Error("invalid time zone");
+      const date = todayInTimeZone(fixedClock(at), parsedTimeZone.value);
+      if (!date.ok) throw new Error("invalid local date");
+      return date.value;
     } catch {
       throw new FinanceConflictError("O fuso horário do espaço é inválido.");
     }
@@ -1697,7 +2806,91 @@ export class FinanceService {
   }
 }
 
-function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {
+async function assertCategoryNameAvailable(
+  client: PgPoolClient,
+  workspaceId: string,
+  name: string,
+  exceptId: string,
+): Promise<void> {
+  const result = await client.query<{ id: string }>(
+    `SELECT id
+       FROM finance_category
+      WHERE workspace_id = $1 AND id <> $2 AND archived = false AND lower(name) = lower($3)
+      LIMIT 1`,
+    [workspaceId, exceptId, name],
+  );
+  if (result.rows[0])
+    throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
+}
+
+function isUniqueViolation(error: unknown): error is { code: string } {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "23505");
+}
+
+function recurrenceDatesThrough(
+  rule: Pick<
+    RecurrenceRuleRow,
+    "frequency" | "interval" | "start_on" | "end_on" | "max_occurrences" | "paused_on"
+  >,
+  today: string,
+): readonly string[] {
+  const parsedToday = parseLocalDate(today);
+  const parsedStart = parseLocalDate(rule.start_on);
+  if (!parsedToday.ok || !parsedStart.ok) {
+    throw new FinanceConflictError("A recorrência possui uma data civil inválida.");
+  }
+  const horizon = addLocalDateMonths(parsedToday.value, 12);
+  let through: string = horizon;
+  if (rule.end_on && rule.end_on < through) through = rule.end_on;
+  if (rule.paused_on) {
+    const parsedPause = parseLocalDate(rule.paused_on);
+    if (!parsedPause.ok) throw new FinanceConflictError("A pausa possui uma data civil inválida.");
+    const beforePause = addLocalDateDays(parsedPause.value, -1);
+    if (beforePause < through) through = beforePause;
+  }
+  const maxOccurrences = rule.max_occurrences ?? 10_000;
+  return generateRecurrenceDatesUntil(
+    rule.frequency,
+    rule.start_on,
+    through,
+    rule.interval,
+    maxOccurrences,
+  );
+}
+
+function parseRecurrenceJobPayload(value: JsonValue): RecurrenceJobPayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("recurrence job payload is invalid");
+  }
+  const payload = value as Record<string, JsonValue>;
+  if (typeof payload.workspaceId !== "string" || typeof payload.asOf !== "string") {
+    throw new Error("recurrence job payload is invalid");
+  }
+  return { workspaceId: payload.workspaceId, asOf: payload.asOf };
+}
+
+function toRecurrenceView(row: RecurrenceRuleRow, currency: string): RecurrenceView {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    kind: row.kind,
+    amount: { currency, minor: row.amount_minor.toString() },
+    frequency: row.frequency,
+    interval: row.interval,
+    startOn: row.start_on,
+    endOn: row.end_on,
+    maxOccurrences: row.max_occurrences,
+    variable: row.variable,
+    estimatedAmount: row.estimated_minor
+      ? { currency, minor: row.estimated_minor.toString() }
+      : null,
+    description: row.description,
+    pausedOn: row.paused_on,
+    version: row.version,
+  };
+}
+
+export function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {
   if (capability === "finance.write" && scope.role === "viewer") {
     throw new FinancePermissionError();
   }
@@ -1828,6 +3021,39 @@ function toTransactionView(row: TransactionRow): TransactionView {
   };
 }
 
+function toLoanView(row: LoanRow): LoanView {
+  const principal = BigInt(row.principal_minor);
+  const paid = BigInt(row.paid_minor);
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    direction: row.direction,
+    counterparty: row.counterparty,
+    principal: { currency: row.currency_code, minor: principal.toString() },
+    paid: { currency: row.currency_code, minor: paid.toString() },
+    remaining: { currency: row.currency_code, minor: (principal - paid).toString() },
+    occurredOn: row.occurred_on,
+    dueOn: row.due_on,
+    status: row.status,
+    version: row.version,
+  };
+}
+
+function loanAccountKind(direction: "lent" | "borrowed"): "loan_receivable" | "loan_payable" {
+  return direction === "lent" ? "loan_receivable" : "loan_payable";
+}
+
+function loanAccountName(loanId: string): string {
+  return `Empréstimo ${loanId}`;
+}
+
+function loanEventType(direction: "lent" | "borrowed", action: "principal" | "payment"): string {
+  if (direction === "lent") {
+    return action === "principal" ? "loan.principal.lent.v1" : "loan.payment.received.v1";
+  }
+  return action === "principal" ? "loan.principal.borrowed.v1" : "loan.payment.made.v1";
+}
+
 /**
  * Audit snapshots are deliberately smaller than a transaction view. Keep the
  * allowlist and value checks in one place so both writes and reads enforce the
@@ -1839,6 +3065,13 @@ export function redactFinanceAuditSnapshot(value: unknown): Record<string, unkno
   const snapshot: Record<string, unknown> = {};
   if (typeof source.kind === "string") snapshot.kind = source.kind;
   if (typeof source.state === "string") snapshot.state = source.state;
+  if (typeof source.direction === "string") snapshot.direction = source.direction;
+  if (typeof source.status === "string") snapshot.status = source.status;
+  if (typeof source.counterparty === "string") snapshot.counterparty = source.counterparty;
+  for (const key of ["occurredOn", "dueOn"] as const) {
+    if (source[key] === null || typeof source[key] === "string")
+      snapshot[key] = source[key] ?? null;
+  }
   for (const key of ["categoryId", "cardId", "statementId"] as const) {
     if (source[key] === null || typeof source[key] === "string")
       snapshot[key] = source[key] ?? null;
@@ -1890,6 +3123,36 @@ function transactionAuditSnapshot(
   };
 }
 
+interface CreditCardRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  closing_day: number;
+  due_day: number;
+  holder: string | null;
+  last_four: string | null;
+  limit_minor: string | bigint | null;
+  currency_code: string;
+  archived: boolean;
+  version: number;
+}
+
+async function lockCreditCard(
+  client: PgPoolClient,
+  workspaceId: string,
+  cardId: string,
+): Promise<CreditCardRow | null> {
+  const result = await client.query<CreditCardRow>(
+    `SELECT id, workspace_id, name, closing_day, due_day, holder, last_four,
+            limit_minor, currency_code, archived, version
+       FROM credit_card
+      WHERE workspace_id = $1 AND id = $2
+      FOR UPDATE`,
+    [workspaceId, cardId],
+  );
+  return result.rows[0] ?? null;
+}
+
 function toCategoryView(row: {
   id: string;
   workspace_id: string;
@@ -1908,19 +3171,7 @@ function toCategoryView(row: {
   };
 }
 
-function toCreditCardView(row: {
-  id: string;
-  workspace_id: string;
-  name: string;
-  closing_day: number;
-  due_day: number;
-  holder: string | null;
-  last_four: string | null;
-  limit_minor: string | bigint | null;
-  currency_code: string;
-  archived: boolean;
-  version: number;
-}): CreditCardView {
+function toCreditCardView(row: CreditCardRow): CreditCardView {
   return {
     id: row.id,
     workspaceId: row.workspace_id,

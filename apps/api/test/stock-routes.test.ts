@@ -37,6 +37,7 @@ const shoppingItem = {
   note: null,
   purchased: false,
   purchasedAt: null,
+  expenseTransactionId: null,
   lastChangedBy: "user-1",
   version: 0,
 };
@@ -169,10 +170,80 @@ describe("stock HTTP boundary", () => {
           "idempotency-key": "shopping-purchase-0001",
           "if-match": '"v0"',
         },
-        body: JSON.stringify({ addToStock: false }),
+        body: JSON.stringify({
+          addToStock: false,
+          expenseTransactionId: "0190f3c8-2a10-7abc-8def-1234567890af",
+        }),
       },
     );
     expect(purchased.status).toBe(200);
-    expect(purchaseInput).toEqual({ addToStock: false });
+    expect(purchaseInput).toEqual({
+      addToStock: false,
+      expenseTransactionId: "0190f3c8-2a10-7abc-8def-1234567890af",
+    });
+  });
+
+  it("expõe preview e confirmação do cadastro em lote com modo explícito", async () => {
+    let previewInput: unknown;
+    let applyInput: unknown;
+    const preview = {
+      contentHash: "a".repeat(64),
+      headers: ["Nome"],
+      fatalErrors: [],
+      rows: [],
+      counts: { new: 0, update: 0, duplicate: 0, invalid: 0 },
+      canApplyValidOnly: false,
+      canApplyAllOrNothing: false,
+    };
+    const service = {
+      previewBulkProducts: async (_scope: unknown, input: unknown) => {
+        previewInput = input;
+        return preview;
+      },
+      applyBulkProducts: async (_scope: unknown, input: unknown) => {
+        applyInput = input;
+        return {
+          replayed: false,
+          statusCode: 422,
+          committed: false,
+          preview,
+          applied: [],
+        };
+      },
+    } as unknown as StockService;
+    const app = appFor(service);
+    const previewResponse = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/stock/products/bulk/preview`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "Arroz" }),
+      },
+    );
+    expect(previewResponse.status).toBe(200);
+    expect(previewInput).toEqual({ content: "Arroz" });
+
+    const applyResponse = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/stock/products/bulk`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "stock-bulk-apply-0001",
+        },
+        body: JSON.stringify({
+          content: "Arroz",
+          mode: "all_or_nothing",
+          previewHash: "a".repeat(64),
+        }),
+      },
+    );
+    expect(applyResponse.status).toBe(422);
+    expect(applyResponse.headers.get("X-Idempotent-Replay")).toBe("false");
+    expect(applyInput).toEqual({
+      content: "Arroz",
+      mode: "all_or_nothing",
+      previewHash: "a".repeat(64),
+    });
   });
 });

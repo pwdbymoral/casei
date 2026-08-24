@@ -75,11 +75,11 @@ if (!adminUrl) {
           client.query(`UPDATE ledger_event SET occurred_on = '2026-08-24' WHERE id = $1`, [
             event.rows[0]?.id,
           ]),
-          /published ledger event is immutable/,
+          /published ledger event is immutable|permission denied/,
         );
         await assert.rejects(
           client.query(`DELETE FROM ledger_entry WHERE event_id = $1`, [event.rows[0]?.id]),
-          /published ledger entries are immutable/,
+          /published ledger entries are immutable|permission denied/,
         );
       } finally {
         await client.query("RESET ROLE");

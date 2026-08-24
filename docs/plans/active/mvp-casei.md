@@ -96,7 +96,7 @@ auditoria detalhada e concorrência de produção continuam pendentes para o Gat
 ## Marco 3 — compromissos, recorrências e parcelas
 
 - [x] **PLAN-001 Planejado/liquidação parcial (backend):** vencimento, valor planejado/efetivo, atraso derivado e múltiplas liquidações com idempotência, versão e delta no ledger. A UI de compromissos permanece em PLAN-005.
-- [ ] **PLAN-002 Recurrence engine:** semanal/mensal/anual, variável/fixa, janela de 12 meses, meses curtos, pausa e job idempotente.
+- [x] **PLAN-002 Recurrence engine:** semanal/mensal/anual, variável/fixa, janela civil de 12 meses, meses curtos, pausa inclusiva, cancelamento auditável e job idempotente.
 - [ ] **PLAN-003 Edição de série:** somente esta, esta e futuras, futuras não liquidadas; preservar liquidadas e tratar exceções.
 - [ ] **PLAN-004 Installment engine:** distribuição exata de centavos, preview, edição e cancelamento futuro.
 - [ ] **PLAN-005 UI de compromissos:** próximos, vencidos, confirmar valor variável, pagar/receber parcial e editar escopo.
@@ -126,11 +126,11 @@ existirem ajuste pós-fechamento, correção de ciclo, estorno/tarifas e visão 
 
 Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam seriadas.
 
-- [ ] **LOAN-001 Empréstimo concedido/recebido:** contrato, contraparte, principal e eventos ledger.
-- [ ] **LOAN-002 Pagamentos:** parcial, agenda opcional, separação de principal/juros/tarifas, baixa/perdão.
+- [x] **LOAN-001 Empréstimo concedido/recebido (IOU simples):** contrato, contraparte, principal, data, vencimento opcional e eventos ledger sem renda/despesa.
+- [x] **LOAN-002 Pagamentos (IOU simples):** pagamentos de principal parciais/totais, saldo/status, idempotência, versão e excedente rejeitado; juros, tarifas, baixa e perdão ficam fora do MVP.
 - [ ] **LOAN-003 UI empréstimos:** resumo de saldo, cronograma, registrar pagamento, histórico e previsão de quitação.
-- [ ] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura.
-- [ ] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total.
+- [x] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura (backend/API).
+- [x] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total (backend/API).
 - [ ] **GOAL-003 UI metas:** captura simples, progresso, ritmo, reserva descoberta e simulação de contribuição.
 
 **Gate 5:** empréstimo nunca vira renda/despesa de principal; meta nunca altera saldo por reservar; gastos vinculados reconciliam atomicamente.
@@ -149,17 +149,19 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
   Follow-up separado **STOCK-003a** permanece para substituir os cursores atualmente aceitos pelos
   endpoints de produtos/movimentações por cursor opaco assinado, com teste de continuidade, limite e
   rejeição de cursor adulterado; esta fatia não altera a ordenação/contrato já publicado do STOCK-002.
-- [ ] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
+- [x] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
 - [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
-- [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
+- [x] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
+  `expenseTransactionId` referencia explicitamente uma despesa existente do mesmo espaço; não cria,
+  escolhe nem distribui lançamentos financeiros automaticamente.
 
 **Gate 6:** quantidade e histórico reconciliam; concorrência não duplica lista; jornada no mercado passa em telefone e teclado.
 
 ## Marco 7 — intercâmbio de dados
 
 - [ ] **DATA-001 ADR e adapters de arquivo:** storage S3-compatible, expiração, streaming seguro e varredura/validação de formato.
-- [ ] **DATA-002 Parser/mapeamento:** CSV/XLSX, encoding/locale, sugestão editável e perfis salvos.
-- [ ] **DATA-003 Validação/preflight:** resultado por linha, fingerprints, política de duplicata e conflito de versão.
+- [x] **DATA-002 Parser/mapeamento:** CSV/XLSX, encoding/locale, sugestão editável e perfis salvos. O pacote `@casei/data` oferece representação tabular comum, parser XLSX limitado e sem macros/links externos, mapeamento editável e perfil serializável sem arquivo original.
+- [x] **DATA-003 Validação/preflight:** resultado por linha, fingerprints, política de duplicata e conflito de versão. O preflight aceita CSV/XLSX, mantém linhas físicas e classifica válidas, duplicatas sugeridas e erros antes da aplicação; conflito de versão permanece responsabilidade da aplicação DATA-004.
 - [ ] **DATA-004 Aplicação:** jobs em lotes chamando casos de uso, revalidação de ator/capacidade antes de cada lote, atomicidade por linha, cancelamento/retry/reversão.
 - [ ] **DATA-005 Export:** CSVs versionados, ZIP/manifesto/checksum, formula injection e streaming/proxy autorizado no download, sem URL presignada para export sensível.
 - [ ] **DATA-006 UI import/export:** upload, mapping, preview, progresso, resultado, retry e relatório acessível.

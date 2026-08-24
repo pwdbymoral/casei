@@ -4,17 +4,58 @@ import {
   calculateSafeToSpend,
   calculateStatementDates,
   canonicalCardPaymentPostings,
+  canonicalLoanPaymentPostings,
+  canonicalLoanPrincipalPostings,
   canonicalTransactionPostings,
   distributeInstallments,
   generateRecurrenceDates,
+  generateRecurrenceDatesUntil,
   requiredGoalContribution,
 } from "../src/finance.js";
 import { Money } from "../src/money.js";
-import { parseLocalDate } from "../src/time.js";
+import { addLocalDateMonths, parseLocalDate } from "../src/time.js";
 
 const brl = (minor: bigint) => Money.fromTrusted(minor, "BRL" as never);
 
 describe("financial domain", () => {
+  it("publishes loan principal and repayment without income or expense accounts", () => {
+    const principal = canonicalLoanPrincipalPostings({
+      direction: "lent",
+      amount: brl(1_000n),
+      accounts: { wallet: "wallet", loan: "receivable" },
+    });
+    expect(principal.map((entry) => [entry.accountId, entry.amount.minor])).toEqual([
+      ["wallet", -1_000n],
+      ["receivable", 1_000n],
+    ]);
+    const received = canonicalLoanPaymentPostings({
+      direction: "lent",
+      amount: brl(250n),
+      accounts: { wallet: "wallet", loan: "receivable" },
+    });
+    expect(received.map((entry) => [entry.accountId, entry.amount.minor])).toEqual([
+      ["wallet", 250n],
+      ["receivable", -250n],
+    ]);
+    assertBalancedLedgerEvent(principal);
+    assertBalancedLedgerEvent(received);
+  });
+
+  it("reverses cash direction for a borrowed loan", () => {
+    const principal = canonicalLoanPrincipalPostings({
+      direction: "borrowed",
+      amount: brl(1_000n),
+      accounts: { wallet: "wallet", loan: "payable" },
+    });
+    const payment = canonicalLoanPaymentPostings({
+      direction: "borrowed",
+      amount: brl(300n),
+      accounts: { wallet: "wallet", loan: "payable" },
+    });
+    expect(principal.map((entry) => entry.amount.minor)).toEqual([1_000n, -1_000n]);
+    expect(payment.map((entry) => entry.amount.minor)).toEqual([-300n, 300n]);
+  });
+
   it("requires balanced, non-zero, same-currency ledger postings", () => {
     expect(() =>
       assertBalancedLedgerEvent([
@@ -114,6 +155,37 @@ describe("financial domain", () => {
       "2026-01-08",
       "2026-01-15",
     ]);
+    expect(generateRecurrenceDatesUntil("monthly", "2026-01-31", "2026-05-31")).toEqual([
+      "2026-01-31",
+      "2026-02-28",
+      "2026-03-31",
+      "2026-04-30",
+      "2026-05-31",
+    ]);
+    expect(generateRecurrenceDatesUntil("annual", "2028-02-29", "2032-02-29")).toEqual([
+      "2028-02-29",
+      "2029-02-28",
+      "2030-02-28",
+      "2031-02-28",
+      "2032-02-29",
+    ]);
+  });
+
+  it("calculates a civil twelve-month horizon without UTC drift", () => {
+    const leapStart = parseLocalDate("2028-02-29");
+    const monthStart = parseLocalDate("2026-01-31");
+    if (!leapStart.ok || !monthStart.ok) throw new Error("test date should be valid");
+    expect(addLocalDateMonths(leapStart.value, 12)).toBe("2029-02-28");
+    expect(addLocalDateMonths(monthStart.value, 12)).toBe("2027-01-31");
+  });
+
+  it("preserves years below 100 when adding civil months", () => {
+    const yearOne = parseLocalDate("0001-01-31");
+    const yearNinetyNine = parseLocalDate("0099-12-31");
+    if (!yearOne.ok || !yearNinetyNine.ok) throw new Error("test date should be valid");
+
+    expect(addLocalDateMonths(yearOne.value, 1)).toBe("0001-02-28");
+    expect(addLocalDateMonths(yearNinetyNine.value, 1)).toBe("0100-01-31");
   });
 
   it("rejects impossible civil dates instead of relying on UTC rollover", () => {

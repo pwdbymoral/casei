@@ -225,8 +225,8 @@ export type CreateStockProductInput = z.infer<typeof createStockProductSchema>;
 
 export const updateStockProductSchema = z
   .object({
-    name: z.string().trim().min(1).max(200),
-    unit: stockUnitSchema,
+    name: z.string().trim().min(1).max(200).optional(),
+    unit: stockUnitSchema.optional(),
     unitLabel: z.string().trim().max(40).nullable().optional(),
     minimum: stockQuantitySchema.nullable().optional(),
     shoppingAuto: z.boolean().optional(),
@@ -244,6 +244,26 @@ export const updateStockProductSchema = z
     }
   });
 export type UpdateStockProductInput = z.infer<typeof updateStockProductSchema>;
+
+export const stockBulkModeSchema = z.enum(["valid_only", "all_or_nothing"]);
+export type StockBulkMode = z.infer<typeof stockBulkModeSchema>;
+
+const stockBulkContentSchema = z
+  .string()
+  .min(1, "Informe pelo menos uma linha de produto.")
+  .max(10_000_000, "O conteúdo do lote excede o limite permitido.");
+
+export const stockBulkPreviewRequestSchema = z.object({
+  content: stockBulkContentSchema,
+});
+export type StockBulkPreviewRequest = z.infer<typeof stockBulkPreviewRequestSchema>;
+
+export const stockBulkApplyRequestSchema = z.object({
+  content: stockBulkContentSchema,
+  mode: stockBulkModeSchema,
+  previewHash: z.string().regex(/^[a-f0-9]{64}$/, "Hash da prévia inválido."),
+});
+export type StockBulkApplyRequest = z.infer<typeof stockBulkApplyRequestSchema>;
 
 export const stockProductListQuerySchema = paginationQuerySchema.extend({
   query: z.string().trim().max(100).optional(),
@@ -289,7 +309,9 @@ export const stockShoppingItemSchema = z.object({
   note: z.string().trim().max(500).nullable(),
   purchased: z.boolean(),
   purchasedAt: z.string().datetime({ offset: true }).nullable(),
-  lastChangedBy: userIdSchema,
+  /** Optional explicit link to the expense that paid for this completed purchase. */
+  expenseTransactionId: domainIdSchema.nullable(),
+  lastChangedBy: userIdSchema.nullable(),
   version: versionSchema,
 });
 export type StockShoppingItemContract = z.infer<typeof stockShoppingItemSchema>;
@@ -317,6 +339,8 @@ export const purchaseStockShoppingItemSchema = z.object({
   /** This explicit flag is the only way a purchase can create a stock entry. */
   addToStock: z.boolean().default(false),
   quantity: stockQuantitySchema.nullable().optional(),
+  /** Linking an existing expense is explicit; omitting it never creates one. */
+  expenseTransactionId: domainIdSchema.nullable().optional(),
 });
 export type PurchaseStockShoppingItemInput = z.infer<typeof purchaseStockShoppingItemSchema>;
 
@@ -370,6 +394,25 @@ const civilDateSchema = z
 
 export { civilDateSchema };
 
+export const insightWindowQuerySchema = z
+  .object({
+    asOf: civilDateSchema.optional(),
+    from: civilDateSchema.optional(),
+    to: civilDateSchema.optional(),
+  })
+  .refine((query) => {
+    const effectiveFrom = query.from ?? query.asOf;
+    const effectiveTo = query.to ?? query.asOf;
+    return !effectiveFrom || !effectiveTo || effectiveFrom <= effectiveTo;
+  }, "from must not be after to");
+export type InsightWindowQuery = z.infer<typeof insightWindowQuerySchema>;
+
+export const safeToSpendQuerySchema = z.object({
+  asOf: civilDateSchema.optional(),
+  horizonDays: z.coerce.number().int().min(1).max(365).default(30),
+});
+export type SafeToSpendQuery = z.infer<typeof safeToSpendQuerySchema>;
+
 const minorAmountSchema = z
   .string()
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
@@ -390,6 +433,13 @@ export type MoneyContract = z.infer<typeof moneySchema>;
 
 export const positiveMoneySchema = moneySchema.extend({
   minor: minorAmountSchema.refine((value) => BigInt(value) > 0n, "minor must be greater than zero"),
+});
+
+const nonNegativeMoneySchema = moneySchema.extend({
+  minor: minorAmountSchema.refine(
+    (value) => BigInt(value) >= 0n,
+    "minor must be greater than or equal to zero",
+  ),
 });
 
 export const transactionKindSchema = z.enum(["income", "expense", "transfer", "adjustment"]);
@@ -439,6 +489,49 @@ export const settleTransactionSchema = z.object({
 });
 export type SettleTransactionInput = z.infer<typeof settleTransactionSchema>;
 
+export const loanDirectionSchema = z.enum(["lent", "borrowed"]);
+export const loanStatusSchema = z.enum(["open", "settled"]);
+
+export const loanSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  direction: loanDirectionSchema,
+  counterparty: z.string().min(1).max(200),
+  principal: positiveMoneySchema,
+  paid: moneySchema,
+  remaining: moneySchema,
+  occurredOn: civilDateSchema,
+  dueOn: civilDateSchema.nullable(),
+  status: loanStatusSchema,
+  version: versionSchema,
+});
+
+export const createLoanSchema = z
+  .object({
+    direction: loanDirectionSchema,
+    counterparty: z.string().trim().min(1).max(200),
+    principal: positiveMoneySchema,
+    occurredOn: civilDateSchema.optional(),
+    dueOn: civilDateSchema.nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.dueOn && value.occurredOn && value.dueOn < value.occurredOn) {
+      context.addIssue({
+        code: "custom",
+        path: ["dueOn"],
+        message: "O vencimento não pode ser anterior à data do empréstimo.",
+      });
+    }
+  });
+
+export const loanPaymentSchema = z.object({
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+});
+
+export type CreateLoanInput = z.infer<typeof createLoanSchema>;
+export type LoanPaymentInput = z.infer<typeof loanPaymentSchema>;
+
 export const transactionListQuerySchema = paginationQuerySchema
   .extend({
     search: z.string().trim().max(100).optional(),
@@ -454,6 +547,68 @@ export const transactionListQuerySchema = paginationQuerySchema
   );
 
 export type TransactionListQuery = z.infer<typeof transactionListQuerySchema>;
+
+export const goalStatusSchema = z.enum(["active", "completed", "paused", "canceled"]);
+export const goalPrioritySchema = z.enum(["low", "normal", "high"]);
+export const goalAmountSchema = z.object({
+  amount: positiveMoneySchema,
+  allowUncovered: z.boolean().default(false),
+});
+export const goalAllocateSchema = goalAmountSchema.extend({
+  occurredOn: civilDateSchema.optional(),
+  note: z.string().trim().max(500).optional(),
+});
+export const goalReleaseSchema = z.object({
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+  note: z.string().trim().max(500).optional(),
+});
+export const createGoalSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  target: positiveMoneySchema,
+  deadline: civilDateSchema.nullable().optional(),
+  priority: goalPrioritySchema.default("normal"),
+  note: z.string().trim().max(500).nullable().optional(),
+});
+export const updateGoalSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    target: positiveMoneySchema.optional(),
+    deadline: civilDateSchema.nullable().optional(),
+    priority: goalPrioritySchema.optional(),
+    note: z.string().trim().max(500).nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+export const goalSpendSchema = z.object({
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+  description: z.string().trim().max(500).default("Gasto da meta"),
+  categoryId: domainIdSchema.nullable().optional(),
+});
+export const goalTransitionSchema = z.object({ confirm: z.literal(true) });
+export const goalSchema = z.object({
+  id: domainIdSchema,
+  workspaceId: workspaceIdSchema,
+  name: z.string().min(1).max(200),
+  target: positiveMoneySchema,
+  reserved: moneySchema,
+  uncovered: moneySchema,
+  remaining: moneySchema,
+  contributionPeriodsRemaining: z.number().int().nonnegative().nullable(),
+  requiredContribution: moneySchema.nullable(),
+  deadline: civilDateSchema.nullable(),
+  priority: goalPrioritySchema,
+  status: goalStatusSchema,
+  note: z.string().max(500).nullable(),
+  version: versionSchema,
+});
+export type CreateGoalInput = z.infer<typeof createGoalSchema>;
+export type UpdateGoalInput = z.infer<typeof updateGoalSchema>;
+export type GoalAmountInput = z.infer<typeof goalAmountSchema>;
+export type GoalAllocateInput = z.infer<typeof goalAllocateSchema>;
+export type GoalReleaseInput = z.infer<typeof goalReleaseSchema>;
+export type GoalSpendInput = z.infer<typeof goalSpendSchema>;
+export type GoalContract = z.infer<typeof goalSchema>;
 
 /** Audit snapshots are allowlisted server-side and intentionally opaque to clients. */
 export const auditSnapshotSchema = z.record(z.string(), z.unknown());
@@ -500,6 +655,13 @@ export const createCategorySchema = z.object({
   name: z.string().trim().min(1).max(80),
   kind: categoryKindSchema,
 });
+export const updateCategorySchema = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    kind: categoryKindSchema.optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+export const categoryTransitionSchema = z.object({ confirm: z.literal(true) });
 
 export const creditCardSchema = z.object({
   id: domainIdSchema,
@@ -512,7 +674,7 @@ export const creditCardSchema = z.object({
     .string()
     .regex(/^\d{4}$/)
     .nullable(),
-  limit: moneySchema.nullable(),
+  limit: nonNegativeMoneySchema.nullable(),
   archived: z.boolean(),
   version: versionSchema,
 });
@@ -527,8 +689,26 @@ export const createCreditCardSchema = z.object({
     .regex(/^\d{4}$/)
     .nullable()
     .optional(),
-  limit: moneySchema.nullable().optional(),
+  limit: nonNegativeMoneySchema.nullable().optional(),
 });
+
+export const updateCreditCardSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    closingDay: z.number().int().min(1).max(31).optional(),
+    dueDay: z.number().int().min(1).max(31).optional(),
+    holder: z.string().trim().max(100).nullable().optional(),
+    lastFour: z
+      .string()
+      .regex(/^\d{4}$/)
+      .nullable()
+      .optional(),
+    limit: nonNegativeMoneySchema.nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Informe ao menos uma configuração para alterar.",
+  });
+export type UpdateCreditCardInput = z.infer<typeof updateCreditCardSchema>;
 
 export const statementSchema = z.object({
   id: domainIdSchema,
@@ -575,18 +755,41 @@ export const payStatementSchema = z.object({
   allowCredit: z.boolean().default(false),
 });
 
-export const createRecurrenceSchema = z.object({
-  kind: z.enum(["income", "expense"]),
-  amount: positiveMoneySchema,
-  frequency: z.enum(["weekly", "monthly", "annual"]),
-  interval: z.number().int().min(1).max(12).default(1),
-  startOn: civilDateSchema,
-  endOn: civilDateSchema.nullable().optional(),
-  maxOccurrences: z.number().int().min(1).max(120).nullable().optional(),
-  variable: z.boolean().default(false),
-  estimatedAmount: positiveMoneySchema.nullable().optional(),
-  description: z.string().trim().max(500).default(""),
+export const createRecurrenceSchema = z
+  .object({
+    kind: z.enum(["income", "expense"]),
+    amount: positiveMoneySchema,
+    frequency: z.enum(["weekly", "monthly", "annual"]),
+    interval: z.number().int().min(1).max(12).default(1),
+    startOn: civilDateSchema,
+    endOn: civilDateSchema.nullable().optional(),
+    maxOccurrences: z.number().int().min(1).max(120).nullable().optional(),
+    variable: z.boolean().default(false),
+    estimatedAmount: positiveMoneySchema.nullable().optional(),
+    description: z.string().trim().max(500).default(""),
+  })
+  .superRefine((value, context) => {
+    if (value.endOn && value.endOn < value.startOn) {
+      context.addIssue({
+        code: "custom",
+        path: ["endOn"],
+        message: "O fim da recorrência deve ser posterior ao início.",
+      });
+    }
+    if (!value.variable && value.estimatedAmount) {
+      context.addIssue({
+        code: "custom",
+        path: ["estimatedAmount"],
+        message: "A estimativa só se aplica a recorrência variável.",
+      });
+    }
+  });
+
+export const recurrenceTransitionSchema = z.object({
+  /** Pause takes effect on this civil date; omitted means today in the workspace. */
+  effectiveOn: civilDateSchema.optional(),
 });
+export type RecurrenceTransitionInput = z.infer<typeof recurrenceTransitionSchema>;
 
 export const createInstallmentPlanSchema = z.object({
   total: positiveMoneySchema,

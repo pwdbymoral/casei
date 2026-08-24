@@ -10,6 +10,7 @@ import {
 } from "./auth.js";
 import { configureFinanceRoutes } from "./finance-routes.js";
 import { FinanceService } from "./finance-service.js";
+import { GoalService } from "./goal-service.js";
 import {
   type ApiEnv,
   correlationMiddleware,
@@ -20,6 +21,7 @@ import {
 } from "./http/index.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
+import { InsightService } from "./insight-service.js";
 import { configureStockRoutes } from "./stock-routes.js";
 import { StockService } from "./stock-service.js";
 
@@ -50,10 +52,14 @@ export interface FinanceAppOptions {
   pool: Pool;
   /** Injectable service boundary for app-composition tests; production uses the pool-backed service. */
   service?: FinanceService;
+  /** Injectable goal service boundary; production uses the finance pool. */
+  goalService?: GoalService;
   /** PostgreSQL role used by every finance command and query. */
   applicationRole?: string;
   /** Secret used to sign private finance list cursors. */
   cursorSecret?: string;
+  /** Injectable read model boundary; production uses the finance pool. */
+  insightService?: InsightService;
 }
 
 export interface StockAppOptions {
@@ -130,6 +136,17 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
         new FinanceService(options.finance.pool, {
           applicationRole: options.finance.applicationRole,
           cursorSecret: options.finance.cursorSecret,
+        }),
+      goalService:
+        options.finance.goalService ??
+        new GoalService(options.finance.pool, {
+          applicationRole: options.finance.applicationRole,
+          cursorSecret: options.finance.cursorSecret,
+        }),
+      insightService:
+        options.finance.insightService ??
+        new InsightService(options.finance.pool, {
+          applicationRole: options.finance.applicationRole,
         }),
       scopeMiddleware: async (context, next) => {
         if (!actorMiddleware || !scopeMiddleware)

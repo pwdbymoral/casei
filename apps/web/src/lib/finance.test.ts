@@ -104,6 +104,38 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("uses If-Match and explicit confirmation for category maintenance", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      if (String(input).endsWith("/categories/category-1")) {
+        expect(init?.method).toBe("PATCH");
+        expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+        return Response.json({ id: "category-1", version: 4, archived: false });
+      }
+      expect(String(input)).toContain("/categories/category-1/archive");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v4"');
+      expect(JSON.parse(String(init?.body))).toEqual({ confirm: true });
+      return Response.json({ id: "category-1", version: 5, archived: true });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const category = {
+      id: "category-1",
+      workspaceId: "workspace",
+      name: "Mercado",
+      kind: "expense" as const,
+      archived: false,
+      version: 3,
+    };
+    const updated = await adapter.updateCategory("workspace", category, { name: "Feira" });
+    expect(updated.version).toBe(4);
+    await expect(
+      adapter.archiveCategory("workspace", { ...category, version: 4 }),
+    ).resolves.toMatchObject({
+      archived: true,
+      version: 5,
+    });
+  });
+
   it("reuses the logical idempotency key after a network failure", async () => {
     let attempts = 0;
     const keys: string[] = [];
@@ -182,6 +214,71 @@ describe("finance adapter", () => {
     await expect(
       adapter.reverseTransaction("workspace", transaction, "reverse-command-001"),
     ).resolves.toMatchObject({ id: "transaction-reversed", state: "canceled" });
+  });
+
+  it("updates card configuration with an If-Match precondition", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe("/v1/workspaces/workspace/cards/card-1");
+      expect(init?.method).toBe("PATCH");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^web-/);
+      expect(JSON.parse(String(init?.body))).toEqual({ closingDay: 12 });
+      return Response.json({
+        id: "card-1",
+        workspaceId: "workspace",
+        name: "Principal",
+        closingDay: 12,
+        dueDay: 17,
+        holder: null,
+        lastFour: null,
+        limit: null,
+        archived: false,
+        version: 4,
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const card = {
+      id: "card-1",
+      workspaceId: "workspace",
+      name: "Principal",
+      closingDay: 10,
+      dueDay: 17,
+      holder: null,
+      lastFour: null,
+      limit: null,
+      archived: false,
+      version: 3,
+    } satisfies import("./finance").CreditCard;
+
+    await expect(adapter.updateCard("workspace", card, { closingDay: 12 })).resolves.toMatchObject({
+      closingDay: 12,
+      version: 4,
+    });
+  });
+
+  it("archives cards through the versioned command endpoint", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe("/v1/workspaces/workspace/cards/card-1/archive");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v4"');
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^web-/);
+      return Response.json({ id: "card-1", archived: true, version: 5 });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    await expect(
+      adapter.archiveCard("workspace", {
+        id: "card-1",
+        workspaceId: "workspace",
+        name: "Principal",
+        closingDay: 10,
+        dueDay: 17,
+        holder: null,
+        lastFour: null,
+        limit: null,
+        archived: false,
+        version: 4,
+      }),
+    ).resolves.toMatchObject({ archived: true, version: 5 });
   });
 
   it("serializes timeline filters and cursor in the API request", async () => {
@@ -286,6 +383,40 @@ describe("finance adapter", () => {
     ).resolves.toMatchObject({ id: created.id, state: "canceled" });
   });
 
+  it("preserves omitted card fields and enforces fixture archive conflicts", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const [card] = await adapter.listCards(workspaceId);
+    if (!card) throw new Error("fixture card missing");
+
+    await expect(adapter.updateCard(workspaceId, card, { closingDay: 12 })).resolves.toMatchObject({
+      id: card.id,
+      name: card.name,
+      dueDay: card.dueDay,
+      closingDay: 12,
+      holder: card.holder,
+      version: card.version + 1,
+    });
+    await expect(adapter.updateCard(workspaceId, card, { name: "stale" })).rejects.toMatchObject({
+      status: 412,
+      currentVersion: card.version + 1,
+    });
+    const updated = (await adapter.listCards(workspaceId)).find((value) => value.id === card.id);
+    if (!updated) throw new Error("updated fixture card missing");
+    await expect(adapter.archiveCard(workspaceId, updated)).rejects.toMatchObject({ status: 409 });
+
+    const cleanWorkspace = "workspace-without-statement";
+    const cleanCard = await adapter.createCard(cleanWorkspace, {
+      name: "Reserva",
+      closingDay: 5,
+      dueDay: 12,
+    });
+    await expect(adapter.archiveCard(cleanWorkspace, cleanCard)).resolves.toMatchObject({
+      archived: true,
+      version: 1,
+    });
+  });
+
   it("reuses an explicit reverse key and updates the fixture invoice totals", async () => {
     const adapter = createFixtureFinanceAdapter();
     const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
@@ -336,6 +467,17 @@ describe("finance adapter", () => {
     expect(guard.isCurrent(oldRequest)).toBe(false);
   });
 
+  it("drops an old category mutation after changing workspace", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    const request = guard.begin("workspace-a");
+    guard.switchWorkspace("workspace-b");
+    const categories: string[] = [];
+    const oldResponse = Promise.resolve("category-from-a");
+    const value = await oldResponse;
+    if (guard.isCurrent(request)) categories.push(value);
+    expect(categories).toEqual([]);
+  });
+
   it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
     const adapter = createFixtureFinanceAdapter();
     const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";
@@ -383,9 +525,21 @@ describe("finance adapter", () => {
       state: "posted",
       description: "Freela",
       cardId: null,
+      categoryId: null,
     });
     expect(transactionCardIdForKind("income", "card-1")).toBeNull();
     expect(transactionCardIdForKind("expense", "card-1")).toBe("card-1");
+    expect(
+      createQuickCaptureTransactionInput({
+        kind: "expense",
+        amountMinor: "500",
+        currency: "USD",
+        planned: false,
+        description: "Feira",
+        cardId: "",
+        categoryId: "category-1",
+      }).categoryId,
+    ).toBe("category-1");
   });
 
   it("labels every timeline kind and uses a non-expense sign for transfers and adjustments", () => {

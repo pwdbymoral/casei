@@ -234,6 +234,57 @@ export const auditEvent = pgTable(
   ],
 );
 
+export const financeTransaction = pgTable(
+  "finance_transaction",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    state: text("state").notNull().default("planned"),
+    instrument: text("instrument").notNull().default("wallet"),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    settledMinor: bigint("settled_minor", { mode: "bigint" }).notNull().default(sql`0`),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    dueOn: date("due_on"),
+    postedOn: instant("posted_on"),
+    cashSettledOn: instant("cash_settled_on"),
+    description: text("description").notNull().default(""),
+    categoryId: uuid("category_id"),
+    cardId: uuid("card_id"),
+    statementId: uuid("statement_id"),
+    goalId: uuid("goal_id"),
+    recurrenceId: uuid("recurrence_id"),
+    installmentPlanId: uuid("installment_plan_id"),
+    installmentNumber: integer("installment_number"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    check(
+      "finance_transaction_kind_check",
+      sql`${table.kind} in ('income', 'expense', 'transfer', 'adjustment')`,
+    ),
+    check(
+      "finance_transaction_state_check",
+      sql`${table.state} in ('planned', 'partially_settled', 'posted', 'canceled')`,
+    ),
+    check("finance_transaction_instrument_check", sql`${table.instrument} in ('wallet', 'card')`),
+    check(
+      "finance_transaction_amount_check",
+      sql`${table.amountMinor} > 0 and ${table.settledMinor} >= 0 and ${table.settledMinor} <= ${table.amountMinor}`,
+    ),
+    check("finance_transaction_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    uniqueIndex("finance_transaction_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("finance_transaction_recurrence_date_unique")
+      .on(table.workspaceId, table.recurrenceId, table.occurredOn)
+      .where(sql`${table.recurrenceId} is not null`),
+  ],
+);
+
 export const stockProduct = pgTable(
   "stock_product",
   {
@@ -297,6 +348,7 @@ export const shoppingItem = pgTable(
     purchased: boolean("purchased").notNull().default(false),
     purchasedAt: instant("purchased_at"),
     purchasedBy: text("purchased_by").references(() => user.id, { onDelete: "restrict" }),
+    expenseTransactionId: uuid("expense_transaction_id"),
     lastChangedBy: text("last_changed_by")
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
@@ -311,6 +363,11 @@ export const shoppingItem = pgTable(
       foreignColumns: [stockProduct.workspaceId, stockProduct.id],
       name: "shopping_item_product_scope_fk",
     }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.expenseTransactionId],
+      foreignColumns: [financeTransaction.workspaceId, financeTransaction.id],
+      name: "shopping_item_expense_transaction_scope_fk",
+    }).onDelete("restrict"),
     check("shopping_item_name_check", sql`length(trim(${table.name})) > 0`),
     check("shopping_item_source_check", sql`${table.source} in ('automatic', 'free')`),
     check(
@@ -658,50 +715,177 @@ export const ledgerEntry = pgTable(
   ],
 );
 
-export const financeTransaction = pgTable(
-  "finance_transaction",
+export const loanContract = pgTable(
+  "loan_contract",
   {
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspace.id, { onDelete: "cascade" }),
-    kind: text("kind").notNull(),
-    state: text("state").notNull().default("planned"),
-    instrument: text("instrument").notNull().default("wallet"),
-    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
-    settledMinor: bigint("settled_minor", { mode: "bigint" }).notNull().default(sql`0`),
+    direction: text("direction").notNull(),
+    counterparty: text("counterparty").notNull(),
+    principalMinor: bigint("principal_minor", { mode: "bigint" }).notNull(),
+    paidMinor: bigint("paid_minor", { mode: "bigint" }).notNull().default(sql`0`),
     currencyCode: varchar("currency_code", { length: 3 }).notNull(),
     occurredOn: date("occurred_on").notNull(),
     dueOn: date("due_on"),
-    postedOn: instant("posted_on"),
-    cashSettledOn: instant("cash_settled_on"),
-    description: text("description").notNull().default(""),
-    categoryId: uuid("category_id"),
-    cardId: uuid("card_id"),
-    statementId: uuid("statement_id"),
-    recurrenceId: uuid("recurrence_id"),
-    installmentPlanId: uuid("installment_plan_id"),
-    installmentNumber: integer("installment_number"),
+    principalEventId: uuid("principal_event_id").notNull(),
+    status: text("status").notNull().default("open"),
     version: integer("version").notNull().default(0),
     createdAt: instant("created_at").defaultNow().notNull(),
     updatedAt: instant("updated_at").defaultNow().notNull(),
   },
   (table) => [
+    uniqueIndex("loan_contract_workspace_id_id_unique").on(table.workspaceId, table.id),
+    index("loan_contract_workspace_status_due_idx").on(
+      table.workspaceId,
+      table.status,
+      table.dueOn,
+      table.occurredOn,
+      table.id,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.principalEventId, table.currencyCode],
+      foreignColumns: [ledgerEvent.workspaceId, ledgerEvent.id, ledgerEvent.currencyCode],
+      name: "loan_contract_principal_event_fk",
+    }).onDelete("cascade"),
+    check("loan_contract_direction_check", sql`${table.direction} in ('lent', 'borrowed')`),
     check(
-      "finance_transaction_kind_check",
-      sql`${table.kind} in ('income', 'expense', 'transfer', 'adjustment')`,
+      "loan_contract_counterparty_check",
+      sql`length(trim(${table.counterparty})) between 1 and 200`,
     ),
     check(
-      "finance_transaction_state_check",
-      sql`${table.state} in ('planned', 'partially_settled', 'posted', 'canceled')`,
+      "loan_contract_principal_check",
+      sql`${table.principalMinor} > 0 and ${table.paidMinor} >= 0 and ${table.paidMinor} <= ${table.principalMinor}`,
     ),
-    check("finance_transaction_instrument_check", sql`${table.instrument} in ('wallet', 'card')`),
+    check("loan_contract_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
     check(
-      "finance_transaction_amount_check",
-      sql`${table.amountMinor} > 0 and ${table.settledMinor} >= 0 and ${table.settledMinor} <= ${table.amountMinor}`,
+      "loan_contract_date_order_check",
+      sql`${table.dueOn} is null or ${table.dueOn} >= ${table.occurredOn}`,
     ),
-    check("finance_transaction_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
-    uniqueIndex("finance_transaction_workspace_id_id_unique").on(table.workspaceId, table.id),
+    check("loan_contract_status_check", sql`${table.status} in ('open', 'settled')`),
+    check(
+      "loan_contract_status_amount_check",
+      sql`(${table.status} = 'open' and ${table.paidMinor} < ${table.principalMinor}) or (${table.status} = 'settled' and ${table.paidMinor} = ${table.principalMinor})`,
+    ),
+    check("loan_contract_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
+export const loanPayment = pgTable(
+  "loan_payment",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id").notNull(),
+    loanId: uuid("loan_id").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    ledgerEventId: uuid("ledger_event_id").notNull(),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("loan_payment_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("loan_payment_event_unique").on(table.workspaceId, table.ledgerEventId),
+    foreignKey({
+      columns: [table.workspaceId, table.loanId],
+      foreignColumns: [loanContract.workspaceId, loanContract.id],
+      name: "loan_payment_loan_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.ledgerEventId, table.currencyCode],
+      foreignColumns: [ledgerEvent.workspaceId, ledgerEvent.id, ledgerEvent.currencyCode],
+      name: "loan_payment_event_fk",
+    }).onDelete("cascade"),
+    check("loan_payment_amount_check", sql`${table.amountMinor} > 0`),
+    check("loan_payment_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+  ],
+);
+
+export const goal = pgTable(
+  "goal",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    targetMinor: bigint("target_minor", { mode: "bigint" }).notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    deadline: date("deadline"),
+    priority: text("priority").notNull().default("normal"),
+    status: text("status").notNull().default("active"),
+    note: text("note"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("goal_workspace_id_id_unique").on(table.workspaceId, table.id),
+    index("goal_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.deadline,
+      table.id,
+    ),
+    check("goal_name_check", sql`length(trim(${table.name})) > 0`),
+    check("goal_target_check", sql`${table.targetMinor} > 0`),
+    check("goal_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    check("goal_priority_check", sql`${table.priority} in ('low', 'normal', 'high')`),
+    check(
+      "goal_status_check",
+      sql`${table.status} in ('active', 'completed', 'paused', 'canceled')`,
+    ),
+    check("goal_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
+export const goalReservationMovement = pgTable(
+  "goal_reservation_movement",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id").notNull(),
+    goalId: uuid("goal_id").notNull(),
+    kind: text("kind").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    transactionId: uuid("transaction_id"),
+    occurredOn: date("occurred_on").notNull(),
+    note: text("note"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.goalId],
+      foreignColumns: [goal.workspaceId, goal.id],
+      name: "goal_reservation_movement_goal_scope_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.transactionId],
+      foreignColumns: [financeTransaction.workspaceId, financeTransaction.id],
+      name: "goal_reservation_movement_transaction_scope_fk",
+    }).onDelete("restrict"),
+    uniqueIndex("goal_reservation_movement_workspace_id_id_unique").on(table.workspaceId, table.id),
+    index("goal_reservation_movement_goal_occurred_idx").on(
+      table.workspaceId,
+      table.goalId,
+      table.occurredOn,
+      table.createdAt,
+      table.id,
+    ),
+    uniqueIndex("goal_reservation_movement_spend_transaction_unique")
+      .on(table.transactionId)
+      .where(sql`${table.kind} = 'spend'`),
+    check(
+      "goal_reservation_movement_kind_check",
+      sql`${table.kind} in ('allocate', 'release', 'spend')`,
+    ),
+    check("goal_reservation_movement_amount_check", sql`${table.amountMinor} > 0`),
+    check("goal_reservation_movement_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    check(
+      "goal_reservation_movement_transaction_check",
+      sql`(${table.kind} = 'spend' and ${table.transactionId} is not null) or (${table.kind} <> 'spend' and ${table.transactionId} is null)`,
+    ),
   ],
 );
 
@@ -719,6 +903,11 @@ export const recurrenceRule = pgTable(
     maxOccurrences: integer("max_occurrences"),
     variable: boolean("variable").notNull().default(false),
     estimatedMinor: bigint("estimated_minor", { mode: "bigint" }),
+    kind: text("kind").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    description: text("description").notNull().default(""),
+    status: text("status").notNull().default("active"),
+    invalidReason: text("invalid_reason"),
     pausedOn: date("paused_on"),
     version: integer("version").notNull().default(0),
     createdAt: instant("created_at").defaultNow().notNull(),
@@ -727,6 +916,16 @@ export const recurrenceRule = pgTable(
   (table) => [
     check("recurrence_frequency_check", sql`${table.frequency} in ('weekly', 'monthly', 'annual')`),
     check("recurrence_interval_check", sql`${table.interval} > 0`),
+    check("recurrence_status_check", sql`${table.status} in ('active', 'archived')`),
+    check(
+      "recurrence_kind_check",
+      sql`${table.status} = 'archived' or ${table.kind} in ('income', 'expense')`,
+    ),
+    check("recurrence_amount_check", sql`${table.status} = 'archived' or ${table.amountMinor} > 0`),
+    check(
+      "recurrence_date_order_check",
+      sql`${table.status} = 'archived' or ${table.endOn} is null or ${table.endOn} >= ${table.startOn}`,
+    ),
   ],
 );
 
@@ -896,6 +1095,10 @@ export const schema = {
   ledgerEvent,
   ledgerEntry,
   financeTransaction,
+  loanContract,
+  loanPayment,
+  goal,
+  goalReservationMovement,
   recurrenceRule,
   recurrenceOccurrence,
   installmentPlan,

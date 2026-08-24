@@ -24,15 +24,28 @@ export interface UnitOfWorkContext {
   scope: CommandScope;
 }
 
+export interface UnitOfWorkOptions {
+  isolationLevel?: "repeatable read" | "serializable";
+  readOnly?: boolean;
+}
+
 /** Runs a command in one database transaction and applies the RLS context locally. */
 export async function withUnitOfWork<T>(
   pool: Pool,
   scope: CommandScope,
   callback: (context: UnitOfWorkContext) => Promise<T>,
+  options: UnitOfWorkOptions = {},
 ): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    if (options.isolationLevel || options.readOnly) {
+      const characteristics = [
+        options.isolationLevel ? `ISOLATION LEVEL ${options.isolationLevel.toUpperCase()}` : null,
+        options.readOnly ? "READ ONLY" : null,
+      ].filter((value): value is string => value !== null);
+      await client.query(`SET TRANSACTION ${characteristics.join(", ")}`);
+    }
     if (scope.applicationRole) {
       await client.query(`SET LOCAL ROLE ${quoteIdentifier(scope.applicationRole)}`);
     }
@@ -509,7 +522,7 @@ export class PostgresJobWorker {
 
   private async assertAuthorized(job: JobRecord): Promise<void> {
     if (!job.workspaceId || !job.actorId) {
-      if (job.requiredCapability !== "system.purge") throw new JobAuthorizationError();
+      if (!isSystemJob(job)) throw new JobAuthorizationError();
       return;
     }
     await withUnitOfWork(
@@ -544,7 +557,7 @@ export class PostgresJobWorker {
       },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        if (!isSystemPurgeJob(job)) {
+        if (!isSystemJob(job)) {
           await assertMembership(
             client,
             job,
@@ -555,7 +568,7 @@ export class PostgresJobWorker {
           client,
           beforeTransition: async () => {
             await assertLeaseFenced(client, job);
-            if (!isSystemPurgeJob(job)) {
+            if (!isSystemJob(job)) {
               await assertMembership(
                 client,
                 job,
@@ -590,10 +603,10 @@ export class PostgresJobWorker {
 
   private async markSucceeded(job: JobRecord): Promise<boolean> {
     if (!job.workspaceId) return false;
-    const systemPurge = isSystemPurgeJob(job);
+    const systemJob = isSystemJob(job);
     return withUnitOfWork(
       this.pool,
-      systemPurge
+      systemJob
         ? { applicationRole: this.options.applicationRole }
         : {
             workspaceId: job.workspaceId,
@@ -602,7 +615,7 @@ export class PostgresJobWorker {
           },
       async ({ client }) => {
         await assertLeaseFenced(client, job);
-        if (!systemPurge) {
+        if (!systemJob) {
           try {
             await assertMembership(
               client,
@@ -722,12 +735,16 @@ function handlerKey(jobType: string, version: number): string {
 
 const defaultCapabilityAuthorizer: CapabilityAuthorizer = ({ role }) => role === "owner";
 
-function isSystemPurgeJob(job: JobRecord): boolean {
+function isSystemJob(job: JobRecord): boolean {
   return (
-    job.jobType === "workspace.purge" &&
-    job.jobVersion === 1 &&
-    job.requiredCapability === "system.purge" &&
-    job.actorId === null
+    (job.jobType === "workspace.purge" &&
+      job.jobVersion === 1 &&
+      job.requiredCapability === "system.purge" &&
+      job.actorId === null) ||
+    (job.jobType === "recurrence.expand" &&
+      job.jobVersion === 1 &&
+      job.requiredCapability === "system.recurrence" &&
+      job.actorId === null)
   );
 }
 
