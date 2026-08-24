@@ -123,7 +123,11 @@ function shoppingScenarioPool() {
       if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
         return { rows: [productRow() as T], rowCount: 1 };
       }
-      if (sql.includes("FROM shopping_item prior") && !sql.includes("UNION ALL")) {
+      if (
+        sql.includes("FROM shopping_item prior") &&
+        !sql.includes("UNION ALL") &&
+        !sql.includes("INSERT INTO shopping_item")
+      ) {
         const suppressed =
           item?.purchased === true && movementAt !== null && purchasedAt !== null
             ? purchasedAt > movementAt
@@ -187,6 +191,12 @@ function shoppingScenarioPool() {
           rowCount: 1,
         };
       }
+      if (sql.includes("UPDATE shopping_item i") && sql.includes("SET version = p.version")) {
+        if (item && values[2] === productId && item.purchased === false) {
+          item = { ...item, version: productVersion, last_changed_by: scope.actorId };
+        }
+        return { rows: [], rowCount: 0 };
+      }
       if (sql.includes("UPDATE stock_product")) {
         productQuantity = BigInt(values[2] as string | bigint);
         productVersion += 1;
@@ -203,7 +213,6 @@ function shoppingScenarioPool() {
         return { rows: [item as T], rowCount: 1 };
       }
       if (sql.includes("FROM shopping_item i") && sql.includes("UNION ALL")) {
-        console.error("LIST MATCH", { hasItem: Boolean(item), purchased: item?.purchased, sql });
         if (item && item.purchased === false) return { rows: [item as T], rowCount: 1 };
         if (item?.purchased === true && (!movementAt || !purchasedAt || movementAt < purchasedAt)) {
           return { rows: [], rowCount: 0 };
@@ -351,5 +360,41 @@ describe("StockService membership revalidation", () => {
 
     const resynchronized = (await service.listShoppingItems(scope))[0];
     expect(resynchronized).toMatchObject({ productId, version: 1 });
+  });
+
+  it("rejects a stale If-Match after the automatic product changes", async () => {
+    const harness = shoppingScenarioPool();
+    const service = new StockService(harness.pool as never);
+
+    const projected = (await service.listShoppingItems(scope))[0];
+    if (!projected) throw new Error("expected a derived shopping item");
+    await service.createMovement(
+      scope,
+      productId,
+      { kind: "entry", quantity: "1" },
+      "shopping-behavior-version-001",
+      projected.version,
+    );
+    expect(harness.statements.some((sql) => sql.includes("SELECT p.workspace_id"))).toBe(true);
+    const resynchronized = (await service.listShoppingItems(scope))[0];
+    if (!resynchronized) throw new Error("expected a resynchronized shopping item");
+    expect(resynchronized.id).toBe(materializedItemId);
+    await service.createMovement(
+      scope,
+      productId,
+      { kind: "entry", quantity: "1" },
+      "shopping-behavior-version-003",
+      1,
+    );
+
+    await expect(
+      service.purchaseShoppingItem(
+        scope,
+        materializedItemId,
+        { addToStock: false },
+        "shopping-behavior-version-002",
+        resynchronized.version,
+      ),
+    ).rejects.toMatchObject({ code: "version_conflict", currentVersion: 2 });
   });
 });

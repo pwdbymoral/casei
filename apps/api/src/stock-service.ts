@@ -216,7 +216,7 @@ export class StockService {
                   [scope.workspaceId, row.id, values.quantityMilli, scope.actorId],
                 );
               }
-              await syncAutomaticShoppingItems(client, scope);
+              await syncAutomaticShoppingItems(client, scope, row.id);
             } catch (error) {
               if (isUniqueViolation(error)) {
                 throw new StockConflictError("Já existe um produto ativo com esse nome.");
@@ -318,7 +318,7 @@ export class StockService {
           );
           const row = result.rows[0];
           if (!row) throw new StockVersionConflictError(current.version);
-          await syncAutomaticShoppingItems(client, scope);
+          await syncAutomaticShoppingItems(client, scope, productId);
           return toProductView(row);
         } catch (error) {
           if (isUniqueViolation(error))
@@ -382,7 +382,7 @@ export class StockService {
             }
             const row = updated.rows[0];
             if (!row) throw new StockVersionConflictError(current.version);
-            await syncAutomaticShoppingItems(client, scope);
+            await syncAutomaticShoppingItems(client, scope, productId);
             return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
           },
         }),
@@ -461,7 +461,7 @@ export class StockService {
             );
             const productRow = productResult.rows[0];
             if (!productRow) throw new StockVersionConflictError(current.version);
-            await syncAutomaticShoppingItems(client, scope);
+            await syncAutomaticShoppingItems(client, scope, productId);
             return {
               statusCode: 201,
               response: {
@@ -507,7 +507,7 @@ export class StockService {
             );
             const row = updated.rows[0];
             if (!row) throw new StockVersionConflictError(current.version);
-            await syncAutomaticShoppingItems(client, scope);
+            await syncAutomaticShoppingItems(client, scope, productId);
             return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
           },
         }),
@@ -712,12 +712,20 @@ export class StockService {
           assertExpectedVersion(current.version, expectedVersion);
           if (current.purchased)
             throw new StockConflictError("Este item já foi marcado como comprado.");
+          const automaticProduct =
+            current.source === "automatic" && current.product_id
+              ? await lockProduct(client, scope, current.product_id)
+              : null;
+          if (automaticProduct && automaticProduct.version !== current.version) {
+            throw new StockVersionConflictError(automaticProduct.version);
+          }
           let productView: StockProductView | null = null;
           let movementView: StockMovementView | null = null;
+          const productId = current.product_id;
           if (parsed.addToStock) {
-            if (!current.product_id)
+            if (!productId)
               throw new StockConflictError("Itens livres não podem ser adicionados ao estoque.");
-            const product = await lockProduct(client, scope, current.product_id);
+            const product = automaticProduct ?? (await lockProduct(client, scope, productId));
             if (product.archived) throw new StockConflictError("O produto está arquivado.");
             const amount =
               parsed.quantity === undefined || parsed.quantity === null
@@ -781,7 +789,8 @@ export class StockService {
             addToStock: parsed.addToStock,
             quantity: parsed.quantity ?? null,
           });
-          if (parsed.addToStock) await syncAutomaticShoppingItems(client, scope);
+          if (parsed.addToStock && productId)
+            await syncAutomaticShoppingItems(client, scope, productId);
           return {
             statusCode: 200,
             response: {
@@ -851,11 +860,6 @@ async function assertStockMembership(
   client: PoolClient,
   scope: StockScope,
 ): Promise<{ role: StockScope["role"] }> {
-  const workspace = await client.query<{ status: string }>(
-    `SELECT status FROM workspace WHERE id = $1 FOR UPDATE`,
-    [scope.workspaceId],
-  );
-  if (workspace.rows[0]?.status !== "active") throw new StockPermissionError();
   const result = await client.query<{ role: StockScope["role"]; status: string }>(
     `SELECT role, status
        FROM membership
@@ -865,6 +869,11 @@ async function assertStockMembership(
   );
   const membership = result.rows[0];
   if (membership?.status !== "active") throw new StockPermissionError();
+  const workspace = await client.query<{ status: string }>(
+    `SELECT status FROM workspace WHERE id = $1 FOR UPDATE`,
+    [scope.workspaceId],
+  );
+  if (workspace.rows[0]?.status !== "active") throw new StockPermissionError();
   return membership;
 }
 
@@ -892,7 +901,20 @@ async function lockProduct(
   return row;
 }
 
-async function syncAutomaticShoppingItems(client: PoolClient, scope: StockScope): Promise<void> {
+async function syncAutomaticShoppingItems(
+  client: PoolClient,
+  scope: StockScope,
+  productId: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE shopping_item i
+        SET version = p.version, last_changed_by = $2, updated_at = now()
+       FROM stock_product p
+      WHERE i.workspace_id = $1 AND i.product_id = p.id AND p.workspace_id = $1
+        AND i.product_id = $3 AND i.source = 'automatic' AND i.purchased = false
+        AND i.version <> p.version`,
+    [scope.workspaceId, scope.actorId, productId],
+  );
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO shopping_item
       (workspace_id, product_id, name, name_normalized, source, unit, unit_label, last_changed_by, version)
