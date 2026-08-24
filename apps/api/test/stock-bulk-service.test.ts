@@ -157,5 +157,13 @@ describe("STOCK-004 serviço de cadastro em lote", () => {
     expect(
       setup.statements.some((statement) => statement.includes("INSERT INTO stock_product")),
     ).toBe(true);
+    const nameLock = setup.statements.findIndex((statement) =>
+      statement.includes("pg_advisory_xact_lock"),
+    );
+    const rowLock = setup.statements.findIndex(
+      (statement) => statement.includes("FROM stock_product p") && statement.includes("FOR UPDATE"),
+    );
+    expect(nameLock).toBeGreaterThanOrEqual(0);
+    expect(rowLock).toBeGreaterThan(nameLock);
   });
 });

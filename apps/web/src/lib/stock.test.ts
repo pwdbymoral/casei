@@ -26,6 +26,38 @@ describe("stock adapter", () => {
     expect(history[0]?.quantity).toBe("0.001");
   });
 
+  it("keeps projected authorship absent and synchronizes automatic rows after product edits", async () => {
+    const adapter = createFixtureStockAdapter();
+    const product = (await adapter.listProducts(workspaceA)).find((item) => item.name === "Leite");
+    if (!product) throw new Error("fixture product missing");
+
+    const before = await adapter.listShoppingItems(workspaceA);
+    expect(before.find((item) => item.productId === product.id)).toMatchObject({
+      name: "Leite",
+      unit: "L",
+      lastChangedBy: null,
+    });
+
+    const updated = await adapter.updateProduct(workspaceA, product, {
+      name: "Leite integral",
+      unit: "package",
+    });
+    expect(updated).toMatchObject({
+      name: "Leite integral",
+      unit: "package",
+      minimum: "2",
+    });
+
+    expect(
+      (await adapter.listShoppingItems(workspaceA)).find((item) => item.productId === product.id),
+    ).toMatchObject({
+      name: "Leite integral",
+      unit: "package",
+      lastChangedBy: "user_fixture_marina",
+      version: updated.version,
+    });
+  });
+
   it("sends If-Match and idempotency headers through the HTTP adapter", async () => {
     const requests: Request[] = [];
     const adapter = createHttpStockAdapter({

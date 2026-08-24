@@ -80,7 +80,7 @@ export interface StockShoppingItemView {
   note: string | null;
   purchased: boolean;
   purchasedAt: string | null;
-  lastChangedBy: string;
+  lastChangedBy: string | null;
   version: number;
 }
 
@@ -181,7 +181,7 @@ interface ShoppingItemRow {
   note: string | null;
   purchased: boolean;
   purchased_at: Date | string | null;
-  last_changed_by: string;
+  last_changed_by: string | null;
   version: number;
 }
 
@@ -212,6 +212,7 @@ export class StockService {
           key: idempotencyKey,
           request: parsed,
           execute: async () => {
+            await lockShoppingName(client, scope, normalized.key);
             let product: StockProductView;
             try {
               const result = await client.query<StockProductRow>(
@@ -306,13 +307,22 @@ export class StockService {
     expectedVersion: number,
   ): Promise<StockProductView> {
     const parsed = updateStockProductSchema.parse(input);
-    const normalized = normalizeProductName(parsed.name);
-    const values = normalizeUpdateInput(parsed);
     return this.withUnitOfWork(
       scope,
       async ({ client }) => {
+        const requestedName = parsed.name ? normalizeProductName(parsed.name) : null;
+        const observedName = requestedName ?? (await readProductName(client, scope, productId));
+        await lockShoppingName(client, scope, (requestedName ?? observedName).key);
         const current = await lockProduct(client, scope, productId);
         assertExpectedVersion(current.version, expectedVersion);
+        const normalized = requestedName ?? normalizeProductName(current.name);
+        const values = normalizeUpdateInput(parsed, current);
+        if (values.unit === "other" && !values.unitLabel) {
+          throw new StockConflictError("Informe o rótulo da unidade.");
+        }
+        if (normalizeProductName(current.name).key !== normalized.key) {
+          await assertNoFreeShoppingNameCollision(client, scope, normalized.key);
+        }
         if (current.unit !== values.unit) {
           const movement = await client.query<{ id: string }>(
             "SELECT id FROM stock_movement WHERE workspace_id = $1 AND product_id = $2 LIMIT 1",
@@ -364,7 +374,7 @@ export class StockService {
     const parsed = stockBulkPreviewRequestSchema.parse(input);
     const contentHash = hashBulkContent(parsed.content);
     const preview = await this.withUnitOfWork(scope, async ({ client }) => {
-      const products = await loadBulkProducts(client, scope, false);
+      const products = await loadBulkProducts(client, scope);
       return previewStockBulk(parsed.content, products.map(toBulkExistingProduct));
     });
     return { ...preview, contentHash };
@@ -388,7 +398,7 @@ export class StockService {
           key: idempotencyKey,
           request: parsed,
           execute: async () => {
-            const products = await loadBulkProducts(client, scope, true);
+            const products = await loadBulkProducts(client, scope);
             const preview = previewStockBulk(parsed.content, products.map(toBulkExistingProduct));
             const previewResult: StockBulkPreviewResult = { ...preview, contentHash };
             const canApply =
@@ -462,6 +472,8 @@ export class StockService {
           key: idempotencyKey,
           request: { productId, archived, expectedVersion },
           execute: async () => {
+            const observedName = await readProductName(client, scope, productId);
+            await lockShoppingName(client, scope, observedName.key);
             const current = await lockProduct(client, scope, productId);
             assertExpectedVersion(current.version, expectedVersion);
             if (!archived) {
@@ -482,6 +494,11 @@ export class StockService {
               );
               if (collision.rowCount)
                 throw new StockConflictError("Já existe um produto ativo com esse nome.");
+              await assertNoFreeShoppingNameCollision(
+                client,
+                scope,
+                normalizeProductName(current.name).key,
+              );
             }
             let updated: { rows: StockProductRow[] };
             try {
@@ -654,7 +671,7 @@ export class StockService {
             LEFT JOIN stock_product p
               ON p.workspace_id = i.workspace_id AND p.id = i.product_id
            WHERE i.workspace_id = $1
-             AND ($3::boolean OR i.purchased = false)
+             AND ($2::boolean OR i.purchased = false)
              AND (i.purchased OR ((i.source = 'free') OR (i.source = 'automatic' AND p.id IS NOT NULL
                   AND p.shopping_auto = true
                   AND (p.marked_missing OR p.quantity_milli = 0
@@ -669,7 +686,7 @@ export class StockService {
                  END AS effective_quantity_milli,
                  p.unit, p.unit_label, p.note,
                  false AS purchased, NULL::timestamptz AS purchased_at,
-                 $2::text AS last_changed_by, p.version
+                 NULL::text AS last_changed_by, p.version
             FROM stock_product p
            WHERE p.workspace_id = $1 AND p.archived = false AND p.shopping_auto = true
              AND (p.marked_missing OR p.quantity_milli = 0
@@ -704,10 +721,10 @@ export class StockService {
             UNION ALL
             SELECT * FROM derived_items
           ) shopping
-         WHERE $3::boolean OR shopping.purchased = false
+         WHERE $2::boolean OR shopping.purchased = false
          ORDER BY shopping.purchased ASC, shopping.source ASC, lower(shopping.name), shopping.id
-         LIMIT $4`,
-        [scope.workspaceId, scope.actorId, parsed.includePurchased, parsed.limit],
+         LIMIT $3`,
+        [scope.workspaceId, parsed.includePurchased, parsed.limit],
       );
       return result.rows.map(toShoppingItemView);
     });
@@ -728,6 +745,7 @@ export class StockService {
         key: idempotencyKey,
         request: parsed,
         execute: async () => {
+          await lockShoppingName(client, scope, normalized.key);
           const existing = await findActiveShoppingItem(client, scope, normalized.key);
           if (existing) {
             return {
@@ -998,6 +1016,20 @@ function assertStockCapability(scope: StockScope): void {
   if (scope.role === "viewer") throw new StockPermissionError();
 }
 
+async function readProductName(
+  client: PoolClient,
+  scope: StockScope,
+  productId: string,
+): Promise<ReturnType<typeof normalizeProductName>> {
+  const result = await client.query<{ name: string }>(
+    `SELECT name FROM stock_product WHERE workspace_id = $1 AND id = $2`,
+    [scope.workspaceId, productId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new StockNotFoundError();
+  return normalizeProductName(row.name);
+}
+
 async function lockProduct(
   client: PoolClient,
   scope: StockScope,
@@ -1042,7 +1074,9 @@ async function syncAutomaticShoppingItems(
   );
   await client.query(
     `UPDATE shopping_item i
-        SET version = p.version, last_changed_by = $2, updated_at = now()
+        SET name = p.name, name_normalized = p.name_normalized,
+            unit = p.unit, unit_label = p.unit_label,
+            version = p.version, last_changed_by = $2, updated_at = now()
        FROM stock_product p
       WHERE i.workspace_id = $1 AND i.product_id = p.id AND p.workspace_id = $1
         AND i.product_id = $3 AND i.source = 'automatic' AND i.purchased = false
@@ -1098,6 +1132,41 @@ async function findActiveShoppingItem(
     [scope.workspaceId, nameNormalized],
   );
   return result.rows[0] ?? null;
+}
+
+/** Serializes product/free-item operations on the same workspace/name key. */
+async function lockShoppingName(
+  client: PoolClient,
+  scope: StockScope,
+  nameNormalized: string,
+): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, [
+    scope.workspaceId,
+    nameNormalized,
+  ]);
+}
+
+async function assertNoFreeShoppingNameCollision(
+  client: PoolClient,
+  scope: StockScope,
+  nameNormalized: string,
+): Promise<void> {
+  const collision = await client.query<{ id: string }>(
+    `SELECT id
+       FROM shopping_item
+      WHERE workspace_id = $1
+        AND name_normalized = $2
+        AND purchased = false
+        AND source = 'free'
+      LIMIT 1
+      FOR UPDATE`,
+    [scope.workspaceId, nameNormalized],
+  );
+  if (collision.rowCount) {
+    throw new StockConflictError(
+      "O nome já está em um item livre da lista; conclua ou remova esse item antes de alterar o produto.",
+    );
+  }
 }
 
 async function lockShoppingItem(
@@ -1240,7 +1309,6 @@ function hashBulkContent(content: string): string {
 async function loadBulkProducts(
   client: PoolClient,
   scope: StockScope,
-  lock: boolean,
 ): Promise<StockBulkProductRow[]> {
   const result = await client.query<StockBulkProductRow>(
     `SELECT p.id, p.workspace_id, p.name, p.unit, p.unit_label, p.quantity_milli,
@@ -1251,11 +1319,33 @@ async function loadBulkProducts(
                WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id
             ) AS has_movement
        FROM stock_product p
-      WHERE p.workspace_id = $1 AND p.archived = false
-      ${lock ? "FOR UPDATE" : ""}`,
+      WHERE p.workspace_id = $1 AND p.archived = false`,
     [scope.workspaceId],
   );
   return result.rows;
+}
+
+async function lockBulkProduct(
+  client: PoolClient,
+  scope: StockScope,
+  productId: string,
+): Promise<StockBulkProductRow> {
+  const result = await client.query<StockBulkProductRow>(
+    `SELECT p.id, p.workspace_id, p.name, p.unit, p.unit_label, p.quantity_milli,
+            p.minimum_milli, p.marked_missing, p.shopping_auto, p.category, p.location,
+            p.note, p.archived, p.version,
+            EXISTS (
+              SELECT 1 FROM stock_movement m
+               WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id
+            ) AS has_movement
+       FROM stock_product p
+      WHERE p.workspace_id = $1 AND p.id = $2
+      FOR UPDATE`,
+    [scope.workspaceId, productId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new StockNotFoundError();
+  return row;
 }
 
 function toBulkExistingProduct(row: StockBulkProductRow): StockBulkExistingProduct {
@@ -1288,6 +1378,7 @@ async function insertBulkProduct(
   const normalized = normalizeProductName(values.name);
   const quantityMilli = bulkQuantity(values.quantity);
   const minimumMilli = bulkQuantity(values.minimum);
+  await lockShoppingName(client, scope, normalized.key);
   try {
     const inserted = await client.query<StockProductRow>(
       `INSERT INTO stock_product
@@ -1338,6 +1429,13 @@ async function updateBulkProduct(
   values: StockBulkProductValues,
 ): Promise<string> {
   const normalized = normalizeProductName(values.name);
+  await lockShoppingName(client, scope, normalized.key);
+  const locked = await lockBulkProduct(client, scope, current.id);
+  if (locked.version !== current.version) throw new StockVersionConflictError(locked.version);
+  current = locked;
+  if (normalizeProductName(current.name).key !== normalized.key) {
+    await assertNoFreeShoppingNameCollision(client, scope, normalized.key);
+  }
   const currentQuantity = normalizeStockValue(current.quantity_milli);
   const nextQuantity =
     values.quantity === undefined ? currentQuantity : bulkQuantity(values.quantity);
@@ -1507,18 +1605,20 @@ function normalizeStockInput(input: CreateStockProductInput) {
   };
 }
 
-function normalizeUpdateInput(input: UpdateStockProductInput) {
+function normalizeUpdateInput(input: UpdateStockProductInput, current: StockProductRow) {
   return {
-    unit: input.unit,
-    unitLabel: input.unitLabel ?? null,
+    unit: input.unit ?? current.unit,
+    unitLabel: input.unitLabel === undefined ? current.unit_label : input.unitLabel,
     minimumMilli:
-      input.minimum === undefined || input.minimum === null
-        ? null
-        : parseStockQuantity(input.minimum, { allowZero: true }),
-    shoppingAuto: input.shoppingAuto ?? true,
-    category: input.category ?? null,
-    location: input.location ?? null,
-    note: input.note ?? null,
+      input.minimum === undefined
+        ? normalizeStockValue(current.minimum_milli)
+        : input.minimum === null
+          ? null
+          : parseStockQuantity(input.minimum, { allowZero: true }),
+    shoppingAuto: input.shoppingAuto ?? current.shopping_auto,
+    category: input.category === undefined ? current.category : input.category,
+    location: input.location === undefined ? current.location : input.location,
+    note: input.note === undefined ? current.note : input.note,
   };
 }
 

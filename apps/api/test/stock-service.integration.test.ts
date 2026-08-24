@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
@@ -80,6 +80,106 @@ describe("STOCK autorização PostgreSQL", () => {
           WHERE workspace_id = $1 AND user_id = $2`,
         [workspaceId, memberId],
       );
+
+      const ownerScope = {
+        ...scope,
+        actorId: ownerId,
+        role: "owner" as const,
+        correlationId: `stock-owner-correlation-${suffix}`,
+      };
+      const concurrentCollision = await Promise.allSettled([
+        service.updateProduct(
+          scope,
+          created.product.id,
+          { name: "Feijão" },
+          created.product.version,
+        ),
+        service.createShoppingItem(ownerScope, { name: "Feijão" }, "stock-shopping-collision-0001"),
+      ]);
+      expect(concurrentCollision.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(concurrentCollision.filter((result) => result.status === "rejected")).toHaveLength(1);
+      const productCollision = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM stock_product
+          WHERE workspace_id = $1 AND name_normalized = 'feijao' AND archived = false`,
+        [workspaceId],
+      );
+      const itemCollision = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM shopping_item
+          WHERE workspace_id = $1 AND name_normalized = 'feijao' AND purchased = false`,
+        [workspaceId],
+      );
+      expect(
+        Number(productCollision.rows[0]?.count ?? 0) + Number(itemCollision.rows[0]?.count ?? 0),
+      ).toBeLessThanOrEqual(1);
+
+      const bulkRaceProduct = await service.createProduct(
+        ownerScope,
+        { name: "Batata", quantity: "1" },
+        "stock-bulk-race-product-001",
+      );
+      const bulkRaceContent = "Nome\tQuantidade\nCenoura\t1";
+      const bulkRaceHash = createHash("sha256").update(bulkRaceContent, "utf8").digest("hex");
+      const patchBulkCollision = await Promise.allSettled([
+        service.updateProduct(
+          scope,
+          bulkRaceProduct.product.id,
+          { name: "Cenoura" },
+          bulkRaceProduct.product.version,
+        ),
+        service.applyBulkProducts(
+          ownerScope,
+          { content: bulkRaceContent, mode: "valid_only", previewHash: bulkRaceHash },
+          "stock-bulk-race-apply-001",
+        ),
+      ]);
+      expect(patchBulkCollision).toHaveLength(2);
+      for (const result of patchBulkCollision) {
+        if (result.status === "rejected") {
+          expect((result.reason as { code?: string }).code).not.toBe("40P01");
+        }
+      }
+
+      const restoreRaceProduct = await service.createProduct(
+        ownerScope,
+        { name: "Farinha" },
+        "stock-restore-race-product-001",
+      );
+      const archived = await service.setArchived(
+        ownerScope,
+        restoreRaceProduct.product.id,
+        true,
+        "stock-restore-race-archive-001",
+        restoreRaceProduct.product.version,
+      );
+      const patchRestoreCollision = await Promise.allSettled([
+        service.updateProduct(
+          scope,
+          restoreRaceProduct.product.id,
+          { note: "Atualizado em paralelo" },
+          archived.product.version,
+        ),
+        service.setArchived(
+          ownerScope,
+          restoreRaceProduct.product.id,
+          false,
+          "stock-restore-race-restore-001",
+          archived.product.version,
+        ),
+      ]);
+      expect(patchRestoreCollision.filter((result) => result.status === "fulfilled")).toHaveLength(
+        1,
+      );
+      expect(patchRestoreCollision.filter((result) => result.status === "rejected")).toHaveLength(
+        1,
+      );
+      for (const result of patchRestoreCollision) {
+        if (result.status === "rejected") {
+          expect((result.reason as { code?: string }).code).not.toBe("40P01");
+        }
+      }
+
       const lockClient = await pool.connect();
       try {
         await lockClient.query("BEGIN");
