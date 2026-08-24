@@ -1066,22 +1066,29 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
-        const result = await client.query<{
-          name: string;
-          status: string;
-          expires_at: Date;
-          version: number;
-        }>(
-          `SELECT w.name, w.status, w.version, r.expires_at
-             FROM workspace w
-             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
-                                                  AND r.owner_user_id = $2
-                                                  AND r.status = 'active'
-            WHERE w.id = $1
-            FOR UPDATE OF w, r`,
+        // Purge and cancellation lock recovery before the workspace. Keep
+        // retry in that same order so a concurrent retry cannot hold the
+        // workspace while waiting for recovery.
+        const recovery = await client.query<{ expires_at: Date }>(
+          `SELECT expires_at
+             FROM workspace_deletion_recovery
+            WHERE workspace_id = $1 AND owner_user_id = $2 AND status = 'active'
+            FOR UPDATE`,
           [workspaceId, actor.userId],
         );
-        const row = result.rows[0];
+        const workspace = await client.query<{ name: string; status: string; version: number }>(
+          `SELECT name, status, version
+             FROM workspace
+            WHERE id = $1
+            FOR UPDATE`,
+          [workspaceId],
+        );
+        const recoveryRow = recovery.rows[0];
+        const workspaceRow = workspace.rows[0];
+        const row =
+          recoveryRow && workspaceRow
+            ? { ...workspaceRow, expires_at: recoveryRow.expires_at }
+            : undefined;
         if (row?.status !== "deletion_pending") throw new IdentityNotFoundError();
         if (row.version === expectedVersion + 1) {
           if (row.name !== parsed.workspaceName)
