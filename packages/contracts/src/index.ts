@@ -225,8 +225,8 @@ export type CreateStockProductInput = z.infer<typeof createStockProductSchema>;
 
 export const updateStockProductSchema = z
   .object({
-    name: z.string().trim().min(1).max(200),
-    unit: stockUnitSchema,
+    name: z.string().trim().min(1).max(200).optional(),
+    unit: stockUnitSchema.optional(),
     unitLabel: z.string().trim().max(40).nullable().optional(),
     minimum: stockQuantitySchema.nullable().optional(),
     shoppingAuto: z.boolean().optional(),
@@ -309,7 +309,7 @@ export const stockShoppingItemSchema = z.object({
   note: z.string().trim().max(500).nullable(),
   purchased: z.boolean(),
   purchasedAt: z.string().datetime({ offset: true }).nullable(),
-  lastChangedBy: userIdSchema,
+  lastChangedBy: userIdSchema.nullable(),
   version: versionSchema,
 });
 export type StockShoppingItemContract = z.infer<typeof stockShoppingItemSchema>;
