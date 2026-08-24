@@ -95,7 +95,7 @@ auditoria detalhada e concorrência de produção continuam pendentes para o Gat
 
 ## Marco 3 — compromissos, recorrências e parcelas
 
-- [ ] **PLAN-001 Planejado/liquidação parcial:** vencimento, valor planejado/efetivo, atraso derivado e múltiplas liquidações.
+- [x] **PLAN-001 Planejado/liquidação parcial (backend):** vencimento, valor planejado/efetivo, atraso derivado e múltiplas liquidações com idempotência, versão e delta no ledger. A UI de compromissos permanece em PLAN-005.
 - [ ] **PLAN-002 Recurrence engine:** semanal/mensal/anual, variável/fixa, janela de 12 meses, meses curtos, pausa e job idempotente.
 - [ ] **PLAN-003 Edição de série:** somente esta, esta e futuras, futuras não liquidadas; preservar liquidadas e tratar exceções.
 - [ ] **PLAN-004 Installment engine:** distribuição exata de centavos, preview, edição e cancelamento futuro.

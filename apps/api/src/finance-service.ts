@@ -6,6 +6,7 @@ import {
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  settleTransactionSchema,
   type TransactionListQuery,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
@@ -139,6 +140,43 @@ export interface FinanceAuditPage {
   items: FinanceAuditEventView[];
   nextCursor: string | null;
   hasMore: boolean;
+}
+
+export interface SettlementCalculationInput {
+  plannedMinor: bigint;
+  settledMinor: bigint;
+  effectiveMinor?: bigint;
+}
+
+export interface SettlementCalculation {
+  amountMinor: bigint;
+  settledMinor: bigint;
+  state: "partially_settled" | "posted";
+}
+
+/** Calculates one non-overlapping settlement delta before touching the ledger. */
+export function calculateSettlement({
+  plannedMinor,
+  settledMinor,
+  effectiveMinor,
+}: SettlementCalculationInput): SettlementCalculation {
+  const remaining = plannedMinor - settledMinor;
+  const amountMinor = effectiveMinor ?? remaining;
+  if (plannedMinor <= 0n || settledMinor < 0n || settledMinor > plannedMinor) {
+    throw new FinanceConflictError("O compromisso possui um saldo inválido.");
+  }
+  if (amountMinor <= 0n) {
+    throw new FinanceConflictError("A liquidação deve ser maior que zero.");
+  }
+  if (amountMinor > remaining) {
+    throw new FinanceConflictError("A liquidação excede o valor ainda em aberto.");
+  }
+  const nextSettledMinor = settledMinor + amountMinor;
+  return {
+    amountMinor,
+    settledMinor: nextSettledMinor,
+    state: nextSettledMinor === plannedMinor ? "posted" : "partially_settled",
+  };
 }
 
 type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
@@ -645,14 +683,17 @@ export class FinanceService {
     id: string,
     idempotencyKey: string,
     expectedVersion?: number,
+    input: unknown = {},
   ): Promise<TransactionView> {
     assertFinanceCapability(scope, "finance.write");
+    const parsed = settleTransactionSchema.parse(input);
     return this.mutateTransaction(
       scope,
       id,
       idempotencyKey,
       expectedVersion,
       "transactions/:id/post",
+      { id, expectedVersion, ...parsed },
       async (client, row) => {
         const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
         if (row.currency_code !== workspaceCurrency) {
@@ -678,25 +719,38 @@ export class FinanceService {
             );
           }
         }
+        if (parsed.amount && parsed.amount.currency !== row.currency_code) {
+          throw new FinanceConflictError("A moeda da liquidação difere da transação.");
+        }
+        const settlement = calculateSettlement({
+          plannedMinor: BigInt(row.amount_minor),
+          settledMinor: BigInt(row.settled_minor),
+          effectiveMinor: parsed.amount ? BigInt(parsed.amount.minor) : undefined,
+        });
+        const { amountMinor: amount, settledMinor, state: nextState } = settlement;
+        const settlementOn =
+          parsed.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
         await this.publishTransaction(
           client,
           scope,
           row,
-          BigInt(row.amount_minor) - BigInt(row.settled_minor),
+          amount,
+          settlementOn,
+          nextState === "posted" ? "transaction.posted.v1" : "transaction.partially_settled.v1",
         );
         const result = await client.query<TransactionRow>(
           `UPDATE finance_transaction
-            SET state = 'posted', settled_minor = amount_minor, posted_on = coalesce(posted_on, now()), cash_settled_on = CASE WHEN instrument = 'wallet' THEN now() ELSE cash_settled_on END, version = version + 1, updated_at = now()
-          WHERE workspace_id = $1 AND id = $2 AND version = $3
+            SET state = $3, settled_minor = $4, posted_on = coalesce(posted_on, now()), cash_settled_on = CASE WHEN instrument = 'wallet' THEN coalesce(cash_settled_on, now()) ELSE cash_settled_on END, version = version + 1, updated_at = now()
+          WHERE workspace_id = $1 AND id = $2 AND version = $5
           RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
-          [scope.workspaceId, id, row.version],
+          [scope.workspaceId, id, nextState, settledMinor, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
         await this.recordTransactionAudit(
           client,
           scope,
           id,
-          "transaction.posted",
+          nextState === "posted" ? "transaction.posted" : "transaction.partially_settled",
           transactionAuditSnapshot(row),
           transactionAuditSnapshot(result.rows[0]),
         );
@@ -718,16 +772,28 @@ export class FinanceService {
       idempotencyKey,
       expectedVersion,
       "transactions/:id/reverse",
+      { id, expectedVersion },
       async (client, row) => {
         if (row.state !== "posted" && row.state !== "partially_settled") {
           throw new FinanceConflictError("A transação não está realizada.");
         }
-        const original = await client.query<{ id: string }>(
-          `SELECT id FROM ledger_event WHERE workspace_id = $1 AND transaction_id = $2 AND event_type IN ('transaction.posted.v1', 'statement.payment.v1') ORDER BY created_at ASC LIMIT 1`,
+        const original = await client.query<{
+          id: string;
+          currency_code: string;
+          occurred_on: string;
+        }>(
+          `SELECT id, currency_code, occurred_on
+             FROM ledger_event
+            WHERE workspace_id = $1
+              AND transaction_id = $2
+              AND event_type IN ('transaction.posted.v1', 'transaction.partially_settled.v1', 'statement.payment.v1')
+              AND status = 'published'
+              AND reversed_event_id IS NULL
+            ORDER BY created_at ASC`,
           [scope.workspaceId, id],
         );
-        const eventId = original.rows[0]?.id;
-        if (!eventId) throw new FinanceConflictError("O lançamento original não foi encontrado.");
+        if (original.rows.length === 0)
+          throw new FinanceConflictError("O lançamento original não foi encontrado.");
         const cardPayment = row.statement_id
           ? await client.query<{ amount_minor: string }>(
               `SELECT amount_minor
@@ -787,7 +853,7 @@ export class FinanceService {
               "A fatura já foi fechada ou paga; faça um ajuste explícito para estornar esta compra.",
             );
           }
-          const nextTotal = BigInt(statementRow.total_minor) - BigInt(row.amount_minor);
+          const nextTotal = BigInt(statementRow.total_minor) - BigInt(row.settled_minor);
           if (nextTotal < BigInt(statementRow.paid_minor)) {
             throw new FinanceConflictError("O estorno excede o saldo aberto da fatura.");
           }
@@ -798,30 +864,41 @@ export class FinanceService {
             [nextTotal, scope.workspaceId, row.statement_id],
           );
         }
-        const entries = await client.query<{
-          account_id: string;
-          currency_code: string;
-          amount_minor: string;
-        }>(
-          `SELECT account_id, currency_code, amount_minor FROM ledger_entry WHERE workspace_id = $1 AND event_id = $2`,
-          [scope.workspaceId, eventId],
-        );
-        const reversal = await client.query<{ id: string }>(
-          `INSERT INTO ledger_event (workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at, reversed_event_id)
-         VALUES ($1, $2, 'transaction.reversed.v1', $3, 'published', $4, now(), $5) RETURNING id`,
-          [scope.workspaceId, id, row.currency_code, row.occurred_on, eventId],
-        );
-        for (const entry of entries.rows) {
-          await client.query(
-            `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor) VALUES ($1, $2, $3, $4, $5)`,
+        for (const [index, sourceEvent] of original.rows.entries()) {
+          const entries = await client.query<{
+            account_id: string;
+            currency_code: string;
+            amount_minor: string;
+          }>(
+            `SELECT account_id, currency_code, amount_minor FROM ledger_entry WHERE workspace_id = $1 AND event_id = $2`,
+            [scope.workspaceId, sourceEvent.id],
+          );
+          const eventType =
+            index === 0 ? "transaction.reversed.v1" : `transaction.reversed.v1.${index + 1}`;
+          const reversal = await client.query<{ id: string }>(
+            `INSERT INTO ledger_event (workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at, reversed_event_id)
+           VALUES ($1, $2, $3, $4, 'published', $5, now(), $6) RETURNING id`,
             [
               scope.workspaceId,
-              reversal.rows[0]?.id,
-              entry.account_id,
-              entry.currency_code,
-              -BigInt(entry.amount_minor),
+              id,
+              eventType,
+              sourceEvent.currency_code,
+              sourceEvent.occurred_on,
+              sourceEvent.id,
             ],
           );
+          for (const entry of entries.rows) {
+            await client.query(
+              `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor) VALUES ($1, $2, $3, $4, $5)`,
+              [
+                scope.workspaceId,
+                reversal.rows[0]?.id,
+                entry.account_id,
+                entry.currency_code,
+                -BigInt(entry.amount_minor),
+              ],
+            );
+          }
         }
         const result = await client.query<TransactionRow>(
           `UPDATE finance_transaction SET state = 'canceled', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
@@ -1295,6 +1372,8 @@ export class FinanceService {
     scope: FinanceScope,
     row: TransactionRow,
     amount: bigint,
+    occurredOn = row.occurred_on,
+    eventType = "transaction.posted.v1",
   ) {
     const wallet = await this.ensureAccount(
       client,
@@ -1333,10 +1412,10 @@ export class FinanceService {
         client,
         scope,
         row.id,
-        "transaction.posted.v1",
+        eventType,
         row.currency_code,
         postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
-        row.occurred_on,
+        occurredOn,
       );
       await this.ensureStatementForPurchase(
         client,
@@ -1372,10 +1451,10 @@ export class FinanceService {
       client,
       scope,
       row.id,
-      "transaction.posted.v1",
+      eventType,
       row.currency_code,
       entries.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
-      row.occurred_on,
+      occurredOn,
     );
   }
 
@@ -1552,13 +1631,14 @@ export class FinanceService {
     key: string,
     expectedVersion: number | undefined,
     command: string,
+    request: unknown = { id, expectedVersion },
     callback: (client: PgPoolClient, row: TransactionRow) => Promise<TransactionView>,
   ): Promise<TransactionView> {
     const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/${command}/${id}`,
         key,
-        request: { id, expectedVersion },
+        request,
         execute: async () => {
           const current = await client.query<TransactionRow>(
             `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,

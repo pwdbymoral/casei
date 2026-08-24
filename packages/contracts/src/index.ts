@@ -432,6 +432,13 @@ export const createTransactionSchema = z.object({
 
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 
+/** Effective settlement amount/date; omitted amount settles the remaining balance. */
+export const settleTransactionSchema = z.object({
+  amount: positiveMoneySchema.optional(),
+  occurredOn: civilDateSchema.optional(),
+});
+export type SettleTransactionInput = z.infer<typeof settleTransactionSchema>;
+
 export const transactionListQuerySchema = paginationQuerySchema
   .extend({
     search: z.string().trim().max(100).optional(),

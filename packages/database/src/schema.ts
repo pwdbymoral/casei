@@ -624,7 +624,11 @@ export const ledgerEvent = pgTable(
   },
   (table) => [
     uniqueIndex("ledger_event_id_currency_unique").on(table.id, table.currencyCode),
-    uniqueIndex("ledger_event_transaction_type_unique").on(table.transactionId, table.eventType),
+    uniqueIndex("ledger_event_transaction_type_unique")
+      .on(table.transactionId, table.eventType)
+      .where(
+        sql`${table.transactionId} is not null and ${table.eventType} <> 'transaction.partially_settled.v1'`,
+      ),
     check("ledger_event_status_check", sql`${table.status} in ('draft', 'published', 'reversed')`),
     check("ledger_event_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
   ],

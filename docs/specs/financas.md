@@ -83,6 +83,16 @@ Sem descrição, a UI usa rótulo neutro como `Despesa sem descrição`, sem inv
 
 O usuário muda o estado para `Planejada` e informa vencimento. A ocorrência aparece em próximos compromissos, não no saldo atual. Ao marcar como paga/recebida, informa ou aceita data e valor efetivos. Pagamento parcial registra cumprimento parcial e mantém o restante planejado.
 
+Na API, a realização usa `POST /v1/workspaces/:workspaceId/transactions/:id/post` com
+`Idempotency-Key`, `If-Match: "v<version>"` e, opcionalmente, `{ amount, occurredOn }`. Sem
+`amount`, o sistema liquida somente o saldo restante; com `amount`, a moeda deve ser a da
+transação e o valor não pode exceder esse saldo. Cada aceite publica apenas o delta informado
+como evento do livro razão, incrementa a versão e faz a transição
+`planned → partially_settled → posted`; uma tentativa repetida com a mesma chave reproduz a
+resposta sem publicar outro delta. `occurredOn` é a data civil efetiva do delta e, quando omitida,
+usa o dia atual no fuso do espaço. O estado parcial e suas liquidações permanecem no histórico e
+uma reversão estorna todos os deltas publicados atomicamente.
+
 ### Recorrência
 
 - Frequências MVP: semanal, mensal e anual; intervalo configurável; início obrigatório e fim opcional por data ou quantidade.
@@ -156,6 +166,7 @@ Todos os totais são calculados no servidor a partir de lançamentos canônicos.
 
 - [ ] Receita e despesa simples podem ser salvas só com valor, usando defaults visíveis.
 - [ ] Planejado não altera saldo atual; realização na carteira altera uma única vez, inclusive sob retry.
+- [ ] Liquidação parcial aceita múltiplos deltas idempotentes, rejeita moeda/excedente/duplicação e só publica o delta efetivo; a última liquidação transita para `posted`.
 - [ ] Edição e cancelamento corrigem totais relacionados e preservam auditoria.
 - [ ] Recorrência fixa e variável respeita janela, escopo de edição, meses curtos, pausa e idempotência.
 - [ ] Parcelas somam exatamente o total e histórico realizado não muda ao editar futuras.

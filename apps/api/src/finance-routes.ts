@@ -9,6 +9,7 @@ import {
   paginationQuerySchema,
   payStatementSchema,
   reopenStatementSchema,
+  settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
 } from "@casei/contracts";
@@ -28,7 +29,7 @@ import {
   notFoundError,
   validationError,
 } from "./http/index.js";
-import { parseJsonBody, parseQuery } from "./http/parsing.js";
+import { parseJsonBody, parseOptionalJsonBody, parseQuery } from "./http/parsing.js";
 import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiEnv } from "./http/types.js";
 
@@ -134,11 +135,13 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   router.post("/workspaces/:workspaceId/transactions/:id/post", async (context) => {
     const id = parseDomainId(context.req.param("id"));
     const expectedVersion = requireIfMatch(context);
+    const input = await parseOptionalJsonBody(context, settleTransactionSchema);
     const transaction = await service.postTransaction(
       scopeOf(context),
       id,
       requiredIdempotencyKey(context),
       expectedVersion,
+      input,
     );
     setVersionHeaders(context, transaction.version);
     return context.json(transaction);
