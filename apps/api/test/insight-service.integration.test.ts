@@ -170,8 +170,9 @@ async function createFixture() {
     );
 
     await pool.query(
-      `INSERT INTO recurrence_rule (workspace_id, frequency, interval, start_on, variable)
-       VALUES ($1, 'monthly', 1, '2026-08-01', true) RETURNING id`,
+      `INSERT INTO recurrence_rule
+         (workspace_id, kind, amount_minor, frequency, interval, start_on, variable)
+       VALUES ($1, 'expense', 50, 'monthly', 1, '2026-08-01', true) RETURNING id`,
       [workspaceId],
     );
     const recurrence = await pool.query<{ id: string }>(
