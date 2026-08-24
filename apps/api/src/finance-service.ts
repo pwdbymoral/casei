@@ -691,8 +691,8 @@ export class FinanceService {
           scope,
           id,
           "transaction.posted",
-          { state: row.state, version: row.version },
-          { state: result.rows[0].state, version: result.rows[0].version },
+          transactionAuditSnapshot(row),
+          transactionAuditSnapshot(result.rows[0]),
         );
         return toTransactionView(result.rows[0]);
       },
@@ -827,8 +827,8 @@ export class FinanceService {
           scope,
           id,
           "transaction.reversed",
-          { state: row.state, version: row.version },
-          { state: result.rows[0].state, version: result.rows[0].version },
+          transactionAuditSnapshot(row),
+          transactionAuditSnapshot(result.rows[0]),
         );
         return toTransactionView(result.rows[0]);
       },
@@ -1487,6 +1487,8 @@ export class FinanceService {
     before: Record<string, unknown> | null = null,
     after: Record<string, unknown> | null = null,
   ): Promise<void> {
+    const redactedBefore = redactFinanceAuditSnapshot(before);
+    const redactedAfter = redactFinanceAuditSnapshot(after);
     await client.query(
       `INSERT INTO audit_event
          (category, action, actor_id, workspace_id, target_type, target_id,
@@ -1498,8 +1500,8 @@ export class FinanceService {
         scope.workspaceId,
         transactionId,
         scope.correlationId,
-        before ? JSON.stringify(before) : null,
-        after ? JSON.stringify(after) : null,
+        redactedBefore ? JSON.stringify(redactedBefore) : null,
+        redactedAfter ? JSON.stringify(redactedAfter) : null,
       ],
     );
   }
@@ -1726,13 +1728,23 @@ function toTransactionView(row: TransactionRow): TransactionView {
   };
 }
 
-function asAuditSnapshot(value: unknown): Record<string, unknown> | null {
+/**
+ * Audit snapshots are deliberately smaller than a transaction view. Keep the
+ * allowlist and value checks in one place so both writes and reads enforce the
+ * same privacy boundary.
+ */
+export function redactFinanceAuditSnapshot(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const source = value as Record<string, unknown>;
-  const allowedKeys = ["kind", "state", "categoryId", "cardId", "statementId", "version"];
   const snapshot: Record<string, unknown> = {};
-  for (const key of allowedKeys) {
-    if (Object.hasOwn(source, key)) snapshot[key] = source[key];
+  if (typeof source.kind === "string") snapshot.kind = source.kind;
+  if (typeof source.state === "string") snapshot.state = source.state;
+  for (const key of ["categoryId", "cardId", "statementId"] as const) {
+    if (source[key] === null || typeof source[key] === "string")
+      snapshot[key] = source[key] ?? null;
+  }
+  if (typeof source.version === "number" && Number.isInteger(source.version)) {
+    snapshot.version = source.version;
   }
   return snapshot;
 }
@@ -1749,8 +1761,8 @@ function toFinanceAuditEventView(row: FinanceAuditRow): FinanceAuditEventView {
     correlationId: row.correlation_id,
     result: row.result,
     reason: row.reason,
-    before: asAuditSnapshot(row.before_redacted),
-    after: asAuditSnapshot(row.after_redacted),
+    before: redactFinanceAuditSnapshot(row.before_redacted),
+    after: redactFinanceAuditSnapshot(row.after_redacted),
   };
 }
 
