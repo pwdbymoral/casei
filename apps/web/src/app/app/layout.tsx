@@ -4,7 +4,7 @@ import { Suspense } from "react";
 
 import { UnauthenticatedState } from "@/components/auth/access-state";
 import { AppShell, ShellSkeleton } from "@/components/shell/app-shell";
-import { authenticatedWorkspaceAdapter, fixtureWorkspaceAdapter } from "@/lib/workspaces";
+import { fixtureWorkspaceAdapter } from "@/lib/workspaces";
 import { getServerWorkspaceSession } from "@/lib/workspaces-server";
 
 export default async function AppLayout({ children }: Readonly<{ children: ReactNode }>) {
@@ -16,11 +16,7 @@ export default async function AppLayout({ children }: Readonly<{ children: React
   if (session.workspaces.length === 0) redirect("/onboarding");
   return (
     <Suspense fallback={<ShellSkeleton />}>
-      <AppShell
-        adapter={useFixture ? fixtureWorkspaceAdapter : authenticatedWorkspaceAdapter}
-        adapterMode={useFixture ? "fixture" : "unauthenticated"}
-        initialSession={session}
-      >
+      <AppShell adapterMode={useFixture ? "fixture" : "unauthenticated"} initialSession={session}>
         {children}
       </AppShell>
     </Suspense>

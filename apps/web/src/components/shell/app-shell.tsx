@@ -53,7 +53,6 @@ import {
 
 type AppShellProps = {
   children: ReactNode;
-  adapter?: WorkspaceAdapter;
   adapterMode?: "fixture" | "unauthenticated";
   initialSession?: WorkspaceSession;
   onLogout?: () => Promise<void>;
@@ -208,14 +207,12 @@ export function ShellSkeleton() {
 
 export function AppShell({
   children,
-  adapter: providedAdapter,
   adapterMode = "unauthenticated",
   initialSession,
   onLogout,
 }: AppShellProps) {
   const adapter: WorkspaceAdapter =
-    providedAdapter ??
-    (adapterMode === "fixture" ? fixtureWorkspaceAdapter : unauthenticatedWorkspaceAdapter);
+    adapterMode === "fixture" ? fixtureWorkspaceAdapter : unauthenticatedWorkspaceAdapter;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [session, setSession] = useState<WorkspaceSession | null>(initialSession ?? null);
