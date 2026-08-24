@@ -6,6 +6,7 @@ import {
   CreditCardIcon,
   ListTreeIcon,
   LoaderCircleIcon,
+  PencilIcon,
   PlusIcon,
   ReceiptTextIcon,
   RefreshCwIcon,
@@ -33,6 +34,7 @@ import {
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  type Category,
   type CreditCard,
   canWriteFinance,
   clearTransactionQueryParams,
@@ -121,6 +123,7 @@ function FinanceDashboard({
   > | null>(null);
   const [loadingAuditDetail, setLoadingAuditDetail] = useState(false);
   const [cards, setCards] = useState<CreditCard[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +139,10 @@ function FinanceDashboard({
   const [closingDay, setClosingDay] = useState("10");
   const [dueDay, setDueDay] = useState("17");
   const [savingCard, setSavingCard] = useState(false);
+  const [categoryName, setCategoryName] = useState("");
+  const [categoryKind, setCategoryKind] = useState<Category["kind"]>("expense");
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [savingCategory, setSavingCategory] = useState(false);
   const [busyStatementId, setBusyStatementId] = useState<string | null>(null);
   const [viewingStatement, setViewingStatement] = useState<Statement | null>(null);
   const [statementItems, setStatementItems] = useState<StatementItem[]>([]);
@@ -198,6 +205,7 @@ function FinanceDashboard({
     setTransactionsNextCursor(null);
     setTransactionsHasMore(false);
     setCards([]);
+    setCategories([]);
     setStatements([]);
     setStatus("loading");
     setError(null);
@@ -223,6 +231,10 @@ function FinanceDashboard({
     setSaving(false);
     setUndoing(false);
     setSavingCard(false);
+    setSavingCategory(false);
+    setCategoryName("");
+    setCategoryKind("expense");
+    setEditingCategory(null);
     setBusyStatementId(null);
     setPendingStatementAction(null);
     setUndoableTransaction(null);
@@ -240,6 +252,7 @@ function FinanceDashboard({
   const workspaceDataReady = dataWorkspaceId === workspaceId;
   const visibleTransactions = workspaceDataReady ? transactions : [];
   const visibleCards = workspaceDataReady ? cards : [];
+  const visibleCategories = workspaceDataReady ? categories : [];
   const visibleStatements = workspaceDataReady ? statements : [];
   const visibleError = workspaceDataReady ? error : null;
   const visibleNotice = workspaceDataReady ? notice : null;
@@ -286,10 +299,11 @@ function FinanceDashboard({
       setStatementItemsNextCursor(null);
       setStatementItemsHasMore(false);
       try {
-        const [nextTransactions, nextCards, nextStatements] = await Promise.all([
+        const [nextTransactions, nextCards, nextStatements, nextCategories] = await Promise.all([
           adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
+          adapter.listCategories(workspaceId),
         ]);
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
           return;
@@ -298,6 +312,7 @@ function FinanceDashboard({
         setTransactionsHasMore(nextTransactions.hasMore);
         setCards(nextCards);
         setStatements(nextStatements);
+        setCategories(nextCategories);
         setStatus("success");
       } catch (cause) {
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
@@ -441,6 +456,57 @@ function FinanceDashboard({
       setError(cause instanceof Error ? cause.message : "Não foi possível cadastrar o cartão.");
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCard(false);
+    }
+  }
+
+  async function handleCategorySubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = categoryName.trim();
+    if (savingCategory || !name || !writeAccess) return;
+    setSavingCategory(true);
+    setError(null);
+    try {
+      const value = editingCategory
+        ? await adapter.updateCategory(workspaceId, editingCategory, {
+            name,
+            kind: categoryKind,
+          })
+        : await adapter.createCategory(workspaceId, { name, kind: categoryKind });
+      setCategories((current) => {
+        const index = current.findIndex((category) => category.id === value.id);
+        if (index < 0) return [...current, value];
+        return current.map((category) => (category.id === value.id ? value : category));
+      });
+      setCategoryName("");
+      setCategoryKind("expense");
+      setEditingCategory(null);
+      setNotice(editingCategory ? "Categoria atualizada." : "Categoria criada.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível salvar a categoria.");
+    } finally {
+      setSavingCategory(false);
+    }
+  }
+
+  async function transitionCategory(category: Category, action: "archive" | "restore") {
+    if (savingCategory || !writeAccess) return;
+    setSavingCategory(true);
+    setError(null);
+    try {
+      const value =
+        action === "archive"
+          ? await adapter.archiveCategory(workspaceId, category)
+          : await adapter.restoreCategory(workspaceId, category);
+      setCategories((current) => current.map((item) => (item.id === value.id ? value : item)));
+      setNotice(action === "archive" ? "Categoria arquivada." : "Categoria restaurada.");
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : `Não foi possível ${action === "archive" ? "arquivar" : "restaurar"} a categoria.`,
+      );
+    } finally {
+      setSavingCategory(false);
     }
   }
 
@@ -873,6 +939,146 @@ function FinanceDashboard({
                 </Button>
               </div>
             </form>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section aria-labelledby="categories-title">
+        <Card>
+          <CardHeader>
+            <CardTitle id="categories-title">Categorias</CardTitle>
+            <CardDescription>
+              Organize receitas e despesas sem apagar o histórico. Categorias arquivadas continuam
+              visíveis nos lançamentos antigos.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)]">
+            <form
+              className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+              onSubmit={handleCategorySubmit}
+            >
+              <Field>
+                <FieldLabel htmlFor="category-name">Nome</FieldLabel>
+                <Input
+                  id="category-name"
+                  value={categoryName}
+                  onChange={(event) => setCategoryName(event.target.value)}
+                  placeholder="Ex.: Mercado"
+                  maxLength={80}
+                  disabled={!writeAccess || savingCategory}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="category-kind">Tipo</FieldLabel>
+                <select
+                  id="category-kind"
+                  className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={categoryKind}
+                  onChange={(event) => setCategoryKind(event.target.value as Category["kind"])}
+                  disabled={!writeAccess || savingCategory}
+                >
+                  <option value="expense">Despesa</option>
+                  <option value="income">Receita</option>
+                  <option value="both">Receita e despesa</option>
+                </select>
+              </Field>
+              <div className="flex gap-2">
+                <Button
+                  type="submit"
+                  disabled={!writeAccess || savingCategory || !categoryName.trim()}
+                >
+                  {savingCategory ? (
+                    <LoaderCircleIcon className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <PlusIcon aria-hidden="true" />
+                  )}
+                  {editingCategory ? "Salvar" : "Adicionar"}
+                </Button>
+                {editingCategory ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setEditingCategory(null);
+                      setCategoryName("");
+                      setCategoryKind("expense");
+                    }}
+                    disabled={savingCategory}
+                  >
+                    Cancelar
+                  </Button>
+                ) : null}
+              </div>
+            </form>
+            <div className="rounded-lg border bg-muted/20 p-3" aria-live="polite">
+              {visibleCategories.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Nenhuma categoria cadastrada. A primeira pode ser criada acima.
+                </p>
+              ) : (
+                <ul className="divide-y">
+                  {visibleCategories.map((category) => (
+                    <li
+                      key={category.id}
+                      className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{category.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {category.kind === "both"
+                            ? "Receita e despesa"
+                            : category.kind === "income"
+                              ? "Receita"
+                              : "Despesa"}
+                          {category.archived ? " · Arquivada" : ""}
+                        </p>
+                      </div>
+                      {writeAccess ? (
+                        <div className="flex shrink-0 gap-1">
+                          {!category.archived ? (
+                            <>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                aria-label={`Editar categoria ${category.name}`}
+                                onClick={() => {
+                                  setEditingCategory(category);
+                                  setCategoryName(category.name);
+                                  setCategoryKind(category.kind);
+                                }}
+                                disabled={savingCategory}
+                              >
+                                <PencilIcon aria-hidden="true" />
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => void transitionCategory(category, "archive")}
+                                disabled={savingCategory}
+                              >
+                                Arquivar
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void transitionCategory(category, "restore")}
+                              disabled={savingCategory}
+                            >
+                              Restaurar
+                            </Button>
+                          )}
+                        </div>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </CardContent>
         </Card>
       </section>

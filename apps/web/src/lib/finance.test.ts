@@ -104,6 +104,38 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("uses If-Match and explicit confirmation for category maintenance", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      if (String(input).endsWith("/categories/category-1")) {
+        expect(init?.method).toBe("PATCH");
+        expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+        return Response.json({ id: "category-1", version: 4, archived: false });
+      }
+      expect(String(input)).toContain("/categories/category-1/archive");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v4"');
+      expect(JSON.parse(String(init?.body))).toEqual({ confirm: true });
+      return Response.json({ id: "category-1", version: 5, archived: true });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const category = {
+      id: "category-1",
+      workspaceId: "workspace",
+      name: "Mercado",
+      kind: "expense" as const,
+      archived: false,
+      version: 3,
+    };
+    const updated = await adapter.updateCategory("workspace", category, { name: "Feira" });
+    expect(updated.version).toBe(4);
+    await expect(
+      adapter.archiveCategory("workspace", { ...category, version: 4 }),
+    ).resolves.toMatchObject({
+      archived: true,
+      version: 5,
+    });
+  });
+
   it("reuses the logical idempotency key after a network failure", async () => {
     let attempts = 0;
     const keys: string[] = [];

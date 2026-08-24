@@ -1,5 +1,6 @@
 import {
   type CreateTransactionInput,
+  categoryTransitionSchema,
   createCategorySchema,
   createCreditCardSchema,
   createInstallmentPlanSchema,
@@ -8,6 +9,7 @@ import {
   domainIdSchema,
   settleTransactionSchema,
   type TransactionListQuery,
+  updateCategorySchema,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
 import { executeIdempotent, type JsonValue, withUnitOfWork } from "@casei/database";
@@ -949,6 +951,178 @@ export class FinanceService {
     );
   }
 
+  async updateCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = updateCategorySchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/categories/${categoryId}`,
+        key: idempotencyKey,
+        request: { categoryId, expectedVersion, ...parsed },
+        execute: async () => {
+          const currentResult = await client.query<{
+            id: string;
+            workspace_id: string;
+            name: string;
+            kind: "income" | "expense" | "both";
+            archived: boolean;
+            version: number;
+          }>(
+            `SELECT id, workspace_id, name, kind, archived, version
+               FROM finance_category
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, categoryId],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
+          if (current.archived) throw new FinanceConflictError("A categoria está arquivada.");
+          const nextName = parsed.name ?? current.name;
+          const nextKind = parsed.kind ?? current.kind;
+          await assertCategoryNameAvailable(client, scope.workspaceId, nextName, categoryId);
+          if (nextKind !== current.kind) {
+            const incompatible = await client.query<{ count: string }>(
+              `SELECT count(*)::text AS count
+                 FROM finance_transaction
+                WHERE workspace_id = $1 AND category_id = $2
+                  AND ((kind = 'income' AND $3::text = 'expense')
+                    OR (kind = 'expense' AND $3::text = 'income'))`,
+              [scope.workspaceId, categoryId, nextKind],
+            );
+            if (Number(incompatible.rows[0]?.count ?? "0") > 0) {
+              throw new FinanceConflictError(
+                "A categoria já possui lançamentos incompatíveis com este tipo.",
+              );
+            }
+          }
+          const updated = await client.query<{
+            id: string;
+            workspace_id: string;
+            name: string;
+            kind: "income" | "expense" | "both";
+            archived: boolean;
+            version: number;
+          }>(
+            `UPDATE finance_category
+                SET name = $3, kind = $4, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $5
+              RETURNING id, workspace_id, name, kind, archived, version`,
+            [scope.workspaceId, categoryId, nextName, nextKind, expectedVersion],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          await this.recordCategoryAudit(client, scope, categoryId, "category.updated", {
+            before: { name: current.name, kind: current.kind, archived: current.archived },
+            after: { name: row.name, kind: row.kind, archived: row.archived },
+          });
+          return {
+            statusCode: 200,
+            response: { category: toCategoryView(row) } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    const response = result.response as unknown as { category: CategoryView };
+    return { replayed: result.replayed, category: response.category };
+  }
+
+  async archiveCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    return this.transitionCategory(scope, categoryId, "archive", idempotencyKey, expectedVersion);
+  }
+
+  async restoreCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    return this.transitionCategory(scope, categoryId, "restore", idempotencyKey, expectedVersion);
+  }
+
+  private async transitionCategory(
+    scope: FinanceScope,
+    categoryId: string,
+    action: "archive" | "restore",
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; category: CategoryView }> {
+    assertFinanceCapability(scope, "finance.write");
+    categoryTransitionSchema.parse({ confirm: true });
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/categories/${categoryId}/${action}`,
+        key: idempotencyKey,
+        request: { categoryId, expectedVersion, action },
+        execute: async () => {
+          const currentResult = await client.query<{
+            id: string;
+            workspace_id: string;
+            name: string;
+            kind: "income" | "expense" | "both";
+            archived: boolean;
+            version: number;
+          }>(
+            `SELECT id, workspace_id, name, kind, archived, version
+               FROM finance_category
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, categoryId],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
+          if (action === "restore")
+            await assertCategoryNameAvailable(client, scope.workspaceId, current.name, categoryId);
+          if (action === "archive" && current.archived) {
+            throw new FinanceConflictError("A categoria já está arquivada.");
+          }
+          if (action === "restore" && !current.archived) {
+            throw new FinanceConflictError("A categoria já está ativa.");
+          }
+          const archived = action === "archive";
+          const updated = await client.query<{
+            id: string;
+            workspace_id: string;
+            name: string;
+            kind: "income" | "expense" | "both";
+            archived: boolean;
+            version: number;
+          }>(
+            `UPDATE finance_category
+                SET archived = $3, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $4
+              RETURNING id, workspace_id, name, kind, archived, version`,
+            [scope.workspaceId, categoryId, archived, expectedVersion],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          await this.recordCategoryAudit(client, scope, categoryId, `category.${action}`, {
+            before: { name: current.name, kind: current.kind, archived: current.archived },
+            after: { name: row.name, kind: row.kind, archived: row.archived },
+          });
+          return {
+            statusCode: 200,
+            response: { category: toCategoryView(row) } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    const response = result.response as unknown as { category: CategoryView };
+    return { replayed: result.replayed, category: response.category };
+  }
+
   async createCard(scope: FinanceScope, input: unknown, idempotencyKey: string) {
     assertFinanceCapability(scope, "finance.write");
     const parsed = createCreditCardSchema.parse(input);
@@ -1601,6 +1775,30 @@ export class FinanceService {
     );
   }
 
+  private async recordCategoryAudit(
+    client: PgPoolClient,
+    scope: FinanceScope,
+    categoryId: string,
+    action: string,
+    snapshots: { before: Record<string, unknown>; after: Record<string, unknown> },
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO audit_event
+         (category, action, actor_id, workspace_id, target_type, target_id,
+          origin, correlation_id, result, before_redacted, after_redacted)
+       VALUES ('finance', $1, $2, $3, 'finance_category', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
+      [
+        action,
+        scope.actorId,
+        scope.workspaceId,
+        categoryId,
+        scope.correlationId,
+        JSON.stringify(snapshots.before),
+        JSON.stringify(snapshots.after),
+      ],
+    );
+  }
+
   private async workspaceCurrency(client: PgPoolClient, workspaceId: string): Promise<string> {
     const result = await client.query<{ currency_code: string }>(
       `SELECT p.currency_code
@@ -1695,6 +1893,23 @@ export class FinanceService {
   private databaseScope(scope: FinanceScope) {
     return { ...scope, applicationRole: this.applicationRole };
   }
+}
+
+async function assertCategoryNameAvailable(
+  client: PgPoolClient,
+  workspaceId: string,
+  name: string,
+  exceptId: string,
+): Promise<void> {
+  const result = await client.query<{ id: string }>(
+    `SELECT id
+       FROM finance_category
+      WHERE workspace_id = $1 AND id <> $2 AND archived = false AND lower(name) = lower($3)
+      LIMIT 1`,
+    [workspaceId, exceptId, name],
+  );
+  if (result.rows[0])
+    throw new FinanceConflictError("Já existe uma categoria ativa com este nome.");
 }
 
 export function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {

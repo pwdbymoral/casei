@@ -582,6 +582,13 @@ export const createCategorySchema = z.object({
   name: z.string().trim().min(1).max(80),
   kind: categoryKindSchema,
 });
+export const updateCategorySchema = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    kind: categoryKindSchema.optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+export const categoryTransitionSchema = z.object({ confirm: z.literal(true) });
 
 export const creditCardSchema = z.object({
   id: domainIdSchema,

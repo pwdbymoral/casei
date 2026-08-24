@@ -8,6 +8,81 @@ import {
 import { decodeCursor } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
+  it("updates a category atomically and records its redacted audit transition", async () => {
+    const categoryId = "0190f3c8-2a10-7abc-8def-1234567890b0";
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE")) return { rows: [] };
+        if (sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-1" }] };
+        if (sql.includes("SELECT id, workspace_id, name, kind, archived, version"))
+          return {
+            rows: [
+              {
+                id: categoryId,
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                name: "Mercado",
+                kind: "expense",
+                archived: false,
+                version: 0,
+              },
+            ],
+          };
+        if (sql.includes("FROM finance_category") && sql.includes("lower(name)"))
+          return { rows: [] };
+        if (sql.includes("UPDATE finance_category"))
+          return {
+            rows: [
+              {
+                id: categoryId,
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                name: "Feira",
+                kind: "expense",
+                archived: false,
+                version: 1,
+              },
+            ],
+          };
+        if (sql.includes("INSERT INTO audit_event")) return { rows: [] };
+        if (sql.includes('UPDATE "idempotency_key"')) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const result = await service.updateCategory(
+      {
+        workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "member",
+      },
+      categoryId,
+      { name: "Feira" },
+      "category-service-test-001",
+      0,
+    );
+
+    expect(result).toEqual({
+      replayed: false,
+      category: {
+        id: categoryId,
+        workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+        name: "Feira",
+        kind: "expense",
+        archived: false,
+        version: 1,
+      },
+    });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO audit_event"),
+      expect.arrayContaining(["category.updated"]),
+    );
+  });
+
   it("does not accept an adjustment through the generic transaction command", async () => {
     const service = new FinanceService({} as never);
     await expect(

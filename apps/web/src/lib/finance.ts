@@ -231,6 +231,8 @@ export type CreateTransactionInput = {
   cardId?: string | null;
 };
 
+export type UpdateCategoryInput = { name?: string; kind?: Category["kind"] };
+
 export type FinanceAdapter = {
   listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
   listTransactionAudit(
@@ -254,6 +256,17 @@ export type FinanceAdapter = {
     idempotencyKey?: string,
   ): Promise<Transaction>;
   listCategories(workspaceId: string): Promise<Category[]>;
+  createCategory(
+    workspaceId: string,
+    input: { name: string; kind: Category["kind"] },
+  ): Promise<Category>;
+  updateCategory(
+    workspaceId: string,
+    category: Category,
+    input: UpdateCategoryInput,
+  ): Promise<Category>;
+  archiveCategory(workspaceId: string, category: Category): Promise<Category>;
+  restoreCategory(workspaceId: string, category: Category): Promise<Category>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
   createCard(
     workspaceId: string,
@@ -331,6 +344,10 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   createTransaction: unavailableFinanceOperation,
   reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
+  createCategory: unavailableFinanceOperation,
+  updateCategory: unavailableFinanceOperation,
+  archiveCategory: unavailableFinanceOperation,
+  restoreCategory: unavailableFinanceOperation,
   listCards: unavailableFinanceOperation,
   createCard: unavailableFinanceOperation,
   listStatements: unavailableFinanceOperation,
@@ -437,6 +454,39 @@ export function createHttpFinanceAdapter(
         },
       }),
     listCategories: (workspaceId) => list<Category>(`/workspaces/${workspaceId}/categories`),
+    createCategory: (workspaceId, input) =>
+      call<Category>(`/workspaces/${workspaceId}/categories`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey() },
+        body: JSON.stringify(input),
+      }),
+    updateCategory: (workspaceId, category, input) =>
+      call<Category>(`/workspaces/${workspaceId}/categories/${category.id}`, {
+        method: "PATCH",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${category.version}"`,
+        },
+        body: JSON.stringify(input),
+      }),
+    archiveCategory: (workspaceId, category) =>
+      call<Category>(`/workspaces/${workspaceId}/categories/${category.id}/archive`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${category.version}"`,
+        },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    restoreCategory: (workspaceId, category) =>
+      call<Category>(`/workspaces/${workspaceId}/categories/${category.id}/restore`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${category.version}"`,
+        },
+        body: JSON.stringify({ confirm: true }),
+      }),
     listCards: (workspaceId) => list<CreditCard>(`/workspaces/${workspaceId}/cards`),
     createCard: (workspaceId, input) =>
       call<CreditCard>(`/workspaces/${workspaceId}/cards`, {
@@ -520,6 +570,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
   type FixtureWorkspaceState = {
     currency: string | null;
     transactions: Transaction[];
+    categories: Category[];
     cards: CreditCard[];
     statements: Statement[];
     transactionAudit: Map<string, FinanceAuditEvent[]>;
@@ -570,6 +621,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     return {
       currency,
       transactions: [],
+      categories: [],
       cards,
       statements,
       transactionAudit: new Map(),
@@ -770,7 +822,42 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       if (!event) throw new FinanceAdapterError("Evento de auditoria não encontrado.", 404);
       return { ...event, consequences: { ledgerEvents: [] } };
     },
-    listCategories: async () => [],
+    listCategories: async (workspaceId) => [...stateFor(workspaceId).categories],
+    createCategory: async (workspaceId, input) => {
+      const state = stateFor(workspaceId);
+      const categories = state.categories;
+      const category: Category = {
+        id: fixtureId(120 + categories.length),
+        workspaceId,
+        name: input.name,
+        kind: input.kind,
+        archived: false,
+        version: 0,
+      };
+      categories.push(category);
+      return category;
+    },
+    updateCategory: async (workspaceId, category, input) => {
+      const state = stateFor(workspaceId);
+      const next = { ...category, ...input, version: category.version + 1 };
+      const index = state.categories.findIndex((value) => value.id === category.id);
+      if (index >= 0) state.categories[index] = next;
+      return next;
+    },
+    archiveCategory: async (workspaceId, category) => {
+      const state = stateFor(workspaceId);
+      const next = { ...category, archived: true, version: category.version + 1 };
+      const index = state.categories.findIndex((value) => value.id === category.id);
+      if (index >= 0) state.categories[index] = next;
+      return next;
+    },
+    restoreCategory: async (workspaceId, category) => {
+      const state = stateFor(workspaceId);
+      const next = { ...category, archived: false, version: category.version + 1 };
+      const index = state.categories.findIndex((value) => value.id === category.id);
+      if (index >= 0) state.categories[index] = next;
+      return next;
+    },
     listCards: async (workspaceId) => [...stateFor(workspaceId).cards],
     createCard: async (workspaceId, input) => {
       const state = stateFor(workspaceId);

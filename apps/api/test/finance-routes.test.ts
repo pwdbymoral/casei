@@ -13,6 +13,79 @@ const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
 const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
 
 describe("finance HTTP composition", () => {
+  it("routes category edits and archive actions with preconditions and idempotency", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const category = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890b0",
+      workspaceId,
+      name: "Mercado",
+      kind: "expense" as const,
+      archived: false,
+      version: 1,
+    };
+    const fakeService = {
+      updateCategory: async (...args: unknown[]) => {
+        calls.push({ method: "updateCategory", args });
+        return { replayed: false, category };
+      },
+      archiveCategory: async (...args: unknown[]) => {
+        calls.push({ method: "archiveCategory", args });
+        return { replayed: false, category: { ...category, archived: true, version: 2 } };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const edited = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/categories/${category.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "category-edit-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ name: "Mercado e feira", kind: "expense" }),
+      },
+    );
+    expect(edited.status).toBe(200);
+    expect(edited.headers.get("ETag")).toBe('"v1"');
+
+    const archived = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/categories/${category.id}/archive`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "category-archive-route-001",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+    expect(archived.status).toBe(200);
+    expect(archived.headers.get("ETag")).toBe('"v2"');
+    expect(calls[0]?.args.slice(1)).toEqual([
+      category.id,
+      { name: "Mercado e feira", kind: "expense" },
+      "category-edit-route-001",
+      0,
+    ]);
+    expect(calls[1]?.args.slice(1)).toEqual([category.id, "category-archive-route-001", 1]);
+  });
+
   it("wires finance through createApp's authenticated actor and workspace scope", async () => {
     let receivedActor: unknown;
     let receivedWorkspaceId: string | undefined;
