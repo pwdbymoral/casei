@@ -297,6 +297,7 @@ describe("proteção de exportação CSV", () => {
     );
 
     expect(result).toBe('"Descrição","Valor"\r\n"\'=HYPERLINK(""https://evil"")","1000"\r\n');
+    expect(serializeCsv([])).toBe("");
   });
 
   it("protege fórmulas precedidas por whitespace e rejeita célula/valor excessivos", () => {

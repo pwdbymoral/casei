@@ -99,21 +99,24 @@ function decodeCsvBytes(
     );
   }
 
+  const hasUtf8Bom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  const bytesWithoutBom = hasUtf8Bom ? bytes.slice(3) : bytes;
+
   if (requestedEncoding === "latin1") {
-    const text = new TextDecoder("iso-8859-1").decode(bytes);
-    return { text: stripUtf8Bom(text), encoding: "latin1" };
+    const text = new TextDecoder("iso-8859-1").decode(bytesWithoutBom);
+    return { text, encoding: "latin1" };
   }
 
   if (requestedEncoding === "utf-8" || requestedEncoding === undefined) {
     try {
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytesWithoutBom);
       return { text: stripUtf8Bom(text), encoding: "utf-8" };
     } catch {
       if (requestedEncoding === "utf-8") {
         throw new CsvImportError("unsupported_encoding", "O arquivo não é um UTF-8 válido.");
       }
-      const text = new TextDecoder("iso-8859-1").decode(bytes);
-      return { text: stripUtf8Bom(text), encoding: "latin1" };
+      const text = new TextDecoder("iso-8859-1").decode(bytesWithoutBom);
+      return { text, encoding: "latin1" };
     }
   }
 
@@ -435,12 +438,14 @@ export function mapCsvColumns<T>(
   fields: readonly CsvFieldDefinition<T>[],
   explicitMapping: Readonly<Record<string, string>> = {},
 ): CsvColumnMapping {
-  const mapping: Record<string, string> = {};
+  const mapping = Object.create(null) as Record<string, string>;
   const mappingErrors: CsvMappingError[] = [];
   const assignedHeaders = new Set<string>();
 
   for (const field of fields) {
-    const explicitHeader = explicitMapping[field.key];
+    const explicitHeader = Object.hasOwn(explicitMapping, field.key)
+      ? explicitMapping[field.key]
+      : undefined;
     if (explicitHeader !== undefined) {
       const actualHeader = headers.find((header) => header === explicitHeader);
       if (actualHeader === undefined) {
@@ -608,6 +613,9 @@ export function parseMinorAmount(value: string, locale: CsvLocale, scale = 2): s
     throw new CsvImportError("invalid_amount", "O valor possui precisão ou formato inválido.");
   }
   const minor = `${plainWhole}${fraction.padEnd(scale, "0")}`.replace(/^0+(?=\d)/, "");
+  if (minor.length > 15) {
+    throw new CsvImportError("invalid_amount", "O valor excede o limite suportado.");
+  }
   try {
     if (BigInt(minor || "0") > 999_999_999_999_999n) {
       throw new CsvImportError("invalid_amount", "O valor excede o limite suportado.");
@@ -708,7 +716,7 @@ export function preflightCsvImport<T>(
       }
     }
 
-    const values: Record<string, unknown> = {};
+    const values = Object.create(null) as Record<string, unknown>;
     for (const field of fields) {
       const header = mapping.mapping[field.key];
       if (header === undefined) continue;
@@ -846,6 +854,7 @@ export function serializeCsv(
   rows: readonly (readonly string[])[],
   options: SerializeCsvOptions = {},
 ): string {
+  if (rows.length === 0) return "";
   const delimiter = options.delimiter ?? ",";
   return `${rows
     .map((row) =>
