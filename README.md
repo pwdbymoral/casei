@@ -48,6 +48,7 @@ Para a imagem OCI, passe o mesmo valor como argumento de build:
 ```bash
 docker build \
   --build-arg NEXT_PUBLIC_CASEI_API_ORIGIN=https://api.example.com \
+  --build-arg NEXT_PUBLIC_CASEI_WEB_ORIGIN=https://app.example.com \
   -f Dockerfile.web \
   -t casei-web .
 ```

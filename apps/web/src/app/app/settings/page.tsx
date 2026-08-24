@@ -67,6 +67,9 @@ export default function SettingsPage() {
     WorkspacePreferences,
     "workspaceId" | "version"
   > | null>(null);
+  const preferencesNameRef = useRef<HTMLInputElement>(null);
+  const preferencesConfirmRef = useRef<HTMLButtonElement>(null);
+  const restorePreferencesFocus = useRef(false);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -78,6 +81,17 @@ export default function SettingsPage() {
     [session],
   );
   const isOwner = workspace?.role === "owner";
+
+  useEffect(() => {
+    if (preferencesPreview) {
+      preferencesConfirmRef.current?.focus();
+      return;
+    }
+    if (restorePreferencesFocus.current) {
+      restorePreferencesFocus.current = false;
+      preferencesNameRef.current?.focus();
+    }
+  }, [preferencesPreview]);
 
   function isTerminalActionError(error: unknown): boolean {
     if (error instanceof WorkspaceManagementError) {
@@ -243,6 +257,11 @@ export default function SettingsPage() {
           : current,
       );
     });
+  }
+
+  function cancelPreferencesPreview() {
+    restorePreferencesFocus.current = true;
+    setPreferencesPreview(null);
   }
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
@@ -536,10 +555,11 @@ export default function SettingsPage() {
                   Nome do espaço
                   <Input
                     id="workspace-name"
+                    ref={preferencesNameRef}
                     value={workspaceName}
                     minLength={2}
                     maxLength={200}
-                    disabled={!isOwner || busy !== null}
+                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
                     onChange={(event) => setWorkspaceName(event.target.value)}
                     className="min-h-11"
                   />
@@ -550,7 +570,7 @@ export default function SettingsPage() {
                     id="workspace-currency"
                     value={currency}
                     maxLength={3}
-                    disabled={!isOwner || busy !== null}
+                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
                     onChange={(event) => setCurrency(event.target.value.toUpperCase())}
                     className="min-h-11 uppercase"
                   />
@@ -563,7 +583,7 @@ export default function SettingsPage() {
                   <Input
                     id="workspace-timezone"
                     value={timeZone}
-                    disabled={!isOwner || busy !== null}
+                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
                     onChange={(event) => setTimeZone(event.target.value)}
                     placeholder="America/Fortaleza"
                     className="min-h-11"
@@ -576,7 +596,7 @@ export default function SettingsPage() {
                     inputMode="numeric"
                     pattern="[0-9]+"
                     value={safetyMarginMinor}
-                    disabled={!isOwner || busy !== null}
+                    disabled={!isOwner || busy !== null || preferencesPreview !== null}
                     onChange={(event) =>
                       setSafetyMarginMinor(event.target.value.replace(/[^0-9]/g, ""))
                     }
@@ -599,16 +619,20 @@ export default function SettingsPage() {
                 ) : null}
               </form>
               {preferencesPreview ? (
-                <div
+                <section
                   className="mt-5 grid gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4"
-                  role="dialog"
                   aria-labelledby="preferences-preview-title"
+                  aria-describedby="preferences-preview-description"
+                  aria-live="polite"
                 >
                   <div>
                     <p id="preferences-preview-title" className="font-medium">
                       Revise antes de salvar
                     </p>
-                    <p className="text-sm text-muted-foreground">
+                    <p
+                      id="preferences-preview-description"
+                      className="text-sm text-muted-foreground"
+                    >
                       Confirme as consequências para este espaço. O servidor ainda validará a versão
                       e a regra da moeda.
                     </p>
@@ -621,6 +645,7 @@ export default function SettingsPage() {
                   <div className="flex flex-wrap gap-2">
                     <Button
                       type="button"
+                      ref={preferencesConfirmRef}
                       disabled={busy !== null}
                       onClick={() => void confirmPreferences()}
                     >
@@ -630,12 +655,12 @@ export default function SettingsPage() {
                       type="button"
                       variant="outline"
                       disabled={busy !== null}
-                      onClick={() => setPreferencesPreview(null)}
+                      onClick={cancelPreferencesPreview}
                     >
                       Voltar e editar
                     </Button>
                   </div>
-                </div>
+                </section>
               ) : null}
             </>
           ) : (

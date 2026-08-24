@@ -72,7 +72,7 @@ No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a 
 
 O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`. Além desse gate de execução, o ruleset `CodeQL merge protection` exige resultados de code scanning para a `main` e bloqueia alertas de code scanning classificados como erro ou alertas de segurança `high` ou superiores. O ruleset não possui bypass configurado.
 
-Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com a origem pública incorporada no build: `docker build --build-arg NEXT_PUBLIC_CASEI_API_ORIGIN=https://api.example.com -f Dockerfile.web -t casei-web .`.
+Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com as origens públicas incorporadas no build: `docker build --build-arg NEXT_PUBLIC_CASEI_API_ORIGIN=https://api.example.com --build-arg NEXT_PUBLIC_CASEI_WEB_ORIGIN=https://app.example.com -f Dockerfile.web -t casei-web .`.
 
 ## AUTH-002..005
 
