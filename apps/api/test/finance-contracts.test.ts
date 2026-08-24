@@ -1,7 +1,9 @@
 import {
+  createRecurrenceSchema,
   createTransactionSchema,
   insightWindowQuerySchema,
   payStatementSchema,
+  recurrenceTransitionSchema,
   safeToSpendQuerySchema,
   settleTransactionSchema,
   transactionListQuerySchema,
@@ -46,6 +48,32 @@ describe("finance contracts", () => {
         amount: { currency: "BRL", minor: "100" },
       }),
     ).not.toHaveProperty("occurredOn");
+  });
+
+  it("validates recurrence bounds and variable estimates", () => {
+    expect(
+      createRecurrenceSchema.parse({
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+        frequency: "monthly",
+        startOn: "2026-01-31",
+        variable: true,
+        estimatedAmount: { currency: "BRL", minor: "120" },
+      }),
+    ).toMatchObject({ variable: true, estimatedAmount: { minor: "120" } });
+    expect(() =>
+      createRecurrenceSchema.parse({
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+        frequency: "monthly",
+        startOn: "2026-03-01",
+        endOn: "2026-02-28",
+      }),
+    ).toThrow("posterior");
+    expect(recurrenceTransitionSchema.parse({})).toEqual({});
+    expect(recurrenceTransitionSchema.parse({ effectiveOn: "2028-02-29" })).toEqual({
+      effectiveOn: "2028-02-29",
+    });
   });
 
   it("parses timeline filters and rejects an inverted period", () => {

@@ -14,6 +14,7 @@ import {
   insightWindowQuerySchema,
   paginationQuerySchema,
   payStatementSchema,
+  recurrenceTransitionSchema,
   reopenStatementSchema,
   safeToSpendQuerySchema,
   settleTransactionSchema,
@@ -373,8 +374,29 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       input,
       requiredIdempotencyKey(context),
     );
-    return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+    return context.json(
+      result.response as unknown as Record<string, unknown>,
+      result.replayed ? 200 : 201,
+    );
   });
+
+  for (const action of ["pause", "resume"] as const) {
+    router.post(`/workspaces/:workspaceId/recurrences/:recurrenceId/${action}`, async (context) => {
+      const recurrenceId = parseDomainId(context.req.param("recurrenceId"));
+      const expectedVersion = requireIfMatch(context);
+      const input = await parseJsonBody(context, recurrenceTransitionSchema);
+      const result = await service.transitionRecurrence(
+        scopeOf(context),
+        recurrenceId,
+        action,
+        input,
+        requiredIdempotencyKey(context),
+        expectedVersion,
+      );
+      setVersionHeaders(context, result.recurrence.version);
+      return context.json(result.recurrence);
+    });
+  }
 
   router.post("/workspaces/:workspaceId/statements/:statementId/close", async (context) => {
     const statementId = parseDomainId(context.req.param("statementId"));
