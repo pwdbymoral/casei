@@ -412,6 +412,13 @@ export const positiveMoneySchema = moneySchema.extend({
   minor: minorAmountSchema.refine((value) => BigInt(value) > 0n, "minor must be greater than zero"),
 });
 
+const nonNegativeMoneySchema = moneySchema.extend({
+  minor: minorAmountSchema.refine(
+    (value) => BigInt(value) >= 0n,
+    "minor must be greater than or equal to zero",
+  ),
+});
+
 export const transactionKindSchema = z.enum(["income", "expense", "transfer", "adjustment"]);
 export const transactionStateSchema = z.enum([
   "planned",
@@ -594,7 +601,7 @@ export const creditCardSchema = z.object({
     .string()
     .regex(/^\d{4}$/)
     .nullable(),
-  limit: moneySchema.nullable(),
+  limit: nonNegativeMoneySchema.nullable(),
   archived: z.boolean(),
   version: versionSchema,
 });
@@ -609,8 +616,26 @@ export const createCreditCardSchema = z.object({
     .regex(/^\d{4}$/)
     .nullable()
     .optional(),
-  limit: moneySchema.nullable().optional(),
+  limit: nonNegativeMoneySchema.nullable().optional(),
 });
+
+export const updateCreditCardSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    closingDay: z.number().int().min(1).max(31).optional(),
+    dueDay: z.number().int().min(1).max(31).optional(),
+    holder: z.string().trim().max(100).nullable().optional(),
+    lastFour: z
+      .string()
+      .regex(/^\d{4}$/)
+      .nullable()
+      .optional(),
+    limit: nonNegativeMoneySchema.nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Informe ao menos uma configuração para alterar.",
+  });
+export type UpdateCreditCardInput = z.infer<typeof updateCreditCardSchema>;
 
 export const statementSchema = z.object({
   id: domainIdSchema,

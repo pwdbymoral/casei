@@ -9,6 +9,7 @@ import {
   recurrenceTransitionSchema,
   settleTransactionSchema,
   type TransactionListQuery,
+  updateCreditCardSchema,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
 import {
@@ -1046,6 +1047,144 @@ export class FinanceService {
         },
       }),
     );
+  }
+
+  async updateCard(
+    scope: FinanceScope,
+    cardId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; card: CreditCardView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = updateCreditCardSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/cards/${cardId}`,
+        key: idempotencyKey,
+        request: { cardId, expectedVersion, ...parsed },
+        execute: async () => {
+          const current = await lockCreditCard(client, scope.workspaceId, cardId);
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) {
+            throw new VersionConflictError(current.version);
+          }
+          const changesClosingCycle =
+            parsed.closingDay !== undefined && parsed.closingDay !== current.closing_day;
+          const changesDueCycle = parsed.dueDay !== undefined && parsed.dueDay !== current.due_day;
+          if (changesClosingCycle || changesDueCycle) {
+            // Existing purchases retain the cycle dates that were persisted when
+            // they were created. Changing the card rule while such a cycle is
+            // open would make the next purchase recalculate against a different
+            // rule and can create overlapping open invoices. Keep the operation
+            // explicit: the user must close/resolve the cycle before changing
+            // the rule.
+            const blocking = await client.query<{ blocked: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1
+                   FROM credit_statement s
+                  WHERE s.workspace_id = $1 AND s.card_id = $2 AND s.state = 'open'
+                    AND EXISTS (
+                      SELECT 1
+                        FROM finance_transaction t
+                       WHERE t.workspace_id = s.workspace_id
+                         AND t.statement_id = s.id
+                         AND t.kind = 'expense'
+                         AND t.state <> 'canceled'
+                    )
+               ) AS blocked`,
+              [scope.workspaceId, cardId],
+            );
+            if (blocking.rows[0]?.blocked) {
+              throw new FinanceConflictError(
+                "Feche ou resolva a fatura aberta antes de alterar o ciclo do cartão.",
+              );
+            }
+          }
+          if (parsed.limit && parsed.limit.currency !== current.currency_code) {
+            throw new FinanceConflictError("O limite do cartão deve usar a moeda do espaço.");
+          }
+          const updated = await client.query<CreditCardRow>(
+            `UPDATE credit_card
+                SET name = $3, closing_day = $4, due_day = $5, holder = $6, last_four = $7,
+                    limit_minor = $8, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $9
+              RETURNING id, workspace_id, name, closing_day, due_day, holder, last_four,
+                        limit_minor, currency_code, archived, version`,
+            [
+              scope.workspaceId,
+              cardId,
+              parsed.name ?? current.name,
+              parsed.closingDay ?? current.closing_day,
+              parsed.dueDay ?? current.due_day,
+              parsed.holder === undefined ? current.holder : parsed.holder,
+              parsed.lastFour === undefined ? current.last_four : parsed.lastFour,
+              parsed.limit === undefined
+                ? current.limit_minor
+                : parsed.limit === null
+                  ? null
+                  : BigInt(parsed.limit.minor),
+              expectedVersion,
+            ],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          return { statusCode: 200, response: toCreditCardView(row) as unknown as JsonValue };
+        },
+      }),
+    );
+    return { replayed: result.replayed, card: result.response as unknown as CreditCardView };
+  }
+
+  async archiveCard(
+    scope: FinanceScope,
+    cardId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; card: CreditCardView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/cards/${cardId}/archive`,
+        key: idempotencyKey,
+        request: { cardId, expectedVersion },
+        execute: async () => {
+          const current = await lockCreditCard(client, scope.workspaceId, cardId);
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) {
+            throw new VersionConflictError(current.version);
+          }
+          if (!current.archived) {
+            const blocking = await client.query<{ blocked: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1
+                   FROM credit_statement
+                  WHERE workspace_id = $1 AND card_id = $2 AND state <> 'canceled'
+                    AND (state = 'open' OR total_minor > paid_minor)
+               ) AS blocked`,
+              [scope.workspaceId, cardId],
+            );
+            if (blocking.rows[0]?.blocked) {
+              throw new FinanceConflictError(
+                "Quite o saldo e feche ou transfira a fatura antes de arquivar o cartão.",
+              );
+            }
+          }
+          const updated = await client.query<CreditCardRow>(
+            `UPDATE credit_card
+                SET archived = true, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $3
+              RETURNING id, workspace_id, name, closing_day, due_day, holder, last_four,
+                        limit_minor, currency_code, archived, version`,
+            [scope.workspaceId, cardId, expectedVersion],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          return { statusCode: 200, response: toCreditCardView(row) as unknown as JsonValue };
+        },
+      }),
+    );
+    return { replayed: result.replayed, card: result.response as unknown as CreditCardView };
   }
 
   async createCardPurchase(scope: FinanceScope, input: unknown, idempotencyKey: string) {
@@ -2342,6 +2481,36 @@ function transactionAuditSnapshot(
   };
 }
 
+interface CreditCardRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  closing_day: number;
+  due_day: number;
+  holder: string | null;
+  last_four: string | null;
+  limit_minor: string | bigint | null;
+  currency_code: string;
+  archived: boolean;
+  version: number;
+}
+
+async function lockCreditCard(
+  client: PgPoolClient,
+  workspaceId: string,
+  cardId: string,
+): Promise<CreditCardRow | null> {
+  const result = await client.query<CreditCardRow>(
+    `SELECT id, workspace_id, name, closing_day, due_day, holder, last_four,
+            limit_minor, currency_code, archived, version
+       FROM credit_card
+      WHERE workspace_id = $1 AND id = $2
+      FOR UPDATE`,
+    [workspaceId, cardId],
+  );
+  return result.rows[0] ?? null;
+}
+
 function toCategoryView(row: {
   id: string;
   workspace_id: string;
@@ -2360,19 +2529,7 @@ function toCategoryView(row: {
   };
 }
 
-function toCreditCardView(row: {
-  id: string;
-  workspace_id: string;
-  name: string;
-  closing_day: number;
-  due_day: number;
-  holder: string | null;
-  last_four: string | null;
-  limit_minor: string | bigint | null;
-  currency_code: string;
-  archived: boolean;
-  version: number;
-}): CreditCardView {
+function toCreditCardView(row: CreditCardRow): CreditCardView {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
