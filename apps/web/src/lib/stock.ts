@@ -133,6 +133,7 @@ export const unauthenticatedStockAdapter: StockAdapter = {
 type JsonPage<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
 
 const stockSnapshotPrefix = "casei:stock:snapshot:v1:";
+let stockSnapshotGeneration = 0;
 
 function stockStorage(): Storage | null {
   try {
@@ -184,6 +185,7 @@ function writeStockSnapshot(
 
 /** Removes private snapshots when the authenticated workspace ends. */
 export function clearStockOfflineSnapshot(workspaceId: string): void {
+  stockSnapshotGeneration += 1;
   const store = stockStorage();
   if (!store) return;
   const prefix = `${stockSnapshotPrefix}${workspaceId}:`;
@@ -191,6 +193,21 @@ export function clearStockOfflineSnapshot(workspaceId: string): void {
     for (let index = store.length - 1; index >= 0; index -= 1) {
       const key = store.key(index);
       if (key?.startsWith(prefix)) store.removeItem(key);
+    }
+  } catch {
+    // A storage implementation may become unavailable during logout/navigation.
+  }
+}
+
+/** Removes every private stock snapshot on logout, revocation, or scope reset. */
+export function clearAllStockOfflineSnapshots(): void {
+  stockSnapshotGeneration += 1;
+  const store = stockStorage();
+  if (!store) return;
+  try {
+    for (let index = store.length - 1; index >= 0; index -= 1) {
+      const key = store.key(index);
+      if (key?.startsWith(stockSnapshotPrefix)) store.removeItem(key);
     }
   } catch {
     // A storage implementation may become unavailable during logout/navigation.
@@ -255,6 +272,7 @@ export function createHttpStockAdapter(
       return lastReadWasCached;
     },
     async listProducts(workspaceId, options = {}) {
+      const requestSnapshotGeneration = stockSnapshotGeneration;
       const params = new URLSearchParams();
       if (options.query) params.set("query", options.query);
       if (options.includeArchived) params.set("includeArchived", "true");
@@ -263,7 +281,9 @@ export function createHttpStockAdapter(
         const products = (
           await call<JsonPage<StockProduct>>(`${path(workspaceId)}${query ? `?${query}` : ""}`)
         ).items;
-        writeStockSnapshot(workspaceId, options, products);
+        if (requestSnapshotGeneration === stockSnapshotGeneration) {
+          writeStockSnapshot(workspaceId, options, products);
+        }
         lastReadWasCached = false;
         return products;
       } catch (error) {
