@@ -117,6 +117,7 @@ export class IdentityNotFoundError extends Error {
   readonly code = "not_found" as const;
   constructor() {
     super("Workspace or membership not found");
+    this.name = "IdentityNotFoundError";
   }
 }
 
@@ -124,11 +125,16 @@ export class IdentityPermissionError extends Error {
   readonly code = "permission_denied" as const;
   constructor() {
     super("The actor is not allowed to perform this action");
+    this.name = "IdentityPermissionError";
   }
 }
 
 export class IdentityConflictError extends Error {
   readonly code = "conflict" as const;
+  constructor(message = "") {
+    super(message);
+    this.name = "IdentityConflictError";
+  }
 }
 
 export class IdentityVersionConflictError extends Error {
@@ -143,6 +149,7 @@ export class IdentityRecentAuthError extends Error {
   readonly code = "recent_auth_required" as const;
   constructor() {
     super("Recent authentication is required for this action");
+    this.name = "IdentityRecentAuthError";
   }
 }
 
@@ -150,6 +157,7 @@ export class InvitationRateLimitError extends Error {
   readonly code = "rate_limited" as const;
   constructor(readonly retryAfterSeconds: number) {
     super("O limite de convites foi atingido. Tente novamente mais tarde.");
+    this.name = "InvitationRateLimitError";
   }
 }
 

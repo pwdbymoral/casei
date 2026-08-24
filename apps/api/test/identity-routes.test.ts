@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
 import {
+  IdentityConflictError,
+  IdentityNotFoundError,
   IdentityPermissionError,
+  IdentityRecentAuthError,
   IdentityVersionConflictError,
   InvitationRateLimitError,
 } from "../src/identity-service.js";
@@ -11,10 +14,23 @@ const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 
 describe("AUTH-002..005 HTTP boundary", () => {
   it("preserves the typed identity version conflict for API error mapping", () => {
-    const error = new IdentityVersionConflictError(7);
-    expect(error.name).toBe("IdentityVersionConflictError");
-    expect(error.code).toBe("version_conflict");
-    expect(error.currentVersion).toBe(7);
+    const errors = [
+      new IdentityNotFoundError(),
+      new IdentityPermissionError(),
+      new IdentityConflictError("conflict"),
+      new IdentityVersionConflictError(7),
+      new IdentityRecentAuthError(),
+      new InvitationRateLimitError(30),
+    ];
+    expect(errors.map((error) => error.name)).toEqual([
+      "IdentityNotFoundError",
+      "IdentityPermissionError",
+      "IdentityConflictError",
+      "IdentityVersionConflictError",
+      "IdentityRecentAuthError",
+      "InvitationRateLimitError",
+    ]);
+    expect(errors[3]).toMatchObject({ code: "version_conflict", currentVersion: 7 });
   });
 
   it("requires an authenticated actor and keeps onboarding idempotency explicit", async () => {
