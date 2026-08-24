@@ -1,3 +1,4 @@
+import { requireApiOrigin as requireConfiguredApiOrigin } from "./api-origin";
 import {
   WorkspaceManagementError,
   WorkspaceSessionError,
@@ -49,11 +50,9 @@ export function preferenceChangeSummary(
   return changes.length > 0 ? changes : ["Nenhuma alteração será feita."];
 }
 
-function requireOrigin(
-  name: "NEXT_PUBLIC_CASEI_API_ORIGIN" | "NEXT_PUBLIC_CASEI_WEB_ORIGIN",
-): string {
-  const configured = process.env[name];
-  if (!configured) throw new Error(`${name} não está configurada.`);
+function requireWebOrigin(): string {
+  const configured = process.env.NEXT_PUBLIC_CASEI_WEB_ORIGIN?.trim();
+  if (!configured) throw new Error("NEXT_PUBLIC_CASEI_WEB_ORIGIN não está configurada.");
   try {
     const url = new URL(configured);
     if (!(["http:", "https:"] as string[]).includes(url.protocol) || url.username || url.password) {
@@ -61,16 +60,12 @@ function requireOrigin(
     }
     return url.origin;
   } catch {
-    throw new Error(`${name} deve ser uma origem HTTP(S) absoluta.`);
+    throw new Error("NEXT_PUBLIC_CASEI_WEB_ORIGIN deve ser uma origem HTTP(S) absoluta.");
   }
 }
 
 export function requireApiOrigin(): string {
-  return requireOrigin("NEXT_PUBLIC_CASEI_API_ORIGIN");
-}
-
-function requireWebOrigin(): string {
-  return requireOrigin("NEXT_PUBLIC_CASEI_WEB_ORIGIN");
+  return requireConfiguredApiOrigin();
 }
 
 function settingsCallbackUrl(): string {

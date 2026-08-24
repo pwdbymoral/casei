@@ -203,6 +203,43 @@ describe("AUTH-001 identidade", () => {
     expect(confirmation).toMatchObject({ kind: "verification", email: "ada@example.com" });
     expect(confirmation.url).toContain(encodeURIComponent(`${webOrigin}/app/settings`));
     expect(confirmation.url).not.toContain(encodeURIComponent(`${apiOrigin}/app/settings`));
+
+    const beforeConfirmation = await authRequest(app, "get-session", {
+      headers: { Cookie: cookie },
+    });
+    await expect(beforeConfirmation.json()).resolves.toMatchObject({
+      user: { email: "ada@example.com" },
+    });
+
+    const firstConfirmation = await app.request(confirmation.url, {
+      headers: { Cookie: cookie, Origin: webOrigin },
+    });
+    expect(firstConfirmation.status).toBe(302);
+    await expect(firstConfirmation.headers.get("location")).toBe(`${webOrigin}/app/settings`);
+    await expect(
+      authRequest(app, "get-session", { headers: { Cookie: cookie } }).then((response) =>
+        response.json(),
+      ),
+    ).resolves.toMatchObject({ user: { email: "ada@example.com" } });
+
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
+    const secondConfirmation = emailPort.messages[2];
+    if (!secondConfirmation) throw new Error("expected new email verification");
+    expect(secondConfirmation).toMatchObject({
+      kind: "verification",
+      email: "ada.new@example.com",
+    });
+    expect(secondConfirmation.url).toContain(encodeURIComponent(`${webOrigin}/app/settings`));
+    const secondConfirmationResponse = await app.request(secondConfirmation.url, {
+      headers: { Cookie: cookie, Origin: webOrigin },
+    });
+    expect(secondConfirmationResponse.status).toBe(302);
+    const updatedCookie = sessionCookie(secondConfirmationResponse);
+    await expect(
+      authRequest(app, "get-session", { headers: { Cookie: updatedCookie } }).then((response) =>
+        response.json(),
+      ),
+    ).resolves.toMatchObject({ user: { email: "ada.new@example.com" } });
   });
 
   it("usa a mesma resposta de recuperação para e-mail existente e inexistente", async () => {

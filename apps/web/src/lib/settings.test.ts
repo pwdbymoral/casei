@@ -110,7 +110,7 @@ describe("settings HTTP boundary", () => {
   it("fails closed when the API or PWA origin is absent", async () => {
     vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "");
     await expect(authenticatedSettingsAdapter.getProfile()).rejects.toThrow(
-      "NEXT_PUBLIC_CASEI_API_ORIGIN não está configurada",
+      "A origem da API do Casei não foi configurada",
     );
 
     vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "http://localhost:3001");

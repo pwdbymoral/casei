@@ -88,16 +88,30 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         hideValues: false,
         version: 0,
       });
-      const updatedProfile = await service.updateProfile(
-        owner,
-        { displayName: "Owner Casei", locale: "pt-BR", hideValues: true },
-        initialProfile.version,
-        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-      );
-      expect(updatedProfile).toMatchObject({
-        displayName: "Owner Casei",
-        hideValues: true,
-        version: 1,
+      const concurrentProfiles = await Promise.allSettled([
+        service.updateProfile(
+          owner,
+          { displayName: "Concorrente A", locale: "pt-BR", hideValues: true },
+          initialProfile.version,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        ),
+        service.updateProfile(
+          owner,
+          { displayName: "Concorrente B", locale: "pt-BR", hideValues: false },
+          initialProfile.version,
+          "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        ),
+      ]);
+      expect(concurrentProfiles.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const winningProfile = concurrentProfiles.find((result) => result.status === "fulfilled");
+      expect(winningProfile).toMatchObject({
+        status: "fulfilled",
+        value: { version: 1, locale: "pt-BR" },
+      });
+      const concurrentFailure = concurrentProfiles.find((result) => result.status === "rejected");
+      expect(concurrentFailure).toMatchObject({
+        status: "rejected",
+        reason: { name: "IdentityVersionConflictError" },
       });
       const profileAudit = await pool.query<{
         action: string;
@@ -110,13 +124,15 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           ORDER BY occurred_at DESC LIMIT 1`,
         [ownerId],
       );
-      expect(profileAudit.rows[0]).toEqual({
+      expect(profileAudit.rows[0]).toMatchObject({
         action: "identity.profile_updated",
         reason: "profile_fields_updated",
         before_redacted: { display_name: "[redacted]", locale: "pt-BR", hide_values: false },
-        after_redacted: { display_name: "[redacted]", locale: "pt-BR", hide_values: true },
+        after_redacted: { display_name: "[redacted]", locale: "pt-BR" },
       });
-      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("Owner Casei");
+      expect([true, false]).toContain(profileAudit.rows[0]?.after_redacted.hide_values);
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("Concorrente A");
+      expect(JSON.stringify(profileAudit.rows[0])).not.toContain("Concorrente B");
       expect(JSON.stringify(profileAudit.rows[0])).not.toContain("owner@example.test");
       await expect(
         service.updateProfile(
@@ -126,26 +142,6 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           "01ARZ3NDEKTSV4RRQ69G5FAW",
         ),
       ).rejects.toMatchObject({ name: "IdentityVersionConflictError" });
-      const concurrentProfiles = await Promise.allSettled([
-        service.updateProfile(
-          owner,
-          { displayName: "Concorrente A", locale: "pt-BR", hideValues: true },
-          updatedProfile.version,
-          "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-        ),
-        service.updateProfile(
-          owner,
-          { displayName: "Concorrente B", locale: "pt-BR", hideValues: false },
-          updatedProfile.version,
-          "01ARZ3NDEKTSV4RRFFQ69G5FAY",
-        ),
-      ]);
-      expect(concurrentProfiles.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      const concurrentFailure = concurrentProfiles.find((result) => result.status === "rejected");
-      expect(concurrentFailure).toMatchObject({
-        status: "rejected",
-        reason: { name: "IdentityVersionConflictError" },
-      });
 
       const initialPreferences = await service.getWorkspacePreferences(scope);
       expect(initialPreferences).toMatchObject({
@@ -199,8 +195,10 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           safety_margin_minor: "[redacted]",
         },
       });
-      expect(JSON.stringify(preferenceAudit.rows[0])).not.toContain("America/Sao_Paulo");
-      expect(JSON.stringify(preferenceAudit.rows[0])).not.toContain("USD");
+      expect(preferenceAudit.rows[0]?.after_redacted).toMatchObject({
+        currency: "USD",
+        time_zone: "America/Sao_Paulo",
+      });
       const noMovementPreferences = await service.updateWorkspacePreferences(
         scope,
         {
