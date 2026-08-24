@@ -116,6 +116,34 @@ function invitationPool() {
   };
 }
 
+function retryPool() {
+  const statements: string[] = [];
+  const client = {
+    async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+      statements.push(sql);
+      if (sql.includes("FROM workspace_deletion_recovery")) {
+        return { rows: [{ expires_at: new Date("2030-01-31T00:00:00.000Z") }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("FROM workspace")) {
+        return {
+          rows: [{ name: "Casa", status: "deletion_pending", version: 0 }] as T[],
+          rowCount: 1,
+        };
+      }
+      return { rows: [] as T[], rowCount: 0 };
+    },
+    release() {},
+  };
+  return {
+    pool: {
+      async connect() {
+        return client;
+      },
+    },
+    statements,
+  };
+}
+
 describe("IdentityService workspace lock ordering", () => {
   it("locks transfer memberships in sorted user order before workspace", async () => {
     const harness = poolFor();
@@ -158,6 +186,23 @@ describe("IdentityService workspace lock ordering", () => {
     const locks = forUpdateStatements(harness.statements);
     expect(locks[0]).toMatch(/FROM membership/);
     expect(locks[0]).toMatch(/ORDER BY user_id ASC/);
+    expect(locks[1]).toMatch(/FROM workspace/);
+  });
+
+  it("locks recovery before workspace when retrying deactivation", async () => {
+    const harness = retryPool();
+    const service = new IdentityService(harness.pool as never);
+    await expect(
+      service.retryDeactivation(
+        scope.actor,
+        scope.workspaceId,
+        { workspaceName: "Casa", reason: "retry" },
+        scope.correlationId,
+        0,
+      ),
+    ).resolves.toMatchObject({ version: 0 });
+    const locks = forUpdateStatements(harness.statements);
+    expect(locks[0]).toMatch(/FROM workspace_deletion_recovery/);
     expect(locks[1]).toMatch(/FROM workspace/);
   });
 
