@@ -945,6 +945,10 @@ export class FinanceService {
           );
           const row = result.rows[0];
           if (!row) throw new Error("category insert failed");
+          await this.recordCategoryAudit(client, scope, row.id, "category.created", {
+            before: {},
+            after: { name: row.name, kind: row.kind, archived: row.archived },
+          });
           return { statusCode: 201, response: toCategoryView(row) as unknown as JsonValue };
         },
       }),
