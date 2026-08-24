@@ -129,6 +129,7 @@ function FinanceDashboard({
   const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
   const [undoing, setUndoing] = useState(false);
   const transactionCommandKey = useRef<string | null>(null);
+  const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
 
   const timelineQuery = useMemo(
@@ -159,6 +160,8 @@ function FinanceDashboard({
   }, [undoableTransaction]);
 
   useEffect(() => {
+    if (transactionCommandWorkspace.current === workspaceId) return;
+    transactionCommandWorkspace.current = workspaceId;
     transactionCommandKey.current = null;
   }, [workspaceId]);
 
