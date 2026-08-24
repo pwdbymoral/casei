@@ -9,8 +9,9 @@
 `@casei/data` é o núcleo puro usado pelas fatias de importação. Ele não acessa
 filesystem, object storage, banco, sessão ou casos de uso. Recebe bytes ou texto
 já mantidos pelo chamador e devolve uma prévia imutável; nenhuma função aplica
-linhas ou cria registros. XLSX, armazenamento temporário, jobs e perfis
-persistidos permanecem nas fatias DATA-001, DATA-004 e DATA-006.
+linhas ou cria registros. CSV e XLSX convergem para uma representação tabular
+comum; armazenamento temporário, jobs e perfis persistidos permanecem nas
+fatias DATA-001, DATA-004 e DATA-006.
 
 ## Limites e parsing
 
@@ -38,6 +39,15 @@ para que uma vírgula decimal não seja confundida com separador. Datas com barr
 exigem locale explícito; valores monetários são convertidos por strings para
 minor units, sem `number` ou float.
 
+`parseXlsx` lê uma única planilha visível selecionada por nome ou índice; quando
+o workbook tem mais de uma planilha, a seleção é obrigatória. O parser mede os
+bytes originais, inspeciona o diretório ZIP antes da descompressão, rejeita
+criptografia, caminhos inválidos, VBA, links externos, métodos de compressão
+inesperados e expansão acima do limite. ExcelJS `4.4.0` é usado somente para
+materializar o workbook já limitado. Células de fórmula usam exclusivamente o
+resultado armazenado; fórmula sem cache, erro de célula, tipo desconhecido,
+linha/célula excessiva ou cabeçalho inválido gera diagnóstico sem avaliação.
+
 ## Mapeamento e preflight
 
 `mapCsvColumns` compara chaves e aliases após normalização Unicode, caixa,
@@ -49,7 +59,11 @@ escolhe `unknownColumns: "error"`.
 `preflightCsvImport` percorre todas as linhas antes de qualquer aplicação,
 valida campos com parsers fornecidos pelo domínio e retorna cada linha como
 `valid`, `duplicate` ou `invalid`, incluindo seus erros, avisos, valores
-normalizados e número de origem. Fingerprints SHA-256 incluem domínio, espaço
+normalizados e número de origem. A mesma função aceita a representação tabular
+produzida por CSV ou XLSX. Perfis nomeados criados por
+`createCsvMappingProfile` armazenam apenas domínio, locale e cabeçalhos
+normalizados; `applyCsvMappingProfile` reaplica a preferência e mantém
+ambiguidade, campo ausente ou drift como diagnóstico editável. Fingerprints SHA-256 incluem domínio, espaço
 opcional, nomes e valores normalizados. Coincidências são somente sugestões:
 repetir um fingerprint não remove nem invalida automaticamente uma linha.
 A API de fingerprint aceita somente valores escalares (`string`, `number`,
