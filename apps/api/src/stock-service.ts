@@ -311,11 +311,11 @@ export class StockService {
       scope,
       async ({ client }) => {
         const requestedName = parsed.name ? normalizeProductName(parsed.name) : null;
-        if (requestedName) await lockShoppingName(client, scope, requestedName.key);
+        const observedName = requestedName ?? (await readProductName(client, scope, productId));
+        await lockShoppingName(client, scope, (requestedName ?? observedName).key);
         const current = await lockProduct(client, scope, productId);
         assertExpectedVersion(current.version, expectedVersion);
         const normalized = requestedName ?? normalizeProductName(current.name);
-        if (!requestedName) await lockShoppingName(client, scope, normalized.key);
         const values = normalizeUpdateInput(parsed, current);
         if (values.unit === "other" && !values.unitLabel) {
           throw new StockConflictError("Informe o rótulo da unidade.");
@@ -374,7 +374,7 @@ export class StockService {
     const parsed = stockBulkPreviewRequestSchema.parse(input);
     const contentHash = hashBulkContent(parsed.content);
     const preview = await this.withUnitOfWork(scope, async ({ client }) => {
-      const products = await loadBulkProducts(client, scope, false);
+      const products = await loadBulkProducts(client, scope);
       return previewStockBulk(parsed.content, products.map(toBulkExistingProduct));
     });
     return { ...preview, contentHash };
@@ -398,7 +398,7 @@ export class StockService {
           key: idempotencyKey,
           request: parsed,
           execute: async () => {
-            const products = await loadBulkProducts(client, scope, true);
+            const products = await loadBulkProducts(client, scope);
             const preview = previewStockBulk(parsed.content, products.map(toBulkExistingProduct));
             const previewResult: StockBulkPreviewResult = { ...preview, contentHash };
             const canApply =
@@ -472,6 +472,8 @@ export class StockService {
           key: idempotencyKey,
           request: { productId, archived, expectedVersion },
           execute: async () => {
+            const observedName = await readProductName(client, scope, productId);
+            await lockShoppingName(client, scope, observedName.key);
             const current = await lockProduct(client, scope, productId);
             assertExpectedVersion(current.version, expectedVersion);
             if (!archived) {
@@ -492,7 +494,6 @@ export class StockService {
               );
               if (collision.rowCount)
                 throw new StockConflictError("Já existe um produto ativo com esse nome.");
-              await lockShoppingName(client, scope, normalizeProductName(current.name).key);
               await assertNoFreeShoppingNameCollision(
                 client,
                 scope,
@@ -1015,6 +1016,20 @@ function assertStockCapability(scope: StockScope): void {
   if (scope.role === "viewer") throw new StockPermissionError();
 }
 
+async function readProductName(
+  client: PoolClient,
+  scope: StockScope,
+  productId: string,
+): Promise<ReturnType<typeof normalizeProductName>> {
+  const result = await client.query<{ name: string }>(
+    `SELECT name FROM stock_product WHERE workspace_id = $1 AND id = $2`,
+    [scope.workspaceId, productId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new StockNotFoundError();
+  return normalizeProductName(row.name);
+}
+
 async function lockProduct(
   client: PoolClient,
   scope: StockScope,
@@ -1294,7 +1309,6 @@ function hashBulkContent(content: string): string {
 async function loadBulkProducts(
   client: PoolClient,
   scope: StockScope,
-  lock: boolean,
 ): Promise<StockBulkProductRow[]> {
   const result = await client.query<StockBulkProductRow>(
     `SELECT p.id, p.workspace_id, p.name, p.unit, p.unit_label, p.quantity_milli,
@@ -1305,11 +1319,33 @@ async function loadBulkProducts(
                WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id
             ) AS has_movement
        FROM stock_product p
-      WHERE p.workspace_id = $1 AND p.archived = false
-      ${lock ? "FOR UPDATE" : ""}`,
+      WHERE p.workspace_id = $1 AND p.archived = false`,
     [scope.workspaceId],
   );
   return result.rows;
+}
+
+async function lockBulkProduct(
+  client: PoolClient,
+  scope: StockScope,
+  productId: string,
+): Promise<StockBulkProductRow> {
+  const result = await client.query<StockBulkProductRow>(
+    `SELECT p.id, p.workspace_id, p.name, p.unit, p.unit_label, p.quantity_milli,
+            p.minimum_milli, p.marked_missing, p.shopping_auto, p.category, p.location,
+            p.note, p.archived, p.version,
+            EXISTS (
+              SELECT 1 FROM stock_movement m
+               WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id
+            ) AS has_movement
+       FROM stock_product p
+      WHERE p.workspace_id = $1 AND p.id = $2
+      FOR UPDATE`,
+    [scope.workspaceId, productId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new StockNotFoundError();
+  return row;
 }
 
 function toBulkExistingProduct(row: StockBulkProductRow): StockBulkExistingProduct {
@@ -1394,6 +1430,12 @@ async function updateBulkProduct(
 ): Promise<string> {
   const normalized = normalizeProductName(values.name);
   await lockShoppingName(client, scope, normalized.key);
+  const locked = await lockBulkProduct(client, scope, current.id);
+  if (locked.version !== current.version) throw new StockVersionConflictError(locked.version);
+  current = locked;
+  if (normalizeProductName(current.name).key !== normalized.key) {
+    await assertNoFreeShoppingNameCollision(client, scope, normalized.key);
+  }
   const currentQuantity = normalizeStockValue(current.quantity_milli);
   const nextQuantity =
     values.quantity === undefined ? currentQuantity : bulkQuantity(values.quantity);

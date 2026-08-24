@@ -16,7 +16,9 @@ uma colisão com item livre deve ser um conflito recuperável antes de qualquer 
 2. Quando o novo nome do produto coincide com item livre ativo do mesmo espaço, a edição retorna
    `conflict`, não atualiza o produto e deixa a lista inalterada; restaurar produto arquivado com
    a mesma colisão segue a mesma regra. Criação, renomeação e restauro serializam a chave
-   canônica `(workspaceId, nameNormalized)` com lock transacional antes da checagem/mutação.
+   canônica `(workspaceId, nameNormalized)` com lock transacional antes da checagem/mutação;
+   o cadastro em lote usa o mesmo lock por linha, relendo e revalidando a versão antes do lock
+   da linha do produto.
 3. A unicidade continua por espaço e somente para itens não comprados; itens comprados não
    bloqueiam uma nova solicitação.
 4. `PATCH` preserva campos omitidos e permite limpar campos anuláveis somente quando `null` é

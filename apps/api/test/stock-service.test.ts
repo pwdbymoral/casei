@@ -363,6 +363,9 @@ function productRenameCollisionPool(archived = false) {
       if (sql.includes("FROM workspace")) {
         return { rows: [{ status: "active" }] as T[], rowCount: 1 };
       }
+      if (sql.includes("SELECT name FROM stock_product")) {
+        return { rows: [{ name: currentProduct.name }] as T[], rowCount: 1 };
+      }
       if (sql.includes('INSERT INTO "idempotency_key"')) {
         return { rows: [{ id: "idempotency-1" }] as T[], rowCount: 1 };
       }
@@ -430,6 +433,9 @@ function productRenameSyncPool() {
       if (sql.includes("FROM workspace")) {
         return { rows: [{ status: "active" }] as T[], rowCount: 1 };
       }
+      if (sql.includes("SELECT name FROM stock_product")) {
+        return { rows: [{ name: currentProduct.name }] as T[], rowCount: 1 };
+      }
       if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
         return { rows: [currentProduct as T], rowCount: 1 };
       }
@@ -490,6 +496,9 @@ function partialProductUpdatePool() {
       }
       if (sql.includes("FROM workspace")) {
         return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+      }
+      if (sql.includes("SELECT name FROM stock_product")) {
+        return { rows: [{ name: currentProduct.name }] as T[], rowCount: 1 };
       }
       if (sql.includes("FROM stock_product") && sql.includes("FOR UPDATE")) {
         return { rows: [currentProduct as T], rowCount: 1 };
@@ -604,6 +613,12 @@ describe("StockService membership revalidation", () => {
       service.setArchived(scope, productId, false, "shopping-restore-0001", 0),
     ).rejects.toBeInstanceOf(StockConflictError);
     expect(harness.statements.some((sql) => /UPDATE stock_product/i.test(sql))).toBe(false);
+    const nameLock = harness.statements.findIndex((sql) => /pg_advisory_xact_lock/i.test(sql));
+    const productLock = harness.statements.findIndex(
+      (sql) => /FROM stock_product/i.test(sql) && /FOR UPDATE/i.test(sql),
+    );
+    expect(nameLock).toBeGreaterThanOrEqual(0);
+    expect(productLock).toBeGreaterThan(nameLock);
   });
 
   it("keeps an active automatic row aligned with the edited product", async () => {
@@ -652,6 +667,12 @@ describe("StockService membership revalidation", () => {
       "Preferir integral",
       false,
     ]);
+    const nameLock = harness.statements.findIndex((sql) => /pg_advisory_xact_lock/i.test(sql));
+    const productLock = harness.statements.findIndex(
+      (sql) => /FROM stock_product/i.test(sql) && /FOR UPDATE/i.test(sql),
+    );
+    expect(nameLock).toBeGreaterThanOrEqual(0);
+    expect(productLock).toBeGreaterThan(nameLock);
   });
 
   it("derives, purchases, suppresses, and releases an automatic item across reads and movement", async () => {
