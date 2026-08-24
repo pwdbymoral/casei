@@ -22,6 +22,9 @@ test("GOAL-001/002 migration persists scoped goals and append-only reserve movem
   assert.match(migration, /ALTER TABLE "finance_transaction" ADD COLUMN "goal_id"/i);
   assert.match(migration, /goal_reservation_movement_kind_check/i);
   assert.match(migration, /guard_goal_reservation_immutable/i);
+  assert.match(migration, /purge_workspace_goals/i);
+  assert.match(migration, /workspace purge scope mismatch/i);
+  assert.match(migration, /DISABLE TRIGGER goal_reservation_immutable_guard/i);
   assert.match(migration, /transaction/i);
   assert.match(migration, /ENABLE ROW LEVEL SECURITY/i);
   assert.match(journal, /"idx": 11[\s\S]*"tag": "0011_goals"/i);

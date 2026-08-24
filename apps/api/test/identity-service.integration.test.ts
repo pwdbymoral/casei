@@ -656,6 +656,14 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         pool.query(`SELECT id FROM workspace WHERE id = $1`, [workspaceId]),
       ).resolves.toMatchObject({ rows: [] });
       await expect(
+        pool.query(`SELECT id FROM goal WHERE workspace_id = $1`, [workspaceId]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(`SELECT id FROM goal_reservation_movement WHERE workspace_id = $1`, [
+          workspaceId,
+        ]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
         pool.query<{
           status: string;
           deactivated_at: Date;

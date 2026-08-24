@@ -63,6 +63,44 @@ CREATE TRIGGER goal_reservation_immutable_guard
   BEFORE UPDATE OR DELETE ON "goal_reservation_movement"
   FOR EACH ROW EXECUTE FUNCTION app.guard_goal_reservation_immutable();
 
+-- Workspace deletion is the one authorized lifecycle operation that removes
+-- the append-only goal history. Keep it behind a SECURITY DEFINER function so
+-- the application role cannot delete movements directly or bypass the guard.
+CREATE OR REPLACE FUNCTION app.purge_workspace_goals(candidate uuid)
+RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE
+  removed_movements integer := 0;
+  removed_goals integer := 0;
+BEGIN
+  IF candidate IS DISTINCT FROM app.current_workspace_id() THEN
+    RAISE EXCEPTION 'workspace purge scope mismatch' USING ERRCODE = '42501';
+  END IF;
+
+  -- Remove the reverse reference before deleting goals; regular goal spends
+  -- retain their finance transaction until the workspace cascade runs.
+  UPDATE finance_transaction
+     SET goal_id = NULL
+   WHERE workspace_id = candidate AND goal_id IS NOT NULL;
+
+  -- The trigger remains active for every normal command. Only this owner-run
+  -- lifecycle function temporarily disables it inside the same transaction.
+  ALTER TABLE goal_reservation_movement DISABLE TRIGGER goal_reservation_immutable_guard;
+  DELETE FROM goal_reservation_movement WHERE workspace_id = candidate;
+  GET DIAGNOSTICS removed_movements = ROW_COUNT;
+  ALTER TABLE goal_reservation_movement ENABLE TRIGGER goal_reservation_immutable_guard;
+
+  DELETE FROM goal WHERE workspace_id = candidate;
+  GET DIAGNOSTICS removed_goals = ROW_COUNT;
+  RETURN removed_movements + removed_goals;
+EXCEPTION WHEN OTHERS THEN
+  -- The surrounding transaction also rolls back DDL, but restore explicitly
+  -- so the trigger cannot remain disabled if the function is reused.
+  ALTER TABLE goal_reservation_movement ENABLE TRIGGER goal_reservation_immutable_guard;
+  RAISE;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION app.purge_workspace_goals(uuid) TO casei_app;
+
 GRANT SELECT, INSERT, UPDATE ON "goal" TO casei_app;
 GRANT SELECT, INSERT ON "goal_reservation_movement" TO casei_app;
 ALTER TABLE "goal" ENABLE ROW LEVEL SECURITY;

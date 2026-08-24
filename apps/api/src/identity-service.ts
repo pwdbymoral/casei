@@ -1271,6 +1271,7 @@ export class IdentityService {
           workspaceId,
         ]);
         await this.deleteInvitationEmailArtifacts(client, workspaceId);
+        await client.query(`SELECT app.purge_workspace_goals($1)::int`, [workspaceId]);
         await client.query(`DELETE FROM workspace WHERE id = $1`, [workspaceId]);
         return true;
       },
