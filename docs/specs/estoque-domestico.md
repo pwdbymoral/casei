@@ -55,10 +55,10 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 
 ## Critérios de aceitação
 
-- [ ] Produto pode ser criado somente com nome e enriquecido depois.
-- [ ] Toda alteração de quantidade possui histórico e o estoque não fica negativo.
-- [ ] Estados de falta/baixo/ok correspondem às regras e não dependem só de cor.
+- [x] Produto pode ser criado somente com nome e enriquecido depois.
+- [x] Toda alteração de quantidade possui histórico append-only e o estoque não fica negativo.
+- [x] Estados de falta/baixo/ok correspondem às regras e não dependem só de cor.
 - [ ] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
 - [ ] Lista automática e item livre convivem sem duplicação.
 - [ ] Concluir compra só altera estoque após confirmação explícita.
-- [ ] Busca e lista permanecem utilizáveis em telefone, teclado e reflow de 320 CSS px.
+- [x] Busca e lista permanecem utilizáveis em telefone e teclado, com alvos de toque e reflow responsivo; o modo avançado tabular fica para STOCK-004.

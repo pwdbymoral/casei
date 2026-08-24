@@ -20,12 +20,15 @@ import {
 } from "./http/index.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
+import { configureStockRoutes } from "./stock-routes.js";
+import { StockService } from "./stock-service.js";
 
 export type V1Configurator = (router: Hono<ApiEnv>) => void;
 export interface AppOptions {
   authHandler?: (request: Request) => Response | Promise<Response>;
   authOrigins?: string[];
   finance?: FinanceAppOptions;
+  stock?: StockAppOptions;
   identity?: IdentityAppOptions;
 }
 
@@ -51,6 +54,12 @@ export interface FinanceAppOptions {
   applicationRole?: string;
   /** Secret used to sign private finance list cursors. */
   cursorSecret?: string;
+}
+
+export interface StockAppOptions {
+  pool: Pool;
+  service?: StockService;
+  applicationRole?: string;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -97,7 +106,7 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
   app.get("/health", (context) => context.json({ service: "casei-api", status: "ok" }));
   configureV1?.(v1);
 
-  const identityPool = options.identity?.pool ?? options.finance?.pool;
+  const identityPool = options.identity?.pool ?? options.finance?.pool ?? options.stock?.pool;
   const identityService =
     options.identity?.service ??
     (identityPool
@@ -125,6 +134,20 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
       scopeMiddleware: async (context, next) => {
         if (!actorMiddleware || !scopeMiddleware)
           throw new Error("Finance auth boundary is unavailable");
+        await actorMiddleware(context, async () => {
+          await scopeMiddleware(context, next);
+        });
+      },
+    });
+  }
+  if (options.stock) {
+    configureStockRoutes(v1, {
+      service:
+        options.stock.service ??
+        new StockService(options.stock.pool, { applicationRole: options.stock.applicationRole }),
+      scopeMiddleware: async (context, next) => {
+        if (!actorMiddleware || !scopeMiddleware)
+          throw new Error("Stock auth boundary is unavailable");
         await actorMiddleware(context, async () => {
           await scopeMiddleware(context, next);
         });
@@ -162,4 +185,5 @@ const appPool = getDatabasePool();
 export const app = createApp(undefined, {
   identity: { pool: appPool },
   finance: { pool: appPool },
+  stock: { pool: appPool },
 });

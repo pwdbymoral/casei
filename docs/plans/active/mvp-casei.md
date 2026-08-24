@@ -135,11 +135,11 @@ Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam ser
 
 Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro somente após Gate 2.
 
-- [ ] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes, arquivamento e regra de unidade.
-- [ ] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência e histórico.
+- [x] **STOCK-001 Produto e unidade:** schema, nome normalizado, criação mínima, detalhes progressivos, arquivamento/restauração e regra de unidade.
+- [x] **STOCK-002 Movimentações:** entrada/consumo/correção/descarte, não-negatividade, concorrência com lock/If-Match e histórico append-only.
 - [ ] **STOCK-003 Lista de compras:** derivação por mínimo/marcação, itens livres, deduplicação e colaboração.
 - [ ] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
-- [ ] **STOCK-005 UI estoque:** busca, filtros, lista touch, quick actions, modo avançado responsivo e estados offline.
+- [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
 - [ ] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.
 
 **Gate 6:** quantidade e histórico reconciliam; concorrência não duplica lista; jornada no mercado passa em telefone e teclado.

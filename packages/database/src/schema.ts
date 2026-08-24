@@ -4,6 +4,7 @@ import {
   boolean,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -230,6 +231,98 @@ export const auditEvent = pgTable(
     index("audit_event_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),
     index("audit_event_actor_occurred_idx").on(table.actorId, table.occurredAt),
     index("audit_event_retention_idx").on(table.retentionUntil),
+  ],
+);
+
+export const stockProduct = pgTable(
+  "stock_product",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    nameNormalized: text("name_normalized").notNull(),
+    unit: text("unit").notNull().default("unit"),
+    unitLabel: text("unit_label"),
+    quantityMilli: bigint("quantity_milli", { mode: "bigint" }),
+    minimumMilli: bigint("minimum_milli", { mode: "bigint" }),
+    markedMissing: boolean("marked_missing").notNull().default(false),
+    category: text("category"),
+    location: text("location"),
+    note: text("note"),
+    archived: boolean("archived").notNull().default(false),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("stock_product_workspace_id_unique").on(table.workspaceId, table.id),
+    check("stock_product_name_check", sql`length(trim(${table.name})) > 0`),
+    check(
+      "stock_product_unit_check",
+      sql`${table.unit} in ('unit', 'package', 'box', 'kg', 'g', 'L', 'ml', 'other')`,
+    ),
+    check(
+      "stock_product_other_unit_label_check",
+      sql`${table.unit} <> 'other' or (${table.unitLabel} is not null and length(trim(${table.unitLabel})) > 0)`,
+    ),
+    check(
+      "stock_product_quantity_check",
+      sql`${table.quantityMilli} is null or (${table.quantityMilli} >= 0 and ${table.quantityMilli} <= 999999999999999)`,
+    ),
+    check(
+      "stock_product_minimum_check",
+      sql`${table.minimumMilli} is null or (${table.minimumMilli} >= 0 and ${table.minimumMilli} <= 999999999999999)`,
+    ),
+  ],
+);
+
+export const stockMovement = pgTable(
+  "stock_movement",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").notNull(),
+    kind: text("kind").notNull(),
+    quantityMilli: bigint("quantity_milli", { mode: "bigint" }).notNull(),
+    beforeMilli: bigint("before_milli", { mode: "bigint" }),
+    afterMilli: bigint("after_milli", { mode: "bigint" }),
+    reason: text("reason"),
+    authorId: text("author_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    occurredAt: instant("occurred_at").defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.productId],
+      foreignColumns: [stockProduct.workspaceId, stockProduct.id],
+      name: "stock_movement_product_scope_fk",
+    }).onDelete("restrict"),
+    check(
+      "stock_movement_kind_check",
+      sql`${table.kind} in ('entry', 'consume', 'correction', 'discard')`,
+    ),
+    check(
+      "stock_movement_quantity_check",
+      sql`${table.quantityMilli} >= 0 and ${table.quantityMilli} <= 999999999999999`,
+    ),
+    check(
+      "stock_movement_before_check",
+      sql`${table.beforeMilli} is null or (${table.beforeMilli} >= 0 and ${table.beforeMilli} <= 999999999999999)`,
+    ),
+    check(
+      "stock_movement_after_check",
+      sql`${table.afterMilli} is null or (${table.afterMilli} >= 0 and ${table.afterMilli} <= 999999999999999)`,
+    ),
+    index("stock_movement_product_occurred_idx").on(
+      table.workspaceId,
+      table.productId,
+      table.occurredAt,
+    ),
   ],
 );
 
@@ -690,6 +783,8 @@ export const schema = {
   userPreference,
   membership,
   auditEvent,
+  stockProduct,
+  stockMovement,
   idempotencyKey,
   outboxEvent,
   job,
