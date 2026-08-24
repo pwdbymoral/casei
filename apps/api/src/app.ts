@@ -1,4 +1,4 @@
-import type { Pool } from "@casei/database";
+import { getDatabasePool, type Pool } from "@casei/database";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -10,13 +10,37 @@ import {
 } from "./auth.js";
 import { configureFinanceRoutes } from "./finance-routes.js";
 import { FinanceService } from "./finance-service.js";
-import { type ApiEnv, correlationMiddleware, errorResponse, notFoundError } from "./http/index.js";
+import {
+  type ApiEnv,
+  correlationMiddleware,
+  createActorMiddleware,
+  createWorkspaceScopeMiddleware,
+  errorResponse,
+  notFoundError,
+} from "./http/index.js";
+import { configureIdentityRoutes } from "./identity-routes.js";
+import { IdentityService } from "./identity-service.js";
 
 export type V1Configurator = (router: Hono<ApiEnv>) => void;
 export interface AppOptions {
   authHandler?: (request: Request) => Response | Promise<Response>;
   authOrigins?: string[];
   finance?: FinanceAppOptions;
+  identity?: IdentityAppOptions;
+}
+
+export interface IdentityAppOptions {
+  pool: Pool;
+  /** Injectable service boundary for HTTP contract tests; production uses the pool-backed service. */
+  service?: IdentityService;
+  applicationRole?: string;
+  webOrigin?: string;
+  actorResolver?: (context: Parameters<MiddlewareHandler<ApiEnv>>[0]) => Promise<{
+    userId: string;
+    email?: string;
+    displayName?: string;
+    recentAuthentication?: boolean;
+  } | null>;
 }
 
 export interface FinanceAppOptions {
@@ -39,6 +63,15 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
       origin: (origin) => (isAllowedAuthOrigin(origin, authOrigins) ? origin : undefined),
       allowHeaders: ["Content-Type", "X-Correlation-ID"],
       allowMethods: ["GET", "POST", "OPTIONS"],
+      credentials: true,
+    }),
+  );
+  app.use(
+    "/v1/*",
+    cors({
+      origin: (origin) => (isAllowedAuthOrigin(origin, authOrigins) ? origin : undefined),
+      allowHeaders: ["Content-Type", "X-Correlation-ID", "Idempotency-Key", "If-Match"],
+      allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       credentials: true,
     }),
   );
@@ -68,9 +101,36 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
       scopeMiddleware: options.finance.scopeMiddleware,
     });
   }
+  if (options.identity) {
+    const service =
+      options.identity.service ??
+      new IdentityService(options.identity.pool, {
+        applicationRole: options.identity.applicationRole,
+        webOrigin: options.identity.webOrigin,
+      });
+    const actorResolver = options.identity.actorResolver ?? defaultActorResolver;
+    const actorMiddleware = createActorMiddleware(actorResolver);
+    const scopeMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId, context }) =>
+        service.resolveScope(actor, workspaceId, context.get("correlationId")),
+    );
+    configureIdentityRoutes(v1, { service, actorMiddleware, scopeMiddleware });
+  }
   app.route("/v1", v1);
 
   return app;
 }
 
-export const app = createApp();
+async function defaultActorResolver(context: Parameters<MiddlewareHandler<ApiEnv>>[0]) {
+  const session = await auth.api.getSession({ headers: context.req.raw.headers });
+  if (!session) return null;
+  const createdAt = new Date(session.session.createdAt).getTime();
+  return {
+    userId: session.user.id,
+    email: session.user.email,
+    displayName: session.user.name,
+    recentAuthentication: Number.isFinite(createdAt) && Date.now() - createdAt <= 15 * 60 * 1_000,
+  };
+}
+
+export const app = createApp(undefined, { identity: { pool: getDatabasePool() } });

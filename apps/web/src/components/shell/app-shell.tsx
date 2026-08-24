@@ -264,7 +264,8 @@ export function AppShell({
     setLoggingOut(true);
     setLogoutError(null);
     try {
-      await onLogout?.();
+      if (onLogout) await onLogout();
+      else await adapter.signOut?.();
       clearWorkspaceClientState();
       setSession(null);
       router.replace("/");
@@ -319,6 +320,29 @@ export function AppShell({
             description="Um espaço guarda seus dados separados e pode ser compartilhado depois."
             action={{ label: "Começar onboarding", onClick: () => router.push("/onboarding") }}
           />
+        </div>
+      </main>
+    );
+  }
+
+  if (activeWorkspace?.status === "deletion_pending" && !pathname.startsWith("/app/recovery")) {
+    return (
+      <main className="flex min-h-dvh items-center justify-center bg-muted/30 p-6">
+        <div className="w-full max-w-md rounded-2xl border bg-background p-6 shadow-sm">
+          <p className="text-sm font-medium text-primary">Recuperação disponível</p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight">
+            Este espaço está aguardando exclusão
+          </h1>
+          <p className="mt-3 text-sm text-muted-foreground">
+            Os dados domésticos estão bloqueados durante a janela de recuperação. Você pode cancelar
+            a exclusão antes do vencimento.
+          </p>
+          <Link
+            href="/app/recovery"
+            className={cn(buttonVariants({ className: "mt-6 min-h-11 w-full" }))}
+          >
+            Revisar e recuperar espaço
+          </Link>
         </div>
       </main>
     );

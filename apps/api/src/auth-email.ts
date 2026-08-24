@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 type Database = ReturnType<typeof createDatabase>;
 type AuthEmailOutboxUpdate = Partial<typeof authEmailOutbox.$inferInsert>;
 
-export type AuthEmailKind = "verification" | "password_reset";
+export type AuthEmailKind = "verification" | "password_reset" | "invitation";
 
 export interface AuthEmailMessage {
   kind: AuthEmailKind;
@@ -20,6 +20,16 @@ export interface AuthEmailMessage {
   correlationId: string;
   expiresAt: Date;
   sourceId: string;
+}
+
+/** Shared by identity commands so invitation payloads use the same encrypted
+ * auth_email_outbox contract as Better Auth messages. */
+export function encryptAuthEmailPayload(message: AuthEmailMessage, secret: string): string {
+  return encryptPayload(message, secret);
+}
+
+export function hashAuthEmailAddress(email: string, secret: string): string {
+  return emailHash(email, secret);
 }
 
 export interface TransactionalEmailPort {
@@ -231,16 +241,25 @@ export class NodemailerTransactionalEmailPort implements TransactionalEmailPort 
 
   async send(message: AuthEmailMessage): Promise<void> {
     const reset = message.kind === "password_reset";
+    const invitation = message.kind === "invitation";
     await this.transporter.sendMail({
       from: this.config.from,
       to: message.email,
-      subject: reset ? "Redefina sua senha do Casei" : "Confirme seu e-mail do Casei",
+      subject: reset
+        ? "Redefina sua senha do Casei"
+        : invitation
+          ? "Você foi convidado para um espaço no Casei"
+          : "Confirme seu e-mail do Casei",
       text: reset
         ? `Redefina sua senha acessando: ${message.url}`
-        : `Confirme seu e-mail acessando: ${message.url}`,
+        : invitation
+          ? `Você foi convidado para um espaço no Casei. Aceite o convite acessando: ${message.url}`
+          : `Confirme seu e-mail acessando: ${message.url}`,
       html: reset
         ? `<p>Redefina sua senha do Casei:</p><p><a href="${escapeHtml(message.url)}">Continuar</a></p>`
-        : `<p>Confirme seu e-mail do Casei:</p><p><a href="${escapeHtml(message.url)}">Confirmar e-mail</a></p>`,
+        : invitation
+          ? `<p>Você foi convidado para um espaço no Casei.</p><p><a href="${escapeHtml(message.url)}">Aceitar convite</a></p>`
+          : `<p>Confirme seu e-mail do Casei:</p><p><a href="${escapeHtml(message.url)}">Confirmar e-mail</a></p>`,
     });
   }
 

@@ -58,6 +58,12 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 
 Para validar a base PostgreSQL em um banco descartável, configure `DATABASE_URL_TEST` com uma conexão administrativa a PostgreSQL 18 e execute `pnpm --filter @casei/database test`. Os testes criam bancos temporários, aplicam as migrations, verificam role/RLS, isolamento entre dois espaços, auditoria append-only, unit of work, idempotência (incluindo concorrência), outbox→job e worker com lease/revalidação; o rollback usa o companion `packages/database/drizzle/0000_ambitious_madrox.down.sql`. Cada banco é removido ao terminar. O job `quality` do CI fornece PostgreSQL 18 e configura essa variável automaticamente; sem ela, os testes de integração não alteram nenhum banco local.
 
+O teste `apps/api/test/identity-service.integration.test.ts` usa a mesma variável para validar a jornada AUTH-002–005 contra PostgreSQL real: lock de onboarding com chaves distintas, outbox de convite sem bearer token, RLS do entitlement de recuperação, restauração seletiva de memberships, retry após perda de resposta, cutoff nos dias 29/30, guards de backup/restore, execução do worker e tombstone. O processo `pnpm --filter @casei/api worker:workspace` é um worker standalone durável; o supervisor do deploy deve mantê-lo como processo separado da API. Cada poll também executa o reaper de retenção: após o cutoff de 365 dias, `retention_until` remove auditoria detached e `audit_purge_at` remove o tombstone. A operação é baseada em cutoff e segura para retry.
+
+### Restore e retenção do espaço
+
+O purge grava no tombstone `backup_expires_at = purge_at + 35 dias` e `audit_purge_at = purge_at + 365 dias`. Um operador de restore deve, para cada espaço encontrado no snapshot, executar `app.assert_workspace_backup_allowed(workspace_id, snapshot_at)` e, antes de liberar a aplicação, `app.assert_workspace_restore_allowed(workspace_id)`. O segundo guard falha quando há tombstone; nessa situação os registros tombstone são reaplicados ao catálogo restaurado e o espaço não é servido. Snapshots além do limite de 35 dias são rejeitados. O reaper só remove tombstone e auditoria depois do dia 365, quando nenhum backup permitido ainda pode reidratar o espaço.
+
 A infraestrutura de comandos fica em `@casei/database`: `withUnitOfWork` configura o contexto RLS por transação, `executeIdempotent` persiste hash canônico e resposta final, `enqueueOutboxEvent`/`dispatchOutbox` fazem publicação transacional e `PostgresJobWorker` adquire lease com `SKIP LOCKED`, executa lotes em transações separadas, revalida membership/capacidade antes de transições e grava retry/dead-letter por compare-and-set. Handlers devem usar `context.runBatch` para que cada lote adquira novamente o lock de membership; não há promessa de exactly-once.
 
 O bootstrap de migration usa `DATABASE_URL_MIGRATION` (administrativa) quando configurada, separada de `DATABASE_URL` do runtime, para criar/verificar `DATABASE_ROLE` (por padrão `casei_app`) e aplicar migrations. A role de aplicação permanece sem `SUPERUSER`/`BYPASSRLS` e sem propriedade das tabelas. Quando API/worker usam um login separado, configure `DATABASE_ROLE_GRANTEE` para que `ensureApplicationRole` execute um `GRANT` explícito; esse grantee também precisa ser um login não-superusuário sem `BYPASSRLS`. O runtime então pode executar `SET LOCAL ROLE casei_app` por transação sem depender de conexão superusuária. A integração PostgreSQL cobre essa conexão real de runtime.
@@ -67,6 +73,14 @@ No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a 
 O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`. Além desse gate de execução, o ruleset `CodeQL merge protection` exige resultados de code scanning para a `main` e bloqueia alertas de code scanning classificados como erro ou alertas de segurança `high` ou superiores. O ruleset não possui bypass configurado.
 
 Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com `docker build -f Dockerfile.web -t casei-web .`.
+
+## AUTH-002..005
+
+`apps/api/test/identity-routes.test.ts` cobre o boundary de autenticação, a exigência de sessão e a
+chave de idempotência do onboarding. `apps/web/src/lib/workspaces.test.ts` cobre o adapter real,
+troca somente para espaços autorizados e conversão de sessão expirada em estado não autenticado.
+Os cenários que exigem RLS, locks de membership, trigger de owner, expiração de convite e purge
+devem rodar no PostgreSQL descartável do CI junto da migration `0003_identity_workspaces.sql`.
 
 ## Identidade
 

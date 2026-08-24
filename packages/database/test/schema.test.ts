@@ -165,10 +165,15 @@ if (!adminUrl) {
       });
 
       const downSql = await readFile(
-        fileURLToPath(new URL("../drizzle/0000_ambitious_madrox.down.sql", import.meta.url)),
+        fileURLToPath(new URL("../drizzle/0003_identity_workspaces.down.sql", import.meta.url)),
         "utf8",
       );
       await pool.query(downSql);
+      const baseDownSql = await readFile(
+        fileURLToPath(new URL("../drizzle/0000_ambitious_madrox.down.sql", import.meta.url)),
+        "utf8",
+      );
+      await pool.query(baseDownSql);
       const remainingTables = await pool.query<{ tablename: string }>(
         `SELECT tablename
          FROM pg_catalog.pg_tables
@@ -177,7 +182,9 @@ if (!adminUrl) {
              'audit_event', 'auth_email_intent', 'auth_email_outbox',
              'idempotency_key', 'job', 'membership', 'outbox_event',
              'workspace_preference', 'workspace', 'account', 'session',
-             'user', 'verification'
+             'user', 'verification', 'workspace_invitation',
+             'workspace_deletion_recovery', 'workspace_tombstone',
+             'workspace_invitation_rate_limit'
            )
          ORDER BY tablename`,
       );

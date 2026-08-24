@@ -7,7 +7,9 @@
     "dev": "tsx watch src/server.ts",
     "worker": "node dist/auth-email-worker.js",
     "worker:dev": "tsx src/auth-email-worker.ts",
-    "build": "tsup src/server.ts src/auth-email-worker.ts --format esm --target node24 --out-dir dist",
+    "worker:workspace": "node dist/workspace-worker.js",
+    "worker:workspace:dev": "tsx src/workspace-worker.ts",
+    "build": "tsup src/server.ts src/auth-email-worker.ts src/workspace-worker.ts --format esm --target node24 --out-dir dist",
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
