@@ -14,6 +14,7 @@ export type StockProduct = {
   quantity: string | null;
   minimum: string | null;
   markedMissing: boolean;
+  shoppingAuto: boolean;
   state: StockState;
   category: string | null;
   location: string | null;
@@ -35,12 +36,29 @@ export type StockMovement = {
   occurredAt: string;
 };
 
+export type StockShoppingItem = {
+  id: string;
+  workspaceId: string;
+  productId: string | null;
+  name: string;
+  source: "automatic" | "free";
+  quantity: string | null;
+  unit: StockUnit;
+  unitLabel: string | null;
+  note: string | null;
+  purchased: boolean;
+  purchasedAt: string | null;
+  lastChangedBy: string;
+  version: number;
+};
+
 export type CreateStockProductInput = {
   name: string;
   unit?: StockUnit;
   unitLabel?: string | null;
   quantity?: string | null;
   minimum?: string | null;
+  shoppingAuto?: boolean;
   category?: string | null;
   location?: string | null;
   note?: string | null;
@@ -51,6 +69,7 @@ export type UpdateStockProductInput = {
   unit: StockUnit;
   unitLabel?: string | null;
   minimum?: string | null;
+  shoppingAuto?: boolean;
   category?: string | null;
   location?: string | null;
   note?: string | null;
@@ -61,7 +80,12 @@ export interface StockAdapter {
     workspaceId: string,
     options?: { query?: string; includeArchived?: boolean },
   ): Promise<StockProduct[]>;
-  createProduct(workspaceId: string, input: CreateStockProductInput): Promise<StockProduct>;
+  /** One key belongs to one logical operation and is reused by its retries. */
+  createProduct(
+    workspaceId: string,
+    input: CreateStockProductInput,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
   updateProduct(
     workspaceId: string,
     product: StockProduct,
@@ -71,18 +95,56 @@ export interface StockAdapter {
     workspaceId: string,
     product: StockProduct,
     input: { kind: StockMovementKind; quantity: string; reason?: string | null },
+    idempotencyKey?: string,
   ): Promise<{ product: StockProduct; movement: StockMovement }>;
-  markMissing(workspaceId: string, product: StockProduct, missing: boolean): Promise<StockProduct>;
-  archive(workspaceId: string, product: StockProduct): Promise<StockProduct>;
-  restore(workspaceId: string, product: StockProduct): Promise<StockProduct>;
+  markMissing(
+    workspaceId: string,
+    product: StockProduct,
+    missing: boolean,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
+  archive(
+    workspaceId: string,
+    product: StockProduct,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
+  restore(
+    workspaceId: string,
+    product: StockProduct,
+    idempotencyKey?: string,
+  ): Promise<StockProduct>;
   listMovements(workspaceId: string, productId: string): Promise<StockMovement[]>;
+  readonly lastReadWasCached?: boolean;
+  listShoppingItems(workspaceId: string): Promise<StockShoppingItem[]>;
+  createShoppingItem(
+    workspaceId: string,
+    input: {
+      name: string;
+      quantity?: string | null;
+      unit?: StockUnit;
+      unitLabel?: string | null;
+      note?: string | null;
+    },
+  ): Promise<StockShoppingItem>;
+  purchaseShoppingItem(
+    workspaceId: string,
+    item: StockShoppingItem,
+    input: { addToStock: boolean; quantity?: string | null },
+  ): Promise<{
+    item: StockShoppingItem;
+    product: StockProduct | null;
+    movement: StockMovement | null;
+  }>;
 }
+
+export type StockAdapterErrorCode = "request_failed" | "offline_required";
 
 export class StockAdapterError extends Error {
   constructor(
     message: string,
     readonly status?: number,
     readonly currentVersion?: number,
+    readonly code: StockAdapterErrorCode = "request_failed",
   ) {
     super(message);
     this.name = "StockAdapterError";
@@ -105,24 +167,130 @@ export const unauthenticatedStockAdapter: StockAdapter = {
   archive: unavailable,
   restore: unavailable,
   listMovements: unavailable,
+  listShoppingItems: unavailable,
+  createShoppingItem: unavailable,
+  purchaseShoppingItem: unavailable,
 };
 
 type JsonPage<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
+
+const stockSnapshotPrefix = "casei:stock:snapshot:v1:";
+let stockSnapshotGeneration = 0;
+
+function stockStorage(): Storage | null {
+  try {
+    return typeof globalThis.localStorage === "undefined" ? null : globalThis.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function stockSnapshotKey(
+  workspaceId: string,
+  options: { query?: string; includeArchived?: boolean },
+): string {
+  return `${stockSnapshotPrefix}${workspaceId}:${encodeURIComponent(
+    JSON.stringify({
+      query: options.query?.trim() ?? "",
+      includeArchived: Boolean(options.includeArchived),
+    }),
+  )}`;
+}
+
+function readStockSnapshot(
+  workspaceId: string,
+  options: { query?: string; includeArchived?: boolean },
+): StockProduct[] | null {
+  const store = stockStorage();
+  if (!store) return null;
+  try {
+    const value = store.getItem(stockSnapshotKey(workspaceId, options));
+    if (!value) return null;
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? (parsed as StockProduct[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStockSnapshot(
+  workspaceId: string,
+  options: { query?: string; includeArchived?: boolean },
+  products: StockProduct[],
+): void {
+  try {
+    stockStorage()?.setItem(stockSnapshotKey(workspaceId, options), JSON.stringify(products));
+  } catch {
+    // Storage is an enhancement; quota/security errors must not break online reads.
+  }
+}
+
+/** Removes private snapshots when the authenticated workspace ends. */
+export function clearStockOfflineSnapshot(workspaceId: string): void {
+  stockSnapshotGeneration += 1;
+  const store = stockStorage();
+  if (!store) return;
+  const prefix = `${stockSnapshotPrefix}${workspaceId}:`;
+  try {
+    for (let index = store.length - 1; index >= 0; index -= 1) {
+      const key = store.key(index);
+      if (key?.startsWith(prefix)) store.removeItem(key);
+    }
+  } catch {
+    // A storage implementation may become unavailable during logout/navigation.
+  }
+}
+
+/** Removes every private stock snapshot on logout, revocation, or scope reset. */
+export function clearAllStockOfflineSnapshots(): void {
+  stockSnapshotGeneration += 1;
+  const store = stockStorage();
+  if (!store) return;
+  try {
+    for (let index = store.length - 1; index >= 0; index -= 1) {
+      const key = store.key(index);
+      if (key?.startsWith(stockSnapshotPrefix)) store.removeItem(key);
+    }
+  } catch {
+    // A storage implementation may become unavailable during logout/navigation.
+  }
+}
 
 export function createHttpStockAdapter(
   options: { baseUrl?: string; fetch?: typeof globalThis.fetch } = {},
 ): StockAdapter {
   const request = options.fetch ?? globalThis.fetch;
   const baseUrl = options.baseUrl ?? "";
+  let lastReadWasCached = false;
+
   async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (init.body) headers.set("Content-Type", "application/json");
-    const response = await request(`${baseUrl}/v1${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-    });
+    const method = (init.method ?? "GET").toUpperCase();
+    if (method !== "GET" && globalThis.navigator?.onLine === false) {
+      throw new StockAdapterError(
+        "Esta ação precisa de conexão.",
+        undefined,
+        undefined,
+        "offline_required",
+      );
+    }
+    let response: Response;
+    try {
+      response = await request(`${baseUrl}/v1${path}`, {
+        ...init,
+        headers,
+        credentials: "include",
+      });
+    } catch {
+      throw new StockAdapterError(
+        "Esta ação precisa de conexão.",
+        undefined,
+        undefined,
+        "offline_required",
+      );
+    }
     const payload = (await response.json().catch(() => null)) as
       | T
       | { error?: { message?: string; currentVersion?: number } }
@@ -141,19 +309,44 @@ export function createHttpStockAdapter(
   const key = () => `stock-${globalThis.crypto.randomUUID()}`;
   const path = (workspaceId: string, suffix = "") =>
     `/workspaces/${encodeURIComponent(workspaceId)}/stock/products${suffix}`;
+  const shoppingPath = (workspaceId: string, suffix = "") =>
+    `/workspaces/${encodeURIComponent(workspaceId)}/stock/shopping${suffix}`;
   return {
+    get lastReadWasCached() {
+      return lastReadWasCached;
+    },
     async listProducts(workspaceId, options = {}) {
+      const requestSnapshotGeneration = stockSnapshotGeneration;
       const params = new URLSearchParams();
       if (options.query) params.set("query", options.query);
       if (options.includeArchived) params.set("includeArchived", "true");
       const query = params.toString();
-      return (await call<JsonPage<StockProduct>>(`${path(workspaceId)}${query ? `?${query}` : ""}`))
-        .items;
+      try {
+        const products = (
+          await call<JsonPage<StockProduct>>(`${path(workspaceId)}${query ? `?${query}` : ""}`)
+        ).items;
+        if (requestSnapshotGeneration === stockSnapshotGeneration) {
+          writeStockSnapshot(workspaceId, options, products);
+        }
+        lastReadWasCached = false;
+        return products;
+      } catch (error) {
+        const cached =
+          error instanceof StockAdapterError && error.code === "offline_required"
+            ? readStockSnapshot(workspaceId, options)
+            : null;
+        if (cached) {
+          lastReadWasCached = true;
+          return cached;
+        }
+        lastReadWasCached = false;
+        throw error;
+      }
     },
-    createProduct: (workspaceId, input) =>
+    createProduct: (workspaceId, input, commandKey) =>
       call<StockProduct>(path(workspaceId), {
         method: "POST",
-        headers: { "Idempotency-Key": key() },
+        headers: { "Idempotency-Key": commandKey ?? key() },
         body: JSON.stringify(input),
       }),
     updateProduct: (workspaceId, product, input) =>
@@ -162,31 +355,62 @@ export function createHttpStockAdapter(
         headers: { "If-Match": `"v${product.version}"` },
         body: JSON.stringify(input),
       }),
-    async createMovement(workspaceId, product, input) {
+    async createMovement(workspaceId, product, input, commandKey) {
       return call<{ product: StockProduct; movement: StockMovement }>(
         path(workspaceId, `/${product.id}/movements`),
         {
           method: "POST",
-          headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+          headers: {
+            "Idempotency-Key": commandKey ?? key(),
+            "If-Match": `"v${product.version}"`,
+          },
           body: JSON.stringify(input),
         },
       );
     },
-    markMissing: (workspaceId, product, missing) =>
+    markMissing: (workspaceId, product, missing, commandKey) =>
       call<StockProduct>(path(workspaceId, `/${product.id}/missing`), {
         method: "POST",
-        headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+        headers: {
+          "Idempotency-Key": commandKey ?? key(),
+          "If-Match": `"v${product.version}"`,
+        },
         body: JSON.stringify({ missing }),
       }),
-    archive: (workspaceId, product) =>
+    archive: (workspaceId, product, commandKey) =>
       call<StockProduct>(path(workspaceId, `/${product.id}/archive`), {
         method: "POST",
-        headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+        headers: {
+          "Idempotency-Key": commandKey ?? key(),
+          "If-Match": `"v${product.version}"`,
+        },
       }),
-    restore: (workspaceId, product) =>
+    restore: (workspaceId, product, commandKey) =>
       call<StockProduct>(path(workspaceId, `/${product.id}/restore`), {
         method: "POST",
-        headers: { "Idempotency-Key": key(), "If-Match": `"v${product.version}"` },
+        headers: {
+          "Idempotency-Key": commandKey ?? key(),
+          "If-Match": `"v${product.version}"`,
+        },
+      }),
+    async listShoppingItems(workspaceId) {
+      return (await call<JsonPage<StockShoppingItem>>(shoppingPath(workspaceId))).items;
+    },
+    createShoppingItem: (workspaceId, input) =>
+      call<StockShoppingItem>(shoppingPath(workspaceId), {
+        method: "POST",
+        headers: { "Idempotency-Key": key() },
+        body: JSON.stringify(input),
+      }),
+    purchaseShoppingItem: (workspaceId, item, input) =>
+      call<{
+        item: StockShoppingItem;
+        product: StockProduct | null;
+        movement: StockMovement | null;
+      }>(shoppingPath(workspaceId, `/${item.id}/purchased`), {
+        method: "POST",
+        headers: { "Idempotency-Key": key(), "If-Match": `"v${item.version}"` },
+        body: JSON.stringify(input),
       }),
     async listMovements(workspaceId, productId) {
       return (await call<JsonPage<StockMovement>>(path(workspaceId, `/${productId}/movements`)))
@@ -217,6 +441,7 @@ function fixtureSeed(workspaceId: string): StockProduct[] {
           quantity: "2",
           minimum: "1",
           markedMissing: false,
+          shoppingAuto: true,
           state: "ok",
           category: "Despensa",
           location: "Armário",
@@ -233,6 +458,7 @@ function fixtureSeed(workspaceId: string): StockProduct[] {
           quantity: "0",
           minimum: "2",
           markedMissing: false,
+          shoppingAuto: true,
           state: "missing",
           category: "Geladeira",
           location: null,
@@ -249,6 +475,7 @@ function fixtureSeed(workspaceId: string): StockProduct[] {
           quantity: null,
           minimum: null,
           markedMissing: false,
+          shoppingAuto: true,
           state: "unknown",
           category: null,
           location: null,
@@ -267,6 +494,7 @@ function fixtureSeed(workspaceId: string): StockProduct[] {
           quantity: "1",
           minimum: "2",
           markedMissing: false,
+          shoppingAuto: true,
           state: "low",
           category: "Limpeza",
           location: null,
@@ -282,6 +510,7 @@ export function createFixtureStockAdapter(): StockAdapter {
     fixtureWorkspaceIds.map((id) => [id, fixtureSeed(id)]),
   );
   const movementsByProduct = new Map<string, StockMovement[]>();
+  const shoppingByWorkspace = new Map<string, StockShoppingItem[]>();
   let sequence = 100;
   const getProducts = (workspaceId: string) => productsByWorkspace.get(workspaceId) ?? [];
   return {
@@ -314,6 +543,7 @@ export function createFixtureStockAdapter(): StockAdapter {
         quantity: input.quantity ?? null,
         minimum: input.minimum ?? null,
         markedMissing: false,
+        shoppingAuto: input.shoppingAuto ?? true,
         state: deriveFixtureState(input.quantity ?? null, input.minimum ?? null, false),
         category: input.category ?? null,
         location: input.location ?? null,
@@ -388,6 +618,112 @@ export function createFixtureStockAdapter(): StockAdapter {
     async listMovements(_workspaceId, productId) {
       return [...(movementsByProduct.get(productId) ?? [])];
     },
+    async listShoppingItems(workspaceId) {
+      const items = shoppingByWorkspace.get(workspaceId) ?? [];
+      const products = getProducts(workspaceId);
+      for (const product of products) {
+        if (
+          product.archived ||
+          !product.shoppingAuto ||
+          (product.state !== "missing" && product.state !== "low") ||
+          items.some((item) => item.productId === product.id && !item.purchased)
+        )
+          continue;
+        items.push({
+          id: fixtureProductId(workspaceId, ++sequence),
+          workspaceId,
+          productId: product.id,
+          name: product.name,
+          source: "automatic",
+          quantity: fixtureSuggestedQuantity(product.quantity, product.minimum),
+          unit: product.unit,
+          unitLabel: product.unitLabel,
+          note: product.note,
+          purchased: false,
+          purchasedAt: null,
+          lastChangedBy: "user_fixture_marina",
+          version: 0,
+        });
+      }
+      shoppingByWorkspace.set(workspaceId, items);
+      return items.filter((item) => !item.purchased).map((item) => ({ ...item }));
+    },
+    async createShoppingItem(workspaceId, input) {
+      const name = input.name.trim().replace(/\s+/gu, " ");
+      const products = getProducts(workspaceId);
+      const existing = (shoppingByWorkspace.get(workspaceId) ?? []).find(
+        (item) =>
+          !item.purchased &&
+          item.name.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR"),
+      );
+      if (existing) return { ...existing };
+      if (
+        products.some(
+          (product) =>
+            !product.archived &&
+            product.name.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR"),
+        )
+      )
+        throw new StockAdapterError(
+          "Esse nome já existe no estoque; use a entrada automática.",
+          409,
+        );
+      const item: StockShoppingItem = {
+        id: fixtureProductId(workspaceId, ++sequence),
+        workspaceId,
+        productId: null,
+        name,
+        source: "free",
+        quantity: input.quantity ?? null,
+        unit: input.unit ?? "unit",
+        unitLabel: input.unitLabel ?? null,
+        note: null,
+        purchased: false,
+        purchasedAt: null,
+        lastChangedBy: "user_fixture_marina",
+        version: 0,
+      };
+      const items = shoppingByWorkspace.get(workspaceId) ?? [];
+      items.push(item);
+      shoppingByWorkspace.set(workspaceId, items);
+      return { ...item };
+    },
+    async purchaseShoppingItem(workspaceId, item, input) {
+      const items = shoppingByWorkspace.get(workspaceId) ?? [];
+      const current = items.find((entry) => entry.id === item.id);
+      if (!current) throw new StockAdapterError("Item não encontrado.", 404);
+      if (current.version !== item.version)
+        throw new StockAdapterError("O item foi alterado.", 412, current.version);
+      if (current.purchased)
+        throw new StockAdapterError("Este item já foi marcado como comprado.", 409);
+      let product: StockProduct | null = null;
+      let movement: StockMovement | null = null;
+      if (input.addToStock) {
+        if (!current.productId)
+          throw new StockAdapterError("Itens livres não podem ser adicionados ao estoque.", 409);
+        product =
+          productsByWorkspace.get(workspaceId)?.find((entry) => entry.id === current.productId) ??
+          null;
+        if (!product) throw new StockAdapterError("Produto não encontrado.", 404);
+        const amount = input.quantity ?? current.quantity;
+        if (!amount || fixtureParseQuantity(amount, true) <= BigInt(0))
+          throw new StockAdapterError(
+            "Informe uma quantidade positiva para adicionar ao estoque.",
+            409,
+          );
+        const moved = await this.createMovement(workspaceId, product, {
+          kind: "entry",
+          quantity: amount,
+        });
+        product = moved.product;
+        movement = moved.movement;
+      }
+      current.purchased = true;
+      current.purchasedAt = new Date().toISOString();
+      current.lastChangedBy = "user_fixture_marina";
+      current.version += 1;
+      return { item: { ...current }, product: product ? { ...product } : null, movement };
+    },
   };
 }
 
@@ -404,6 +740,13 @@ function deriveFixtureState(
   )
     return "low";
   return "ok";
+}
+
+function fixtureSuggestedQuantity(quantity: string | null, minimum: string | null): string | null {
+  if (minimum === null) return null;
+  const current = quantity === null ? BigInt(0) : fixtureParseQuantity(quantity, true);
+  const target = fixtureParseQuantity(minimum, true);
+  return fixtureFormatQuantity(target > current ? target - current : BigInt(0));
 }
 function updateMark(list: StockProduct[], product: StockProduct, missing: boolean): StockProduct {
   const current = list.find((item) => item.id === product.id);

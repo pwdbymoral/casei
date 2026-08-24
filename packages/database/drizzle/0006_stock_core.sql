@@ -62,6 +62,10 @@ CREATE TRIGGER stock_movement_immutable_guard
   BEFORE UPDATE OR DELETE ON stock_movement
   FOR EACH ROW EXECUTE FUNCTION app.guard_stock_movement_immutable();
 
+-- The baseline migration grants DML on all public tables. Revoke that inherited
+-- access before granting the smallest stock command surface explicitly.
+REVOKE INSERT, UPDATE, DELETE ON stock_product FROM casei_app;
+REVOKE INSERT, UPDATE, DELETE ON stock_movement FROM casei_app;
 GRANT SELECT, INSERT, UPDATE ON stock_product TO casei_app;
 GRANT SELECT, INSERT ON stock_movement TO casei_app;
 ALTER TABLE stock_product ENABLE ROW LEVEL SECURITY;

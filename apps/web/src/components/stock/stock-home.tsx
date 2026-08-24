@@ -10,6 +10,7 @@ import {
   PlusIcon,
   RotateCcwIcon,
   SearchIcon,
+  ShoppingCartIcon,
   XIcon,
 } from "lucide-react";
 import type { FormEvent } from "react";
@@ -19,14 +20,24 @@ import { AsyncState, StatusBadge } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   canWriteStock,
   type StockAdapter,
+  StockAdapterError,
   type StockMovement,
   type StockMovementKind,
   type StockProduct,
+  type StockShoppingItem,
   type StockUnit,
   stockAdapterForEnvironment,
   stockStateLabel,
@@ -41,8 +52,9 @@ export function StockHome() {
     () => stockAdapterForEnvironment({ fixtures: fixtureMode }),
     [fixtureMode],
   );
-  const writable = canWriteStock(role);
   const [products, setProducts] = useState<StockProduct[]>([]);
+  const [shoppingItems, setShoppingItems] = useState<StockShoppingItem[]>([]);
+  const [viewMode, setViewMode] = useState<"shopping" | "missing" | "all">("shopping");
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [status, setStatus] = useState<"loading" | "success" | "empty" | "error" | "offline">(
@@ -54,12 +66,25 @@ export function StockHome() {
   const [newProductOpen, setNewProductOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newUnit, setNewUnit] = useState<StockUnit>("unit");
+  const [newUnitLabel, setNewUnitLabel] = useState("");
   const [newQuantity, setNewQuantity] = useState("");
   const [newMinimum, setNewMinimum] = useState("");
+  const [newShoppingAuto, setNewShoppingAuto] = useState(true);
+  const [newCategory, setNewCategory] = useState("");
+  const [newLocation, setNewLocation] = useState("");
+  const [newNote, setNewNote] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [historyProduct, setHistoryProduct] = useState<StockProduct | null>(null);
   const [history, setHistory] = useState<StockMovement[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const writable = canWriteStock(role) && status !== "offline";
+  const [freeItemName, setFreeItemName] = useState("");
+  const [freeItemQuantity, setFreeItemQuantity] = useState("");
+  const [selectedShoppingIds, setSelectedShoppingIds] = useState<string[]>([]);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [checkoutDraft, setCheckoutDraft] = useState<
+    Record<string, { addToStock: boolean; quantity: string }>
+  >({});
   const generation = useRef(0);
   const mutationToken = useRef(0);
 
@@ -68,17 +93,28 @@ export function StockHome() {
     setStatus("loading");
     setError(null);
     try {
-      const next = await adapter.listProducts(workspaceId, {
-        query,
-        includeArchived: showArchived,
-      });
+      const [next, nextShopping] = await Promise.all([
+        adapter.listProducts(workspaceId, { query, includeArchived: showArchived }),
+        adapter.listShoppingItems(workspaceId),
+      ]);
       if (current !== generation.current) return;
       setProducts(next);
-      setStatus(next.length ? "success" : "empty");
+      setShoppingItems(nextShopping);
+      setStatus(
+        adapter.lastReadWasCached || globalThis.navigator?.onLine === false
+          ? "offline"
+          : next.length
+            ? "success"
+            : "empty",
+      );
     } catch (cause) {
       if (current !== generation.current) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar o estoque.");
-      setStatus("error");
+      setStatus(
+        cause instanceof StockAdapterError && cause.code === "offline_required"
+          ? "offline"
+          : "error",
+      );
     }
   }, [adapter, query, showArchived, workspaceId]);
 
@@ -90,21 +126,22 @@ export function StockHome() {
     };
   }, [load]);
 
-  async function mutate(
-    key: string,
-    operation: () => Promise<StockProduct | { product: StockProduct }>,
-  ) {
+  async function mutate(key: string, operation: (idempotencyKey: string) => Promise<unknown>) {
     const requestGeneration = generation.current;
     const currentMutation = ++mutationToken.current;
+    const operationKey = `stock-${globalThis.crypto.randomUUID()}`;
     setBusy(key);
     setError(null);
     try {
-      await operation();
+      await operation(operationKey);
       if (requestGeneration === generation.current && currentMutation === mutationToken.current)
         await load();
     } catch (cause) {
-      if (requestGeneration === generation.current && currentMutation === mutationToken.current)
+      if (requestGeneration === generation.current && currentMutation === mutationToken.current) {
+        if (cause instanceof StockAdapterError && cause.code === "offline_required")
+          setStatus("offline");
         setError(cause instanceof Error ? cause.message : "Não foi possível atualizar o estoque.");
+      }
     } finally {
       if (currentMutation === mutationToken.current) setBusy(null);
     }
@@ -113,26 +150,95 @@ export function StockHome() {
   async function createProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newName.trim()) return;
-    await mutate("new", async () => {
-      const product = await adapter.createProduct(workspaceId, {
-        name: newName,
-        unit: newUnit,
-        quantity: newQuantity || null,
-        minimum: newMinimum || null,
-      });
+    await mutate("new", async (operationKey) => {
+      const product = await adapter.createProduct(
+        workspaceId,
+        {
+          name: newName,
+          unit: newUnit,
+          unitLabel: newUnit === "other" ? newUnitLabel || null : null,
+          quantity: newQuantity || null,
+          minimum: newMinimum || null,
+          shoppingAuto: newShoppingAuto,
+          category: newCategory || null,
+          location: newLocation || null,
+          note: newNote || null,
+        },
+        operationKey,
+      );
       setNewName("");
+      setNewUnitLabel("");
       setNewQuantity("");
       setNewMinimum("");
+      setNewShoppingAuto(true);
+      setNewCategory("");
+      setNewLocation("");
+      setNewNote("");
       setDetailsOpen(false);
       setNewProductOpen(false);
       return product;
     });
   }
 
+  async function createFreeShoppingItem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!freeItemName.trim()) return;
+    await mutate("shopping-new", async () => {
+      const item = await adapter.createShoppingItem(workspaceId, {
+        name: freeItemName,
+        quantity: freeItemQuantity || null,
+      });
+      setFreeItemName("");
+      setFreeItemQuantity("");
+      return item;
+    });
+  }
+
+  function selectShoppingItem(item: StockShoppingItem) {
+    setSelectedShoppingIds((current) =>
+      current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id],
+    );
+  }
+
+  function openCheckout() {
+    const selected = shoppingItems.filter((item) => selectedShoppingIds.includes(item.id));
+    setCheckoutDraft(
+      Object.fromEntries(
+        selected.map((item) => [
+          item.id,
+          { addToStock: item.source === "automatic", quantity: item.quantity ?? "" },
+        ]),
+      ),
+    );
+    setCheckoutOpen(true);
+  }
+
+  async function finalizeShopping() {
+    const selected = shoppingItems.filter((item) => selectedShoppingIds.includes(item.id));
+    setBusy("shopping-checkout");
+    setError(null);
+    try {
+      for (const item of selected) {
+        const draft = checkoutDraft[item.id] ?? { addToStock: false, quantity: "" };
+        await adapter.purchaseShoppingItem(workspaceId, item, {
+          addToStock: draft.addToStock,
+          quantity: draft.quantity || null,
+        });
+      }
+      setSelectedShoppingIds([]);
+      setCheckoutOpen(false);
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível finalizar a compra.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function quick(product: StockProduct, kind: "entry" | "consume" | "correction") {
     const quantity = kind === "correction" ? amount : amount || "1";
-    await mutate(product.id, () =>
-      adapter.createMovement(workspaceId, product, { kind, quantity }),
+    await mutate(product.id, (operationKey) =>
+      adapter.createMovement(workspaceId, product, { kind, quantity }, operationKey),
     );
   }
 
@@ -148,7 +254,13 @@ export function StockHome() {
     }
   }
 
-  const visibleProducts = products;
+  const visibleProducts =
+    viewMode === "all"
+      ? products
+      : products.filter((product) => product.state === "missing" || product.state === "low");
+  const visibleShoppingItems = shoppingItems.filter((item) =>
+    item.name.toLocaleLowerCase("pt-BR").includes(query.trim().toLocaleLowerCase("pt-BR")),
+  );
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -223,6 +335,18 @@ export function StockHome() {
                   />
                 </div>
               </div>
+              {newUnit === "other" ? (
+                <div className="grid gap-2 sm:max-w-xs">
+                  <Label htmlFor="stock-new-unit-label">Rótulo da unidade</Label>
+                  <Input
+                    id="stock-new-unit-label"
+                    value={newUnitLabel}
+                    onChange={(event) => setNewUnitLabel(event.target.value)}
+                    placeholder="Ex.: garrafa"
+                    required
+                  />
+                </div>
+              ) : null}
               <div>
                 <Button
                   type="button"
@@ -234,9 +358,43 @@ export function StockHome() {
                   Mais detalhes
                 </Button>
                 {detailsOpen ? (
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    Categoria, local e observações podem ser editados depois no modo avançado.
-                  </p>
+                  <div className="mt-2 grid gap-3 sm:grid-cols-3">
+                    <div className="grid gap-1">
+                      <Label htmlFor="stock-new-category">Categoria</Label>
+                      <Input
+                        id="stock-new-category"
+                        value={newCategory}
+                        onChange={(event) => setNewCategory(event.target.value)}
+                        placeholder="Despensa"
+                      />
+                    </div>
+                    <div className="grid gap-1">
+                      <Label htmlFor="stock-new-location">Local</Label>
+                      <Input
+                        id="stock-new-location"
+                        value={newLocation}
+                        onChange={(event) => setNewLocation(event.target.value)}
+                        placeholder="Armário"
+                      />
+                    </div>
+                    <div className="grid gap-1 sm:col-span-1">
+                      <Label htmlFor="stock-new-note">Observação</Label>
+                      <Input
+                        id="stock-new-note"
+                        value={newNote}
+                        onChange={(event) => setNewNote(event.target.value)}
+                        placeholder="Opcional"
+                      />
+                    </div>
+                    <label className="flex min-h-11 items-center gap-2 text-sm sm:col-span-3">
+                      <input
+                        type="checkbox"
+                        checked={newShoppingAuto}
+                        onChange={(event) => setNewShoppingAuto(event.target.checked)}
+                      />
+                      Sugerir na lista quando estiver faltando ou abaixo do mínimo
+                    </label>
+                  </div>
                 ) : null}
               </div>
               <div className="flex flex-wrap gap-2">
@@ -293,6 +451,122 @@ export function StockHome() {
         </div>
       </section>
 
+      <nav className="flex flex-wrap gap-2" aria-label="Visão da casa">
+        {(
+          [
+            ["shopping", "Lista de compras"],
+            ["missing", "Faltando"],
+            ["all", "Todos"],
+          ] as const
+        ).map(([mode, label]) => (
+          <Button
+            key={mode}
+            type="button"
+            size="sm"
+            variant={viewMode === mode ? "default" : "outline"}
+            aria-pressed={viewMode === mode}
+            onClick={() => setViewMode(mode)}
+          >
+            {mode === "shopping" ? <ShoppingCartIcon aria-hidden="true" /> : null}
+            {label}
+            {mode === "shopping" ? ` (${visibleShoppingItems.length})` : null}
+          </Button>
+        ))}
+      </nav>
+
+      {viewMode === "shopping" && status !== "loading" ? (
+        <section aria-labelledby="shopping-title" className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h3 id="shopping-title" className="text-xl font-semibold">
+                Lista de compras
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Faltantes e itens baixos entram automaticamente; itens livres ficam separados do
+                estoque.
+              </p>
+            </div>
+            {selectedShoppingIds.length > 0 ? (
+              <Button type="button" onClick={openCheckout} className="min-h-11">
+                <CheckIcon aria-hidden="true" /> Finalizar compra ({selectedShoppingIds.length})
+              </Button>
+            ) : null}
+          </div>
+          {writable ? (
+            <form
+              onSubmit={createFreeShoppingItem}
+              className="flex flex-col gap-2 sm:flex-row"
+              aria-label="Adicionar item livre"
+            >
+              <Label htmlFor="shopping-free-name" className="sr-only">
+                Item livre
+              </Label>
+              <Input
+                id="shopping-free-name"
+                value={freeItemName}
+                onChange={(event) => setFreeItemName(event.target.value)}
+                placeholder="Adicionar item que não está no estoque"
+                className="min-h-11 flex-1"
+              />
+              <Label htmlFor="shopping-free-quantity" className="sr-only">
+                Quantidade do item livre
+              </Label>
+              <Input
+                id="shopping-free-quantity"
+                inputMode="decimal"
+                value={freeItemQuantity}
+                onChange={(event) => setFreeItemQuantity(event.target.value)}
+                placeholder="Qtd. (opcional)"
+                className="min-h-11 sm:w-32"
+              />
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={busy === "shopping-new"}
+                className="min-h-11"
+              >
+                Adicionar
+              </Button>
+            </form>
+          ) : null}
+          {visibleShoppingItems.length === 0 ? (
+            <AsyncState
+              status="empty"
+              title="Lista vazia"
+              description="Nada em falta por enquanto. Você também pode adicionar um item livre acima."
+            />
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {visibleShoppingItems.map((item) => {
+                const selected = selectedShoppingIds.includes(item.id);
+                return (
+                  <Card key={item.id} className={selected ? "ring-2 ring-ring" : undefined}>
+                    <CardContent className="flex min-h-20 items-center gap-3 p-4">
+                      <input
+                        type="checkbox"
+                        className="size-5 shrink-0"
+                        checked={selected}
+                        onChange={() => selectShoppingItem(item)}
+                        aria-label={`Selecionar ${item.name}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium break-words">{item.name}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {item.quantity ?? "Quantidade a definir"}{" "}
+                          {item.unitLabel ?? stockUnitLabel[item.unit]}
+                          {item.source === "automatic" ? " · do estoque" : " · item livre"}
+                        </p>
+                      </div>
+                      <span className="sr-only">Alterado por {item.lastChangedBy}</span>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      ) : null}
+
       {error ? (
         <AsyncState
           status="error"
@@ -302,7 +576,7 @@ export function StockHome() {
         />
       ) : null}
       {status === "loading" ? <AsyncState status="loading" /> : null}
-      {status === "empty" ? (
+      {status === "empty" && viewMode !== "shopping" ? (
         <AsyncState
           status="empty"
           title="Nenhum produto encontrado"
@@ -318,7 +592,14 @@ export function StockHome() {
           }
         />
       ) : null}
-      {status === "success" ? (
+      {status === "offline" ? (
+        <AsyncState
+          status="offline"
+          title="Você está offline"
+          description="Mostrando o último snapshot salvo. Adicionar, movimentar ou arquivar exige conexão."
+        />
+      ) : null}
+      {status !== "loading" && viewMode !== "shopping" ? (
         <div className="grid gap-4 md:grid-cols-2">
           {visibleProducts.map((product) => (
             <StockProductCard
@@ -329,15 +610,15 @@ export function StockHome() {
               amount={amount}
               onMove={(kind) => void quick(product, kind)}
               onMissing={() =>
-                void mutate(product.id, () =>
-                  adapter.markMissing(workspaceId, product, !product.markedMissing),
+                void mutate(product.id, (operationKey) =>
+                  adapter.markMissing(workspaceId, product, !product.markedMissing, operationKey),
                 )
               }
               onArchive={() =>
-                void mutate(product.id, () =>
+                void mutate(product.id, (operationKey) =>
                   product.archived
-                    ? adapter.restore(workspaceId, product)
-                    : adapter.archive(workspaceId, product),
+                    ? adapter.restore(workspaceId, product, operationKey)
+                    : adapter.archive(workspaceId, product, operationKey),
                 )
               }
               onHistory={() => void openHistory(product)}
@@ -345,6 +626,80 @@ export function StockHome() {
           ))}
         </div>
       ) : null}
+      <Dialog open={checkoutOpen} onOpenChange={setCheckoutOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Finalizar compra</DialogTitle>
+            <DialogDescription>
+              Marcar como comprado não altera o estoque. Confirme, por item, quais quantidades devem
+              ser adicionadas.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex max-h-[55vh] flex-col gap-3 overflow-y-auto">
+            {shoppingItems
+              .filter((item) => selectedShoppingIds.includes(item.id))
+              .map((item) => {
+                const draft = checkoutDraft[item.id] ?? {
+                  addToStock: false,
+                  quantity: item.quantity ?? "",
+                };
+                return (
+                  <div key={item.id} className="rounded-lg border p-3">
+                    <p className="font-medium">{item.name}</p>
+                    {item.source === "automatic" ? (
+                      <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_8rem] sm:items-end">
+                        <label className="flex min-h-11 items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={draft.addToStock}
+                            onChange={(event) =>
+                              setCheckoutDraft((current) => ({
+                                ...current,
+                                [item.id]: { ...draft, addToStock: event.target.checked },
+                              }))
+                            }
+                          />
+                          Adicionar ao estoque
+                        </label>
+                        <div className="grid gap-1">
+                          <Label htmlFor={`checkout-quantity-${item.id}`}>Quantidade</Label>
+                          <Input
+                            id={`checkout-quantity-${item.id}`}
+                            inputMode="decimal"
+                            value={draft.quantity}
+                            onChange={(event) =>
+                              setCheckoutDraft((current) => ({
+                                ...current,
+                                [item.id]: { ...draft, quantity: event.target.value },
+                              }))
+                            }
+                            disabled={!draft.addToStock}
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Item livre: a compra será registrada sem alterar o estoque.
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setCheckoutOpen(false)}>
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void finalizeShopping()}
+              disabled={busy === "shopping-checkout"}
+            >
+              {busy === "shopping-checkout" ? "Salvando…" : "Confirmar compra"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {historyProduct ? (
         <Card aria-label={`Histórico de ${historyProduct.name}`}>
           <CardHeader>
@@ -382,7 +737,9 @@ export function StockHome() {
                   >
                     <span>
                       <strong>{movementLabel[item.kind]}</strong> · {item.quantity}{" "}
-                      {stockUnitLabel[historyProduct.unit]}
+                      {historyProduct.unit === "other"
+                        ? (historyProduct.unitLabel ?? "outra unidade")
+                        : stockUnitLabel[historyProduct.unit]}
                     </span>
                     <span className="text-muted-foreground">
                       {item.before ?? "—"} → {item.after ?? "—"} ·{" "}
@@ -441,7 +798,10 @@ function StockProductCard({
             <CardTitle className="truncate">{product.name}</CardTitle>
             <CardDescription>
               {product.location ? `${product.location} · ` : ""}
-              {stockUnitLabel[product.unit]}
+              {product.unit === "other"
+                ? (product.unitLabel ?? "outra unidade")
+                : stockUnitLabel[product.unit]}
+              {product.category ? ` · ${product.category}` : ""}
             </CardDescription>
           </div>
           <StatusBadge status={status}>{stockStateLabel[product.state]}</StatusBadge>
@@ -455,7 +815,7 @@ function StockProductCard({
           </p>
         </div>
         {writable && !product.archived ? (
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <Button
               type="button"
               variant="outline"

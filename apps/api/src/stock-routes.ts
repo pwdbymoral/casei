@@ -1,12 +1,16 @@
 import {
   createStockMovementSchema,
   createStockProductSchema,
+  createStockShoppingItemSchema,
   domainIdSchema,
   markStockMissingSchema,
   paginationQuerySchema,
+  purchaseStockShoppingItemSchema,
   stockProductListQuerySchema,
+  stockShoppingListQuerySchema,
   updateStockProductSchema,
 } from "@casei/contracts";
+import { IdempotencyConflictError } from "@casei/database";
 import type { Hono, MiddlewareHandler } from "hono";
 import { ApiHttpError, errorResponse, notFoundError, validationError } from "./http/index.js";
 import { parseJsonBody, parseQuery } from "./http/parsing.js";
@@ -32,6 +36,8 @@ export function configureStockRoutes(router: Hono<ApiEnv>, options: StockRoutesO
   for (const path of [
     "/workspaces/:workspaceId/stock/products",
     "/workspaces/:workspaceId/stock/products/*",
+    "/workspaces/:workspaceId/stock/shopping",
+    "/workspaces/:workspaceId/stock/shopping/*",
   ]) {
     router.use(path, options.scopeMiddleware);
   }
@@ -51,6 +57,39 @@ export function configureStockRoutes(router: Hono<ApiEnv>, options: StockRoutesO
     );
     context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
     return context.json(result.product, result.replayed ? 200 : 201);
+  });
+
+  router.get("/workspaces/:workspaceId/stock/shopping", async (context) => {
+    const query = parseQuery(context, stockShoppingListQuerySchema);
+    const items = await service.listShoppingItems(scopeOf(context), query);
+    return context.json({ items, page: { nextCursor: null, hasMore: false } });
+  });
+
+  router.post("/workspaces/:workspaceId/stock/shopping", async (context) => {
+    const input = await parseJsonBody(context, createStockShoppingItemSchema);
+    const result = await service.createShoppingItem(
+      scopeOf(context),
+      input,
+      requiredIdempotencyKey(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    context.header("X-List-Deduplicated", result.deduplicated ? "true" : "false");
+    return context.json(result.item, result.replayed || result.deduplicated ? 200 : 201);
+  });
+
+  router.post("/workspaces/:workspaceId/stock/shopping/:itemId/purchased", async (context) => {
+    const itemId = parseDomainId(context.req.param("itemId"));
+    const input = await parseJsonBody(context, purchaseStockShoppingItemSchema);
+    const result = await service.purchaseShoppingItem(
+      scopeOf(context),
+      itemId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.item.version);
+    return context.json(result, 200);
   });
 
   router.get("/workspaces/:workspaceId/stock/products/:productId", async (context) => {
@@ -169,6 +208,9 @@ function parseDomainId(value: string | undefined): string {
 }
 
 export function stockErrorToHttp(error: unknown): unknown {
+  if (error instanceof IdempotencyConflictError) {
+    return new ApiHttpError(409, "idempotency_conflict");
+  }
   if (error instanceof StockNotFoundError) return notFoundError();
   if (error instanceof StockPermissionError) return new ApiHttpError(403, "permission_denied");
   if (error instanceof StockVersionConflictError) {

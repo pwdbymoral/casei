@@ -4,7 +4,9 @@ import {
   formatStockQuantity,
   normalizeProductName,
   parseStockQuantity,
+  shouldAutoAddToShopping,
   stockMovementAfter,
+  suggestedShoppingQuantity,
 } from "../src/stock.js";
 
 describe("estoque", () => {
@@ -54,5 +56,29 @@ describe("estoque", () => {
     expect(() =>
       stockMovementAfter({ kind: "discard", beforeMilli: 500n, quantityMilli: 501n }),
     ).toThrow("negativo");
+  });
+
+  it("deriva a quantidade sugerida e decide quando um produto entra na lista", () => {
+    expect(suggestedShoppingQuantity({ quantityMilli: 2_000n, minimumMilli: 5_000n })).toBe(3_000n);
+    expect(suggestedShoppingQuantity({ quantityMilli: 5_000n, minimumMilli: 5_000n })).toBe(0n);
+    expect(suggestedShoppingQuantity({ quantityMilli: 0n, minimumMilli: null })).toBeNull();
+    expect(
+      shouldAutoAddToShopping({ quantityMilli: 0n, minimumMilli: null, markedMissing: false }),
+    ).toBe(true);
+    expect(
+      shouldAutoAddToShopping({
+        quantityMilli: 8_000n,
+        minimumMilli: 5_000n,
+        markedMissing: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoAddToShopping({
+        quantityMilli: 0n,
+        minimumMilli: 2_000n,
+        markedMissing: false,
+        shoppingAuto: false,
+      }),
+    ).toBe(false);
   });
 });
