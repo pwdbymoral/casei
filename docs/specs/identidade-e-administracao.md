@@ -37,6 +37,7 @@ Papéis do MVP:
 - Reenvio invalida token anterior; aceite e revogação são idempotentes.
 - Remover membro revoga acesso imediatamente e preserva autoria histórica pelo identificador e nome no momento do evento.
 - Toda mutação doméstica e toda remoção/downgrade de membership bloqueiam a mesma linha de membership na transação; se a revogação vencer a disputa, a mutação não produz efeito.
+- Operações que alteram mais de uma membership bloqueiam todas as linhas envolvidas em ordem determinística por `user_id` antes de bloquear o workspace; leituras/mutações de domínio que bloqueiam o ator seguem a mesma ordem membership → workspace.
 - Jobs diferidos carregam ator, espaço e capacidade exigida e revalidam os três antes de cada lote/transição; revogação interrompe o job sem aplicar novos lotes.
 - Troca de espaço ativo não mistura cache, URL, sugestões recentes ou dados entre espaços.
 

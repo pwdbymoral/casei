@@ -390,7 +390,7 @@ export class IdentityService {
            SELECT 1 FROM finance_transaction
               WHERE workspace_id = $1
                 AND state IN ('planned', 'partially_settled', 'posted')
-             UNION ALL
+              UNION ALL
            SELECT 1 FROM credit_card
               WHERE workspace_id = $1
            ) AS exists`,
@@ -762,6 +762,13 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
+        // Memberships are the first lock in every multi-membership identity
+        // mutation. Acquire this actor row before the invitation's joined
+        // workspace lock so acceptance cannot deadlock with deactivation.
+        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
+          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+          [workspaceId, actor.userId],
+        );
         const result = await client.query<
           InvitationRow & {
             workspace_name: string;
@@ -811,10 +818,6 @@ export class IdentityService {
         if (invite.workspace_status !== "active")
           throw new IdentityConflictError("O espaço não está disponível.");
         await this.deleteInvitationEmailArtifacts(client, workspaceId, invitationId);
-        const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
-          `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-          [workspaceId, actor.userId],
-        );
         if (current.rows[0]?.status === "active") {
           if (current.rows[0].role !== invite.role) {
             await client.query(
@@ -1066,22 +1069,29 @@ export class IdentityService {
         applicationRole: this.applicationRole,
       },
       async ({ client }) => {
-        const result = await client.query<{
-          name: string;
-          status: string;
-          expires_at: Date;
-          version: number;
-        }>(
-          `SELECT w.name, w.status, w.version, r.expires_at
-             FROM workspace w
-             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
-                                                  AND r.owner_user_id = $2
-                                                  AND r.status = 'active'
-            WHERE w.id = $1
-            FOR UPDATE OF w, r`,
+        // Purge and cancellation lock recovery before the workspace. Keep
+        // retry in that same order so a concurrent retry cannot hold the
+        // workspace while waiting for recovery.
+        const recovery = await client.query<{ expires_at: Date }>(
+          `SELECT expires_at
+             FROM workspace_deletion_recovery
+            WHERE workspace_id = $1 AND owner_user_id = $2 AND status = 'active'
+            FOR UPDATE`,
           [workspaceId, actor.userId],
         );
-        const row = result.rows[0];
+        const workspace = await client.query<{ name: string; status: string; version: number }>(
+          `SELECT name, status, version
+             FROM workspace
+            WHERE id = $1
+            FOR UPDATE`,
+          [workspaceId],
+        );
+        const recoveryRow = recovery.rows[0];
+        const workspaceRow = workspace.rows[0];
+        const row =
+          recoveryRow && workspaceRow
+            ? { ...workspaceRow, expires_at: recoveryRow.expires_at }
+            : undefined;
         if (row?.status !== "deletion_pending") throw new IdentityNotFoundError();
         if (row.version === expectedVersion + 1) {
           if (row.name !== parsed.workspaceName)
@@ -1135,17 +1145,32 @@ export class IdentityService {
       this.pool,
       { workspaceId, actorId: actor.userId, applicationRole: this.applicationRole, correlationId },
       async ({ client }) => {
-        const result = await client.query<{ status: string; expires_at: Date; version: number }>(
-          `SELECT w.status, w.version, r.expires_at
-             FROM workspace w
-             JOIN workspace_deletion_recovery r ON r.workspace_id = w.id
-            WHERE w.id = $1 AND r.owner_user_id = $2 AND r.status = 'active'
-            FOR UPDATE OF w, r`,
+        // Purge locks the recovery row before deleting the workspace (and its
+        // memberships). Acquire that row first here as well, then follow the
+        // canonical membership→workspace order to avoid a late-cancel deadlock.
+        const recovery = await client.query<{ status: string; expires_at: Date }>(
+          `SELECT status, expires_at
+             FROM workspace_deletion_recovery
+            WHERE workspace_id = $1 AND owner_user_id = $2 AND status = 'active'
+            FOR UPDATE`,
           [workspaceId, actor.userId],
         );
-        const row = result.rows[0];
+        const locked = await lockMembershipsThenWorkspace(client, workspaceId);
+        const actorMembership = locked.memberships.find(
+          (membership) => membership.user_id === actor.userId,
+        );
+        if (actorMembership?.role !== "owner" || actorMembership.status !== "recovery_only")
+          throw new IdentityNotFoundError();
+        const row =
+          locked.workspace && recovery.rows[0]
+            ? {
+                workspaceStatus: locked.workspace.status,
+                version: locked.workspace.version,
+                expires_at: recovery.rows[0].expires_at,
+              }
+            : undefined;
         if (
-          row?.status !== "deletion_pending" ||
+          row?.workspaceStatus !== "deletion_pending" ||
           new Date(row.expires_at).getTime() <= this.now().getTime()
         )
           throw new IdentityNotFoundError();
@@ -1623,7 +1648,11 @@ interface LockedWorkspaceRow {
   version: number;
 }
 
-/** Lock every membership involved in a multi-membership mutation before workspace. */
+/**
+ * Identity mutations that update multiple memberships use this order to avoid
+ * acquiring a workspace lock while another transaction still owns a membership.
+ * The sorted query is shared by ownership transfer and workspace deactivation.
+ */
 async function lockMembershipsThenWorkspace(
   client: PoolClient,
   workspaceId: string,

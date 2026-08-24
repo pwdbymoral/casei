@@ -6,6 +6,7 @@ import {
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  settleTransactionSchema,
   type TransactionListQuery,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
@@ -107,10 +108,94 @@ export interface StatementItemsPage {
   hasMore: boolean;
 }
 
+export interface FinanceAuditEventView {
+  id: string;
+  transactionId: string;
+  category: string;
+  action: string;
+  actorId: string | null;
+  occurredAt: string;
+  origin: string;
+  correlationId: string;
+  result: string;
+  reason: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
+
+export interface FinanceAuditLedgerEventView {
+  id: string;
+  eventType: string;
+  status: string;
+  occurredOn: string;
+  publishedAt: string | null;
+  reversedEventId: string | null;
+}
+
+export interface FinanceAuditDetailView extends FinanceAuditEventView {
+  consequences: { ledgerEvents: FinanceAuditLedgerEventView[] };
+}
+
+export interface FinanceAuditPage {
+  items: FinanceAuditEventView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface SettlementCalculationInput {
+  plannedMinor: bigint;
+  settledMinor: bigint;
+  effectiveMinor?: bigint;
+}
+
+export interface SettlementCalculation {
+  amountMinor: bigint;
+  settledMinor: bigint;
+  state: "partially_settled" | "posted";
+}
+
+/** Variable recurrence occurrences need an explicit effective amount to settle. */
+export function assertVariableRecurrenceSettlementAllowed(
+  variable: boolean,
+  hasEffectiveAmount: boolean,
+): void {
+  if (variable && !hasEffectiveAmount) {
+    throw new FinanceConflictError(
+      "Uma ocorrência variável exige confirmar o valor efetivo antes da liquidação.",
+    );
+  }
+}
+
+/** Calculates one non-overlapping settlement delta before touching the ledger. */
+export function calculateSettlement({
+  plannedMinor,
+  settledMinor,
+  effectiveMinor,
+}: SettlementCalculationInput): SettlementCalculation {
+  const remaining = plannedMinor - settledMinor;
+  const amountMinor = effectiveMinor ?? remaining;
+  if (plannedMinor <= 0n || settledMinor < 0n || settledMinor > plannedMinor) {
+    throw new FinanceConflictError("O compromisso possui um saldo inválido.");
+  }
+  if (amountMinor <= 0n) {
+    throw new FinanceConflictError("A liquidação deve ser maior que zero.");
+  }
+  if (amountMinor > remaining) {
+    throw new FinanceConflictError("A liquidação excede o valor ainda em aberto.");
+  }
+  const nextSettledMinor = settledMinor + amountMinor;
+  return {
+    amountMinor,
+    settledMinor: nextSettledMinor,
+    state: nextSettledMinor === plannedMinor ? "posted" : "partially_settled",
+  };
+}
 type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const statementItemsCursorOrdering = "occurred_on,created_at,id";
 type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const transactionCursorOrdering = "occurred_on,created_at,id:desc";
+type FinanceAuditCursorPosition = [occurredAt: string, id: string];
+const financeAuditCursorOrdering = "occurred_at,id:desc";
 
 interface TransactionRow {
   id: string;
@@ -130,6 +215,22 @@ interface TransactionRow {
   recurrence_id: string | null;
   created_at?: Date | string;
   version: number;
+}
+
+interface FinanceAuditRow {
+  id: string;
+  transaction_id: string;
+  category: string;
+  action: string;
+  actor_id: string | null;
+  /** Selected as PostgreSQL text so cursor positions retain microseconds. */
+  occurred_at: string | Date;
+  origin: string;
+  correlation_id: string;
+  result: string;
+  reason: string | null;
+  before_redacted: unknown;
+  after_redacted: unknown;
 }
 
 export class FinanceService {
@@ -248,6 +349,117 @@ export class FinanceService {
         [scope.workspaceId, id],
       );
       return result.rows[0] ? toTransactionView(result.rows[0]) : null;
+    });
+  }
+
+  async listTransactionAudit(
+    scope: FinanceScope,
+    transactionId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<FinanceAuditPage> {
+    return this.withScopedClient(scope, async (client) => {
+      const transaction = await client.query<{ id: string }>(
+        `SELECT id FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, transactionId],
+      );
+      if (!transaction.rows[0]) throw new FinanceNotFoundError();
+
+      const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+      const cursor = options.cursor
+        ? decodeFinanceAuditCursor(options.cursor, this.cursorSecret)
+        : null;
+      const values: unknown[] = [scope.workspaceId, transactionId];
+      const conditions = [
+        "workspace_id = $1",
+        "target_type = 'finance_transaction'",
+        "target_id = $2",
+      ];
+      if (cursor) {
+        values.push(cursor[0], cursor[1]);
+        conditions.push(
+          `(occurred_at < $${values.length - 1}::timestamptz OR (occurred_at = $${values.length - 1}::timestamptz AND id < $${values.length}::uuid))`,
+        );
+      }
+      values.push(limit + 1);
+      const result = await client.query<FinanceAuditRow>(
+        `SELECT id, target_id AS transaction_id, category, action, actor_id,
+                occurred_at::text AS occurred_at,
+                origin, correlation_id, result, reason, before_redacted, after_redacted
+           FROM audit_event
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY occurred_at DESC, id DESC
+          LIMIT $${values.length}`,
+        values,
+      );
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+      const last = rows.at(-1);
+      return {
+        items: rows.map(toFinanceAuditEventView),
+        nextCursor:
+          hasMore && last
+            ? encodeCursor(
+                {
+                  ordering: financeAuditCursorOrdering,
+                  position: [normalizePostgresTimestamp(last.occurred_at), last.id],
+                },
+                this.cursorSecret,
+              )
+            : null,
+        hasMore,
+      };
+    });
+  }
+
+  async getTransactionAudit(
+    scope: FinanceScope,
+    transactionId: string,
+    auditId: string,
+  ): Promise<FinanceAuditDetailView> {
+    return this.withScopedClient(scope, async (client) => {
+      const transaction = await client.query<{ id: string }>(
+        `SELECT id FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, transactionId],
+      );
+      if (!transaction.rows[0]) throw new FinanceNotFoundError();
+      const event = await client.query<FinanceAuditRow>(
+        `SELECT id, target_id AS transaction_id, category, action, actor_id,
+                occurred_at::text AS occurred_at,
+                origin, correlation_id, result, reason, before_redacted, after_redacted
+           FROM audit_event
+          WHERE workspace_id = $1 AND target_type = 'finance_transaction'
+            AND target_id = $2 AND id = $3`,
+        [scope.workspaceId, transactionId, auditId],
+      );
+      const row = event.rows[0];
+      if (!row) throw new FinanceNotFoundError();
+      const consequences = await client.query<{
+        id: string;
+        event_type: string;
+        status: string;
+        occurred_on: string;
+        published_at: Date | string | null;
+        reversed_event_id: string | null;
+      }>(
+        `SELECT id, event_type, status, occurred_on, published_at, reversed_event_id
+           FROM ledger_event
+          WHERE workspace_id = $1 AND transaction_id = $2
+          ORDER BY occurred_on ASC, created_at ASC, id ASC`,
+        [scope.workspaceId, transactionId],
+      );
+      return {
+        ...toFinanceAuditEventView(row),
+        consequences: {
+          ledgerEvents: consequences.rows.map((value) => ({
+            id: value.id,
+            eventType: value.event_type,
+            status: value.status,
+            occurredOn: value.occurred_on,
+            publishedAt: value.published_at ? new Date(value.published_at).toISOString() : null,
+            reversedEventId: value.reversed_event_id,
+          })),
+        },
+      };
     });
   }
 
@@ -482,14 +694,17 @@ export class FinanceService {
     id: string,
     idempotencyKey: string,
     expectedVersion?: number,
+    input: unknown = {},
   ): Promise<TransactionView> {
     assertFinanceCapability(scope, "finance.write");
+    const parsed = settleTransactionSchema.parse(input);
     return this.mutateTransaction(
       scope,
       id,
       idempotencyKey,
       expectedVersion,
       "transactions/:id/post",
+      { id, expectedVersion, ...parsed },
       async (client, row) => {
         const workspaceCurrency = await this.workspaceCurrency(client, scope.workspaceId);
         if (row.currency_code !== workspaceCurrency) {
@@ -509,26 +724,46 @@ export class FinanceService {
               FOR SHARE`,
             [scope.workspaceId, id],
           );
-          if (recurrence.rows[0]?.variable) {
-            throw new FinanceConflictError(
-              "Uma ocorrência variável exige confirmar o valor efetivo antes da liquidação.",
-            );
-          }
+          assertVariableRecurrenceSettlementAllowed(
+            recurrence.rows[0]?.variable ?? false,
+            parsed.amount !== undefined,
+          );
         }
+        if (parsed.amount && parsed.amount.currency !== row.currency_code) {
+          throw new FinanceConflictError("A moeda da liquidação difere da transação.");
+        }
+        const settlement = calculateSettlement({
+          plannedMinor: BigInt(row.amount_minor),
+          settledMinor: BigInt(row.settled_minor),
+          effectiveMinor: parsed.amount ? BigInt(parsed.amount.minor) : undefined,
+        });
+        const { amountMinor: amount, settledMinor, state: nextState } = settlement;
+        const settlementOn =
+          parsed.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
         await this.publishTransaction(
           client,
           scope,
           row,
-          BigInt(row.amount_minor) - BigInt(row.settled_minor),
+          amount,
+          settlementOn,
+          nextState === "posted" ? "transaction.posted.v1" : "transaction.partially_settled.v1",
         );
         const result = await client.query<TransactionRow>(
           `UPDATE finance_transaction
-            SET state = 'posted', settled_minor = amount_minor, posted_on = coalesce(posted_on, now()), cash_settled_on = CASE WHEN instrument = 'wallet' THEN now() ELSE cash_settled_on END, version = version + 1, updated_at = now()
-          WHERE workspace_id = $1 AND id = $2 AND version = $3
+            SET state = $3, settled_minor = $4, posted_on = coalesce(posted_on, now()), cash_settled_on = CASE WHEN instrument = 'wallet' THEN coalesce(cash_settled_on, now()) ELSE cash_settled_on END, version = version + 1, updated_at = now()
+          WHERE workspace_id = $1 AND id = $2 AND version = $5
           RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
-          [scope.workspaceId, id, row.version],
+          [scope.workspaceId, id, nextState, settledMinor, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
+        await this.recordTransactionAudit(
+          client,
+          scope,
+          id,
+          nextState === "posted" ? "transaction.posted" : "transaction.partially_settled",
+          transactionAuditSnapshot(row),
+          transactionAuditSnapshot(result.rows[0]),
+        );
         return toTransactionView(result.rows[0]);
       },
     );
@@ -547,16 +782,28 @@ export class FinanceService {
       idempotencyKey,
       expectedVersion,
       "transactions/:id/reverse",
+      { id, expectedVersion },
       async (client, row) => {
         if (row.state !== "posted" && row.state !== "partially_settled") {
           throw new FinanceConflictError("A transação não está realizada.");
         }
-        const original = await client.query<{ id: string }>(
-          `SELECT id FROM ledger_event WHERE workspace_id = $1 AND transaction_id = $2 AND event_type IN ('transaction.posted.v1', 'statement.payment.v1') ORDER BY created_at ASC LIMIT 1`,
+        const original = await client.query<{
+          id: string;
+          currency_code: string;
+          occurred_on: string;
+        }>(
+          `SELECT id, currency_code, occurred_on
+             FROM ledger_event
+            WHERE workspace_id = $1
+              AND transaction_id = $2
+              AND event_type IN ('transaction.posted.v1', 'transaction.partially_settled.v1', 'statement.payment.v1')
+              AND status = 'published'
+              AND reversed_event_id IS NULL
+            ORDER BY created_at ASC`,
           [scope.workspaceId, id],
         );
-        const eventId = original.rows[0]?.id;
-        if (!eventId) throw new FinanceConflictError("O lançamento original não foi encontrado.");
+        if (original.rows.length === 0)
+          throw new FinanceConflictError("O lançamento original não foi encontrado.");
         const cardPayment = row.statement_id
           ? await client.query<{ amount_minor: string }>(
               `SELECT amount_minor
@@ -616,7 +863,7 @@ export class FinanceService {
               "A fatura já foi fechada ou paga; faça um ajuste explícito para estornar esta compra.",
             );
           }
-          const nextTotal = BigInt(statementRow.total_minor) - BigInt(row.amount_minor);
+          const nextTotal = BigInt(statementRow.total_minor) - BigInt(row.settled_minor);
           if (nextTotal < BigInt(statementRow.paid_minor)) {
             throw new FinanceConflictError("O estorno excede o saldo aberto da fatura.");
           }
@@ -627,37 +874,55 @@ export class FinanceService {
             [nextTotal, scope.workspaceId, row.statement_id],
           );
         }
-        const entries = await client.query<{
-          account_id: string;
-          currency_code: string;
-          amount_minor: string;
-        }>(
-          `SELECT account_id, currency_code, amount_minor FROM ledger_entry WHERE workspace_id = $1 AND event_id = $2`,
-          [scope.workspaceId, eventId],
-        );
-        const reversal = await client.query<{ id: string }>(
-          `INSERT INTO ledger_event (workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at, reversed_event_id)
-         VALUES ($1, $2, 'transaction.reversed.v1', $3, 'published', $4, now(), $5) RETURNING id`,
-          [scope.workspaceId, id, row.currency_code, row.occurred_on, eventId],
-        );
-        for (const entry of entries.rows) {
-          await client.query(
-            `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor) VALUES ($1, $2, $3, $4, $5)`,
+        for (const [index, sourceEvent] of original.rows.entries()) {
+          const entries = await client.query<{
+            account_id: string;
+            currency_code: string;
+            amount_minor: string;
+          }>(
+            `SELECT account_id, currency_code, amount_minor FROM ledger_entry WHERE workspace_id = $1 AND event_id = $2`,
+            [scope.workspaceId, sourceEvent.id],
+          );
+          const eventType =
+            index === 0 ? "transaction.reversed.v1" : `transaction.reversed.v1.${index + 1}`;
+          const reversal = await client.query<{ id: string }>(
+            `INSERT INTO ledger_event (workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at, reversed_event_id)
+           VALUES ($1, $2, $3, $4, 'published', $5, now(), $6) RETURNING id`,
             [
               scope.workspaceId,
-              reversal.rows[0]?.id,
-              entry.account_id,
-              entry.currency_code,
-              -BigInt(entry.amount_minor),
+              id,
+              eventType,
+              sourceEvent.currency_code,
+              sourceEvent.occurred_on,
+              sourceEvent.id,
             ],
           );
+          for (const entry of entries.rows) {
+            await client.query(
+              `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor) VALUES ($1, $2, $3, $4, $5)`,
+              [
+                scope.workspaceId,
+                reversal.rows[0]?.id,
+                entry.account_id,
+                entry.currency_code,
+                -BigInt(entry.amount_minor),
+              ],
+            );
+          }
         }
         const result = await client.query<TransactionRow>(
           `UPDATE finance_transaction SET state = 'canceled', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
-        await this.recordTransactionAudit(client, scope, id, "transaction.reversed");
+        await this.recordTransactionAudit(
+          client,
+          scope,
+          id,
+          "transaction.reversed",
+          transactionAuditSnapshot(row),
+          transactionAuditSnapshot(result.rows[0]),
+        );
         return toTransactionView(result.rows[0]);
       },
     );
@@ -816,6 +1081,14 @@ export class FinanceService {
             `UPDATE credit_statement SET paid_minor = $1, state = CASE WHEN $1 >= total_minor THEN 'paid' ELSE 'partially_paid' END, version = version + 1, updated_at = now() WHERE id = $2`,
             [paid, statementId],
           );
+          await this.recordTransactionAudit(client, scope, txId, "transaction.created", null, {
+            kind: "transfer",
+            state: "posted",
+            categoryId: null,
+            cardId: null,
+            statementId,
+            version: 0,
+          });
           return {
             statusCode: 201,
             response: {
@@ -880,6 +1153,21 @@ export class FinanceService {
             );
             const installmentId = installment.rows[0]?.id;
             if (!installmentId) throw new Error("installment insert failed");
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              transactionId,
+              "transaction.created",
+              null,
+              {
+                kind: "expense",
+                state: "planned",
+                categoryId: null,
+                cardId: null,
+                statementId: null,
+                version: 0,
+              },
+            );
             installments.push({
               id: installmentId,
               number: index + 1,
@@ -954,6 +1242,21 @@ export class FinanceService {
             );
             const transactionId = transaction.rows[0]?.id;
             if (!transactionId) throw new Error("recurrence transaction insert failed");
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              transactionId,
+              "transaction.created",
+              null,
+              {
+                kind: parsed.kind,
+                state: "planned",
+                categoryId: null,
+                cardId: null,
+                statementId: null,
+                version: 0,
+              },
+            );
             await client.query(
               `INSERT INTO recurrence_occurrence (workspace_id, recurrence_id, transaction_id, occurrence_on) VALUES ($1, $2, $3, $4) ON CONFLICT (recurrence_id, occurrence_on) DO NOTHING`,
               [scope.workspaceId, recurrenceId, transactionId, date],
@@ -1052,8 +1355,25 @@ export class FinanceService {
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, row.id],
       );
-      return refreshed.rows[0] ? toTransactionView(refreshed.rows[0]) : toTransactionView(row);
+      const value = refreshed.rows[0] ?? row;
+      await this.recordTransactionAudit(
+        client,
+        scope,
+        row.id,
+        "transaction.created",
+        null,
+        transactionAuditSnapshot(value),
+      );
+      return toTransactionView(value);
     }
+    await this.recordTransactionAudit(
+      client,
+      scope,
+      row.id,
+      "transaction.created",
+      null,
+      transactionAuditSnapshot(row),
+    );
     return toTransactionView(row);
   }
 
@@ -1062,6 +1382,8 @@ export class FinanceService {
     scope: FinanceScope,
     row: TransactionRow,
     amount: bigint,
+    occurredOn = row.occurred_on,
+    eventType = "transaction.posted.v1",
   ) {
     const wallet = await this.ensureAccount(
       client,
@@ -1100,10 +1422,10 @@ export class FinanceService {
         client,
         scope,
         row.id,
-        "transaction.posted.v1",
+        eventType,
         row.currency_code,
         postings.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
-        row.occurred_on,
+        occurredOn,
       );
       await this.ensureStatementForPurchase(
         client,
@@ -1139,10 +1461,10 @@ export class FinanceService {
       client,
       scope,
       row.id,
-      "transaction.posted.v1",
+      eventType,
       row.currency_code,
       entries.map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
-      row.occurred_on,
+      occurredOn,
     );
   }
 
@@ -1256,14 +1578,26 @@ export class FinanceService {
     client: PgPoolClient,
     scope: FinanceScope,
     transactionId: string,
-    action: "transaction.reversed",
+    action: string,
+    before: Record<string, unknown> | null = null,
+    after: Record<string, unknown> | null = null,
   ): Promise<void> {
+    const redactedBefore = redactFinanceAuditSnapshot(before);
+    const redactedAfter = redactFinanceAuditSnapshot(after);
     await client.query(
       `INSERT INTO audit_event
          (category, action, actor_id, workspace_id, target_type, target_id,
-          origin, correlation_id, result)
-       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, 'api', $5, 'success')`,
-      [action, scope.actorId, scope.workspaceId, transactionId, scope.correlationId],
+          origin, correlation_id, result, before_redacted, after_redacted)
+       VALUES ('finance', $1, $2, $3, 'finance_transaction', $4, 'api', $5, 'success', $6::jsonb, $7::jsonb)`,
+      [
+        action,
+        scope.actorId,
+        scope.workspaceId,
+        transactionId,
+        scope.correlationId,
+        redactedBefore ? JSON.stringify(redactedBefore) : null,
+        redactedAfter ? JSON.stringify(redactedAfter) : null,
+      ],
     );
   }
 
@@ -1307,13 +1641,14 @@ export class FinanceService {
     key: string,
     expectedVersion: number | undefined,
     command: string,
+    request: unknown = { id, expectedVersion },
     callback: (client: PgPoolClient, row: TransactionRow) => Promise<TransactionView>,
   ): Promise<TransactionView> {
     const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/${command}/${id}`,
         key,
-        request: { id, expectedVersion },
+        request,
         execute: async () => {
           const current = await client.query<TransactionRow>(
             `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
@@ -1443,6 +1778,24 @@ function decodeTransactionCursor(cursor: string, secret: string): TransactionCur
   return [occurredOn, createdAt, id];
 }
 
+function decodeFinanceAuditCursor(cursor: string, secret: string): FinanceAuditCursorPosition {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== financeAuditCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 2 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [occurredAt, id] = position as [string, string];
+  if (Number.isNaN(Date.parse(occurredAt)) || !domainIdSchema.safeParse(id).success) {
+    throw new InvalidCursorError();
+  }
+  return [occurredAt, id];
+}
+
 async function setFinanceScope(client: PgPoolClient, scope: FinanceScope, applicationRole: string) {
   // Read-only helpers do not use withUnitOfWork, so they must apply the same
   // least-privilege role before setting the transaction-local RLS context.
@@ -1468,6 +1821,68 @@ function toTransactionView(row: TransactionRow): TransactionView {
     dueOn: row.due_on,
     postedOn: row.posted_on ? new Date(row.posted_on).toISOString() : null,
     description: row.description,
+    categoryId: row.category_id,
+    cardId: row.card_id,
+    statementId: row.statement_id,
+    version: row.version,
+  };
+}
+
+/**
+ * Audit snapshots are deliberately smaller than a transaction view. Keep the
+ * allowlist and value checks in one place so both writes and reads enforce the
+ * same privacy boundary.
+ */
+export function redactFinanceAuditSnapshot(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = {};
+  if (typeof source.kind === "string") snapshot.kind = source.kind;
+  if (typeof source.state === "string") snapshot.state = source.state;
+  for (const key of ["categoryId", "cardId", "statementId"] as const) {
+    if (source[key] === null || typeof source[key] === "string")
+      snapshot[key] = source[key] ?? null;
+  }
+  if (typeof source.version === "number" && Number.isInteger(source.version)) {
+    snapshot.version = source.version;
+  }
+  return snapshot;
+}
+
+function toFinanceAuditEventView(row: FinanceAuditRow): FinanceAuditEventView {
+  return {
+    id: row.id,
+    transactionId: row.transaction_id,
+    category: row.category,
+    action: row.action,
+    actorId: row.actor_id,
+    occurredAt: normalizePostgresTimestamp(row.occurred_at),
+    origin: row.origin,
+    correlationId: row.correlation_id,
+    result: row.result,
+    reason: row.reason,
+    before: redactFinanceAuditSnapshot(row.before_redacted),
+    after: redactFinanceAuditSnapshot(row.after_redacted),
+  };
+}
+
+/** PostgreSQL text preserves timestamptz fractional seconds; Date would truncate them. */
+function normalizePostgresTimestamp(value: string | Date): string {
+  if (value instanceof Date) return value.toISOString();
+  const normalized = value.trim().replace(" ", "T");
+  return /[+-]\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
+}
+
+/** Snapshot allowlist deliberately excludes amount, description and identity secrets. */
+function transactionAuditSnapshot(
+  row: Pick<
+    TransactionRow,
+    "kind" | "state" | "category_id" | "card_id" | "statement_id" | "version"
+  >,
+): Record<string, unknown> {
+  return {
+    kind: row.kind,
+    state: row.state,
     categoryId: row.category_id,
     cardId: row.card_id,
     statementId: row.statement_id,

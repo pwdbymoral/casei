@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { assertStatementCanReopen, FinanceService } from "../src/finance-service.js";
+import {
+  assertStatementCanReopen,
+  assertVariableRecurrenceSettlementAllowed,
+  FinanceService,
+} from "../src/finance-service.js";
 import { decodeCursor } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
@@ -31,6 +35,12 @@ describe("finance command guards", () => {
     expect(() => assertStatementCanReopen({ state: "open", paidMinor: 0n })).toThrow(
       "Somente uma fatura fechada",
     );
+  });
+
+  it("requires an effective amount only for variable recurrence settlement", () => {
+    expect(() => assertVariableRecurrenceSettlementAllowed(true, false)).toThrow("valor efetivo");
+    expect(() => assertVariableRecurrenceSettlementAllowed(true, true)).not.toThrow();
+    expect(() => assertVariableRecurrenceSettlementAllowed(false, false)).not.toThrow();
   });
 
   it("pages statement composition by a stable date, creation time, and id cursor", async () => {

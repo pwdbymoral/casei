@@ -27,6 +27,10 @@ usam Latin-1 detectável. BOM UTF-8 é aceito, UTF-16 e bytes NUL são rejeitado
 O parser implementa CSV RFC 4180 (aspas, aspas duplicadas, CRLF/LF e quebras de
 linha em campos), mantém linhas com largura incorreta para diagnóstico e nunca
 avalia conteúdo como fórmula ou código.
+Registros com campos vazios, inclusive `""` e linhas fisicamente vazias
+previstas pelo formato, são mantidos para que o preflight produza o resultado e
+o erro obrigatório daquela linha; uma quebra de linha final isolada não cria um
+registro adicional.
 
 O separador é detectado no cabeçalho entre vírgula, ponto e vírgula e TAB. Para
 um arquivo de uma coluna, `locale: "pt-BR"` escolhe ponto e vírgula como fallback
@@ -48,6 +52,12 @@ valida campos com parsers fornecidos pelo domínio e retorna cada linha como
 normalizados e número de origem. Fingerprints SHA-256 incluem domínio, espaço
 opcional, nomes e valores normalizados. Coincidências são somente sugestões:
 repetir um fingerprint não remove nem invalida automaticamente uma linha.
+A API de fingerprint aceita somente valores escalares (`string`, `number`,
+`bigint`, `boolean`, `null` ou `undefined`); objetos e arrays são rejeitados
+para evitar que a ordem ou a forma de uma estrutura aninhada altere o contrato
+sem uma canonicalização de domínio explícita. Um domínio que precise incluir
+dados compostos deve convertê-los primeiro para uma representação escalar
+canônica.
 
 ## Proteção de exportação
 

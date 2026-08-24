@@ -43,6 +43,41 @@
       "when": 1787533900000,
       "tag": "0005_audit_redacted_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787540000000,
+      "tag": "0006_stock_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787543600000,
+      "tag": "0007_stock_shopping",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787547200000,
+      "tag": "0008_stock_purge_cascade",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787550800000,
+      "tag": "0009_finance_audit_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787554400000,
+      "tag": "0010_plan_partial_settlement",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
 import {
   createTransactionSchema,
   payStatementSchema,
+  settleTransactionSchema,
   transactionListQuerySchema,
 } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
@@ -21,6 +22,19 @@ describe("finance contracts", () => {
       occurredOn: "2028-02-29",
       allowCredit: false,
     });
+  });
+
+  it("accepts an effective partial settlement and defaults the amount", () => {
+    expect(
+      settleTransactionSchema.parse({
+        amount: { currency: "BRL", minor: "250" },
+        occurredOn: "2028-02-29",
+      }),
+    ).toEqual({
+      amount: { currency: "BRL", minor: "250" },
+      occurredOn: "2028-02-29",
+    });
+    expect(settleTransactionSchema.parse({})).toEqual({});
   });
 
   it("leaves the transaction date to the workspace clock when omitted", () => {

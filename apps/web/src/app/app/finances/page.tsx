@@ -41,6 +41,7 @@ import {
   createWorkspaceGenerationGuard,
   type FinanceAdapter,
   FinanceAdapterError,
+  type FinanceAuditEvent,
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
   mergeTransactionPage,
@@ -71,6 +72,18 @@ function statementLabel(statement: Statement): string {
   return "Cancelada";
 }
 
+function auditActionLabel(action: string): string {
+  if (action === "transaction.created") return "Lançamento criado";
+  if (action === "transaction.posted") return "Lançamento realizado";
+  if (action === "transaction.reversed") return "Lançamento desfeito";
+  return action;
+}
+
+function auditSnapshotText(snapshot: Record<string, unknown> | null): string {
+  if (!snapshot) return "Nenhum snapshot";
+  return JSON.stringify(snapshot, null, 2) ?? "Nenhum snapshot";
+}
+
 type FinanceDashboardProps = {
   adapter?: FinanceAdapter;
   fixtureMode?: boolean;
@@ -96,6 +109,17 @@ function FinanceDashboard({
   const [transactionsNextCursor, setTransactionsNextCursor] = useState<string | null>(null);
   const [transactionsHasMore, setTransactionsHasMore] = useState(false);
   const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null);
+  const [transactionAudit, setTransactionAudit] = useState<FinanceAuditEvent[]>([]);
+  const [transactionAuditNextCursor, setTransactionAuditNextCursor] = useState<string | null>(null);
+  const [transactionAuditHasMore, setTransactionAuditHasMore] = useState(false);
+  const [loadingTransactionAudit, setLoadingTransactionAudit] = useState(false);
+  const [loadingMoreTransactionAudit, setLoadingMoreTransactionAudit] = useState(false);
+  const [transactionAuditError, setTransactionAuditError] = useState<string | null>(null);
+  const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
+  const [selectedAudit, setSelectedAudit] = useState<Awaited<
+    ReturnType<FinanceAdapter["getTransactionAudit"]>
+  > | null>(null);
+  const [loadingAuditDetail, setLoadingAuditDetail] = useState(false);
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
@@ -124,6 +148,8 @@ function FinanceDashboard({
     statement: Statement;
   } | null>(null);
   const [statementItemsRequest] = useState(createRequestGuard);
+  const [transactionAuditRequest] = useState(createRequestGuard);
+  const [transactionAuditDetailRequest] = useState(createRequestGuard);
   const [timelineRequest] = useState(createRequestGuard);
   const [workspaceRequests] = useState(() => createWorkspaceGenerationGuard(workspaceId));
   const [timelineSearch, setTimelineSearch] = useState("");
@@ -163,6 +189,8 @@ function FinanceDashboard({
     workspaceRequests.switchWorkspace(workspaceId);
     timelineRequest.invalidate();
     statementItemsRequest.invalidate();
+    transactionAuditRequest.invalidate();
+    transactionAuditDetailRequest.invalidate();
     // Clear every workspace-scoped value before the next workspace can render. The
     // generation guard prevents late responses from repopulating this empty state.
     setDataWorkspaceId(workspaceId);
@@ -175,6 +203,15 @@ function FinanceDashboard({
     setError(null);
     setNotice(null);
     setViewingTransaction(null);
+    setTransactionAudit([]);
+    setTransactionAuditNextCursor(null);
+    setTransactionAuditHasMore(false);
+    setLoadingTransactionAudit(false);
+    setLoadingMoreTransactionAudit(false);
+    setTransactionAuditError(null);
+    setSelectedAuditId(null);
+    setSelectedAudit(null);
+    setLoadingAuditDetail(false);
     setViewingStatement(null);
     setStatementItems([]);
     setStatementItemsNextCursor(null);
@@ -189,7 +226,14 @@ function FinanceDashboard({
     setBusyStatementId(null);
     setPendingStatementAction(null);
     setUndoableTransaction(null);
-  }, [statementItemsRequest, timelineRequest, workspaceId, workspaceRequests]);
+  }, [
+    statementItemsRequest,
+    timelineRequest,
+    transactionAuditDetailRequest,
+    transactionAuditRequest,
+    workspaceId,
+    workspaceRequests,
+  ]);
 
   // Effects run after a render. Until the switch effect above has cleared the
   // old snapshot, keep it out of the new workspace's visible tree.
@@ -201,6 +245,9 @@ function FinanceDashboard({
   const visibleNotice = workspaceDataReady ? notice : null;
   const visibleStatus = workspaceDataReady ? status : "loading";
   const visibleViewingTransaction = workspaceDataReady ? viewingTransaction : null;
+  const visibleTransactionAudit = workspaceDataReady ? transactionAudit : [];
+  const visibleTransactionAuditError = workspaceDataReady ? transactionAuditError : null;
+  const visibleSelectedAudit = workspaceDataReady ? selectedAudit : null;
   const visibleViewingStatement = workspaceDataReady ? viewingStatement : null;
   const visiblePendingStatementAction = workspaceDataReady ? pendingStatementAction : null;
 
@@ -506,6 +553,133 @@ function FinanceDashboard({
     void loadStatementItems(viewingStatementId, undefined, false);
     return () => statementItemsRequest.invalidate();
   }, [loadStatementItems, statementItemsRequest, viewingStatementId]);
+
+  const loadTransactionAudit = useCallback(
+    async (transactionId: string, cursor: string | undefined, append: boolean) => {
+      const request = transactionAuditRequest.begin();
+      const workspaceRequest = workspaceRequests.begin(workspaceId);
+      if (append) {
+        setLoadingMoreTransactionAudit(true);
+      } else {
+        setTransactionAudit([]);
+        setTransactionAuditNextCursor(null);
+        setTransactionAuditHasMore(false);
+        setSelectedAuditId(null);
+        setSelectedAudit(null);
+        setLoadingTransactionAudit(true);
+      }
+      setTransactionAuditError(null);
+      try {
+        const page = await adapter.listTransactionAudit(workspaceId, transactionId, {
+          cursor,
+          limit: 50,
+        });
+        if (
+          !transactionAuditRequest.isCurrent(request) ||
+          !workspaceRequests.isCurrent(workspaceRequest)
+        )
+          return;
+        setTransactionAudit((current) => (append ? [...current, ...page.items] : page.items));
+        setTransactionAuditNextCursor(page.nextCursor);
+        setTransactionAuditHasMore(page.hasMore);
+        if (!append) setSelectedAuditId(page.items[0]?.id ?? null);
+      } catch (cause) {
+        if (
+          !transactionAuditRequest.isCurrent(request) ||
+          !workspaceRequests.isCurrent(workspaceRequest)
+        )
+          return;
+        setTransactionAuditError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar o histórico.",
+        );
+      } finally {
+        if (
+          transactionAuditRequest.isCurrent(request) &&
+          workspaceRequests.isCurrent(workspaceRequest)
+        ) {
+          if (append) setLoadingMoreTransactionAudit(false);
+          else setLoadingTransactionAudit(false);
+        }
+      }
+    },
+    [adapter, transactionAuditRequest, workspaceId, workspaceRequests],
+  );
+
+  const viewingTransactionId = visibleViewingTransaction?.id;
+
+  useEffect(() => {
+    if (!viewingTransactionId) {
+      transactionAuditRequest.invalidate();
+      transactionAuditDetailRequest.invalidate();
+      setTransactionAudit([]);
+      setTransactionAuditNextCursor(null);
+      setTransactionAuditHasMore(false);
+      setLoadingTransactionAudit(false);
+      setLoadingMoreTransactionAudit(false);
+      setTransactionAuditError(null);
+      setSelectedAuditId(null);
+      setSelectedAudit(null);
+      setLoadingAuditDetail(false);
+      return;
+    }
+    void loadTransactionAudit(viewingTransactionId, undefined, false);
+    return () => {
+      transactionAuditRequest.invalidate();
+      transactionAuditDetailRequest.invalidate();
+    };
+  }, [
+    loadTransactionAudit,
+    transactionAuditDetailRequest,
+    transactionAuditRequest,
+    viewingTransactionId,
+  ]);
+
+  useEffect(() => {
+    if (!viewingTransactionId || !selectedAuditId) {
+      transactionAuditDetailRequest.invalidate();
+      setSelectedAudit(null);
+      setLoadingAuditDetail(false);
+      return;
+    }
+    const request = transactionAuditDetailRequest.begin();
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    setLoadingAuditDetail(true);
+    void adapter
+      .getTransactionAudit(workspaceId, viewingTransactionId, selectedAuditId)
+      .then((detail) => {
+        if (
+          transactionAuditDetailRequest.isCurrent(request) &&
+          workspaceRequests.isCurrent(workspaceRequest)
+        )
+          setSelectedAudit(detail);
+      })
+      .catch((cause: unknown) => {
+        if (
+          transactionAuditDetailRequest.isCurrent(request) &&
+          workspaceRequests.isCurrent(workspaceRequest)
+        ) {
+          setSelectedAudit(null);
+          setTransactionAuditError(
+            cause instanceof Error ? cause.message : "Não foi possível carregar o evento.",
+          );
+        }
+      })
+      .finally(() => {
+        if (
+          transactionAuditDetailRequest.isCurrent(request) &&
+          workspaceRequests.isCurrent(workspaceRequest)
+        )
+          setLoadingAuditDetail(false);
+      });
+    return () => transactionAuditDetailRequest.invalidate();
+  }, [
+    adapter,
+    selectedAuditId,
+    transactionAuditDetailRequest,
+    viewingTransactionId,
+    workspaceId,
+    workspaceRequests,
+  ]);
 
   async function payStatement(statement: Statement) {
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
@@ -1059,11 +1233,11 @@ function FinanceDashboard({
           if (!open) setViewingTransaction(null);
         }}
       >
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Detalhes do lançamento</DialogTitle>
             <DialogDescription>
-              Revise a origem, o estado e a versão antes de corrigir este registro.
+              Revise a origem, o estado, a versão e o histórico de alterações deste registro.
             </DialogDescription>
           </DialogHeader>
           {visibleViewingTransaction ? (
@@ -1110,6 +1284,131 @@ function FinanceDashboard({
               </div>
             </dl>
           ) : null}
+          <section aria-labelledby="transaction-audit-title" className="grid gap-3">
+            <div>
+              <h3 id="transaction-audit-title" className="font-semibold">
+                Histórico de auditoria
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Eventos preservados com snapshots sanitizados e consequências relacionadas.
+              </p>
+            </div>
+            {loadingTransactionAudit ? (
+              <p role="status" className="text-sm text-muted-foreground">
+                Carregando histórico…
+              </p>
+            ) : visibleTransactionAuditError ? (
+              <Alert variant="destructive">
+                <AlertTitle>Não foi possível carregar o histórico</AlertTitle>
+                <AlertDescription>{visibleTransactionAuditError}</AlertDescription>
+              </Alert>
+            ) : visibleTransactionAudit.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                Nenhum evento de auditoria registrado para este lançamento.
+              </p>
+            ) : (
+              <>
+                <ol aria-label="Eventos do histórico de auditoria" className="grid gap-2">
+                  {visibleTransactionAudit.map((event) => (
+                    <li key={event.id}>
+                      <button
+                        type="button"
+                        className="w-full rounded-lg border p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-pressed={selectedAuditId === event.id}
+                        onClick={() => setSelectedAuditId(event.id)}
+                      >
+                        <span className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-medium">{auditActionLabel(event.action)}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {new Date(event.occurredAt).toLocaleString("pt-BR")}
+                          </span>
+                        </span>
+                        <span className="mt-1 block text-sm text-muted-foreground">
+                          Origem: {event.origin} · Resultado: {event.result}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+                {transactionAuditHasMore ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      if (visibleViewingTransaction && transactionAuditNextCursor) {
+                        void loadTransactionAudit(
+                          visibleViewingTransaction.id,
+                          transactionAuditNextCursor,
+                          true,
+                        );
+                      }
+                    }}
+                    disabled={loadingMoreTransactionAudit || !transactionAuditNextCursor}
+                  >
+                    {loadingMoreTransactionAudit ? "Carregando…" : "Carregar mais eventos"}
+                  </Button>
+                ) : null}
+              </>
+            )}
+            {loadingAuditDetail ? (
+              <p role="status" className="text-sm text-muted-foreground">
+                Carregando detalhes do evento…
+              </p>
+            ) : visibleSelectedAudit ? (
+              <div className="grid gap-3 rounded-lg bg-muted/30 p-3 text-sm">
+                <div className="grid gap-1 sm:grid-cols-2">
+                  <p>
+                    <span className="text-muted-foreground">Ação: </span>
+                    <span className="font-medium">
+                      {auditActionLabel(visibleSelectedAudit.action)}
+                    </span>
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">Autor: </span>
+                    <code className="break-all">{visibleSelectedAudit.actorId ?? "sistema"}</code>
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">Correlação: </span>
+                    <code className="break-all">{visibleSelectedAudit.correlationId}</code>
+                  </p>
+                  {visibleSelectedAudit.reason ? (
+                    <p>
+                      <span className="text-muted-foreground">Motivo: </span>
+                      {visibleSelectedAudit.reason}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <h4 className="font-medium">Antes (sanitizado)</h4>
+                    <pre className="mt-1 max-h-36 overflow-auto rounded border bg-background p-2 text-xs">
+                      {auditSnapshotText(visibleSelectedAudit.before)}
+                    </pre>
+                  </div>
+                  <div>
+                    <h4 className="font-medium">Depois (sanitizado)</h4>
+                    <pre className="mt-1 max-h-36 overflow-auto rounded border bg-background p-2 text-xs">
+                      {auditSnapshotText(visibleSelectedAudit.after)}
+                    </pre>
+                  </div>
+                </div>
+                <div>
+                  <h4 className="font-medium">Consequências relacionadas</h4>
+                  {visibleSelectedAudit.consequences.ledgerEvents.length === 0 ? (
+                    <p className="mt-1 text-muted-foreground">Nenhuma consequência publicada.</p>
+                  ) : (
+                    <ul className="mt-1 grid gap-1 text-muted-foreground">
+                      {visibleSelectedAudit.consequences.ledgerEvents.map((event) => (
+                        <li key={event.id}>
+                          {event.eventType} · {event.status} · {event.occurredOn}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </section>
           <DialogFooter>
             <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
           </DialogFooter>
