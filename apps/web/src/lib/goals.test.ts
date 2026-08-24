@@ -111,4 +111,22 @@ describe("goals adapter", () => {
       ]),
     );
   });
+
+  it("requires explicit fixture confirmation for an uncovered allocation", async () => {
+    const adapter = createFixtureGoalsAdapter();
+    const created = await adapter.createGoal("workspace-uncovered", {
+      name: "Entrada",
+      target: { currency: "BRL", minor: "200000" },
+    });
+    await expect(
+      adapter.allocate("workspace-uncovered", created, {
+        amount: { currency: "BRL", minor: "110000" },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    const mutation = await adapter.allocate("workspace-uncovered", created, {
+      amount: { currency: "BRL", minor: "110000" },
+      allowUncovered: true,
+    });
+    expect(mutation.goal.uncovered.minor).toBe("10000");
+  });
 });

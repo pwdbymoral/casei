@@ -245,7 +245,10 @@ function fixtureGoalId(workspaceId: string, index: number): string {
 
 function fixtureContributionPeriods(deadline: string | null): number | null {
   if (!deadline) return null;
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const today = `${now.getFullYear().toString().padStart(4, "0")}-${(now.getMonth() + 1)
+    .toString()
+    .padStart(2, "0")}-${now.getDate().toString().padStart(2, "0")}`;
   if (deadline < today) return 0;
   const [todayYear, todayMonth, todayDay] = today.split("-").map(Number);
   const [deadlineYear, deadlineMonth, deadlineDay] = deadline.split("-").map(Number);
@@ -296,6 +299,7 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
     ],
   ]);
   const movements = new Map<string, GoalMovement[]>();
+  const fixtureWalletBalance = BigInt(100000);
   const list = (workspaceId: string) => {
     const existing = goalsByWorkspace.get(workspaceId);
     if (existing) return existing;
@@ -316,12 +320,28 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
     goals[index] = next;
     return { ...next };
   };
+  const refreshCoverage = (workspaceId: string) => {
+    let cumulative = BigInt(0);
+    for (const item of list(workspaceId)) {
+      const before = cumulative;
+      cumulative += BigInt(item.reserved.minor);
+      const uncoveredBefore =
+        before > fixtureWalletBalance ? before - fixtureWalletBalance : BigInt(0);
+      const uncoveredAfter =
+        cumulative > fixtureWalletBalance ? cumulative - fixtureWalletBalance : BigInt(0);
+      item.uncovered = {
+        ...item.uncovered,
+        minor: (uncoveredAfter - uncoveredBefore).toString(),
+      };
+    }
+  };
   const mutateAmount = (
     workspaceId: string,
     goal: Goal,
     amount: GoalMoney,
     kind: GoalMovement["kind"],
     note?: string | null,
+    allowUncovered = false,
   ): GoalMutation => {
     if (amount.currency !== goal.target.currency)
       throw new GoalsAdapterError("A moeda não corresponde à do espaço.", 422);
@@ -330,6 +350,14 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
     if (delta <= BigInt(0) || ((kind === "release" || kind === "spend") && delta > current))
       throw new GoalsAdapterError("O valor não pode ser aplicado à reserva.", 409);
     const reserved = kind === "allocate" ? current + delta : current - delta;
+    const totalBefore = list(workspaceId).reduce(
+      (total, item) => total + BigInt(item.reserved.minor),
+      BigInt(0),
+    );
+    const totalAfter = totalBefore - current + reserved;
+    if (kind === "allocate" && totalAfter > fixtureWalletBalance && !allowUncovered) {
+      throw new GoalsAdapterError("A reserva excede o saldo disponível do fixture.", 409);
+    }
     const planning = fixturePlanning(goal.target.minor, reserved.toString(), goal.deadline);
     const next: Goal = {
       ...goal,
@@ -348,6 +376,8 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
       version: goal.version + 1,
     };
     update(workspaceId, goal, next);
+    refreshCoverage(workspaceId);
+    const stored = list(workspaceId).find((item) => item.id === goal.id) ?? next;
     const movement: GoalMovement = {
       id: `${goal.id}-movement-${(movements.get(goal.id)?.length ?? 0) + 1}`,
       goalId: goal.id,
@@ -359,7 +389,7 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
       note: note ?? null,
     };
     movements.set(goal.id, [movement, ...(movements.get(goal.id) ?? [])]);
-    return { goal: next, replayed: false };
+    return { goal: { ...stored }, replayed: false };
   };
   return {
     async listGoals(workspaceId) {
@@ -398,13 +428,14 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
         version: 0,
       };
       list(workspaceId).push(goal);
+      refreshCoverage(workspaceId);
       return { ...goal };
     },
     async updateGoal(workspaceId, goal, input) {
       const target = input.target ?? goal.target;
       const deadline = input.deadline !== undefined ? (input.deadline ?? null) : goal.deadline;
       const planning = fixturePlanning(target.minor, goal.reserved.minor, deadline);
-      return update(workspaceId, goal, {
+      const next = update(workspaceId, goal, {
         ...goal,
         ...input,
         target,
@@ -422,9 +453,18 @@ export function createFixtureGoalsAdapter(): GoalsAdapter {
               : goal.status,
         version: goal.version + 1,
       });
+      refreshCoverage(workspaceId);
+      return { ...(list(workspaceId).find((item) => item.id === goal.id) ?? next) };
     },
     async allocate(workspaceId, goal, input) {
-      return mutateAmount(workspaceId, goal, input.amount, "allocate", input.note);
+      return mutateAmount(
+        workspaceId,
+        goal,
+        input.amount,
+        "allocate",
+        input.note,
+        input.allowUncovered,
+      );
     },
     async release(workspaceId, goal, input) {
       return mutateAmount(workspaceId, goal, input.amount, "release", input.note);
