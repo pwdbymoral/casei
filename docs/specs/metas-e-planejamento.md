@@ -18,6 +18,12 @@ Uma meta possui nome, valor-alvo maior que zero, prazo opcional, prioridade, est
 - Gastar a reserva cria ou vincula uma despesa/transferência real e libera o valor reservado correspondente atomicamente.
 - Excluir meta com histórico não apaga contribuições; cancela e preserva o histórico.
 
+No backend, `allocate`, `release` e `spend` são movimentos append-only. Reservar e retirar exigem
+versão e idempotência; reservar acima do saldo calculado exige `allowUncovered: true` e expõe o
+valor sem cobertura. Gastar exige reserva suficiente e publica uma despesa `wallet` vinculada à
+meta junto com o movimento `spend`, na mesma transação. O saldo reservado é sempre reconstruído
+pela soma dos movimentos, nunca por um cache mutável.
+
 ## Ritmo e sugestão de contribuição
 
 Quando há prazo, o sistema calcula contribuição periódica necessária usando valor restante e períodos restantes. O cálculo é determinístico, mostra fórmula e nunca cria transação automaticamente. Prazo vencido ou valor impossível produz orientação, não erro genérico.
@@ -68,8 +74,8 @@ Cards sem dados usam empty state acionável. O usuário pode ocultar um card nã
 
 ## Critérios de aceitação
 
-- [ ] Reservar e retirar valores não altera saldo nem resultado financeiro.
-- [ ] Gastar uma reserva vincula despesa e liberação sem dupla contagem.
+- [x] Reservar e retirar valores não altera saldo nem resultado financeiro (backend/subledger).
+- [x] Gastar uma reserva vincula despesa e liberação sem dupla contagem (backend/subledger).
 - [ ] Projeção de 12 meses reconcilia cada ponto com seus eventos de origem.
 - [ ] Valor seguro trata faturas, atrasos, reservas, margem, déficit e dados desconhecidos conforme a fórmula.
 - [ ] Nível de confiança muda por regras verificáveis e sua causa fica visível.

@@ -679,6 +679,7 @@ export const financeTransaction = pgTable(
     categoryId: uuid("category_id"),
     cardId: uuid("card_id"),
     statementId: uuid("statement_id"),
+    goalId: uuid("goal_id"),
     recurrenceId: uuid("recurrence_id"),
     installmentPlanId: uuid("installment_plan_id"),
     installmentNumber: integer("installment_number"),
@@ -702,6 +703,93 @@ export const financeTransaction = pgTable(
     ),
     check("finance_transaction_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
     uniqueIndex("finance_transaction_workspace_id_id_unique").on(table.workspaceId, table.id),
+  ],
+);
+
+export const goal = pgTable(
+  "goal",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    targetMinor: bigint("target_minor", { mode: "bigint" }).notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    deadline: date("deadline"),
+    priority: text("priority").notNull().default("normal"),
+    status: text("status").notNull().default("active"),
+    note: text("note"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("goal_workspace_id_id_unique").on(table.workspaceId, table.id),
+    index("goal_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.deadline,
+      table.id,
+    ),
+    check("goal_name_check", sql`length(trim(${table.name})) > 0`),
+    check("goal_target_check", sql`${table.targetMinor} > 0`),
+    check("goal_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    check("goal_priority_check", sql`${table.priority} in ('low', 'normal', 'high')`),
+    check(
+      "goal_status_check",
+      sql`${table.status} in ('active', 'completed', 'paused', 'canceled')`,
+    ),
+    check("goal_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
+export const goalReservationMovement = pgTable(
+  "goal_reservation_movement",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id").notNull(),
+    goalId: uuid("goal_id").notNull(),
+    kind: text("kind").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    transactionId: uuid("transaction_id"),
+    occurredOn: date("occurred_on").notNull(),
+    note: text("note"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.goalId],
+      foreignColumns: [goal.workspaceId, goal.id],
+      name: "goal_reservation_movement_goal_scope_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.transactionId],
+      foreignColumns: [financeTransaction.workspaceId, financeTransaction.id],
+      name: "goal_reservation_movement_transaction_scope_fk",
+    }).onDelete("restrict"),
+    uniqueIndex("goal_reservation_movement_workspace_id_id_unique").on(table.workspaceId, table.id),
+    index("goal_reservation_movement_goal_occurred_idx").on(
+      table.workspaceId,
+      table.goalId,
+      table.occurredOn,
+      table.createdAt,
+      table.id,
+    ),
+    uniqueIndex("goal_reservation_movement_spend_transaction_unique")
+      .on(table.transactionId)
+      .where(sql`${table.kind} = 'spend'`),
+    check(
+      "goal_reservation_movement_kind_check",
+      sql`${table.kind} in ('allocate', 'release', 'spend')`,
+    ),
+    check("goal_reservation_movement_amount_check", sql`${table.amountMinor} > 0`),
+    check("goal_reservation_movement_currency_check", sql`${table.currencyCode} ~ '^[A-Z]{3}$'`),
+    check(
+      "goal_reservation_movement_transaction_check",
+      sql`(${table.kind} = 'spend' and ${table.transactionId} is not null) or (${table.kind} <> 'spend' and ${table.transactionId} is null)`,
+    ),
   ],
 );
 
@@ -896,6 +984,8 @@ export const schema = {
   ledgerEvent,
   ledgerEntry,
   financeTransaction,
+  goal,
+  goalReservationMovement,
   recurrenceRule,
   recurrenceOccurrence,
   installmentPlan,

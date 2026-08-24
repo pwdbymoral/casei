@@ -129,8 +129,8 @@ Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam ser
 - [ ] **LOAN-001 Empréstimo concedido/recebido:** contrato, contraparte, principal e eventos ledger.
 - [ ] **LOAN-002 Pagamentos:** parcial, agenda opcional, separação de principal/juros/tarifas, baixa/perdão.
 - [ ] **LOAN-003 UI empréstimos:** resumo de saldo, cronograma, registrar pagamento, histórico e previsão de quitação.
-- [ ] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura.
-- [ ] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total.
+- [x] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura (backend/API).
+- [x] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total (backend/API).
 - [ ] **GOAL-003 UI metas:** captura simples, progresso, ritmo, reserva descoberta e simulação de contribuição.
 
 **Gate 5:** empréstimo nunca vira renda/despesa de principal; meta nunca altera saldo por reservar; gastos vinculados reconciliam atomicamente.

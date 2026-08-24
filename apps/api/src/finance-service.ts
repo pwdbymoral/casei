@@ -1697,7 +1697,7 @@ export class FinanceService {
   }
 }
 
-function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {
+export function assertFinanceCapability(scope: FinanceScope, capability: "finance.write"): void {
   if (capability === "finance.write" && scope.role === "viewer") {
     throw new FinancePermissionError();
   }
