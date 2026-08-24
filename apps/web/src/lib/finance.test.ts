@@ -5,13 +5,18 @@ import {
   clearTransactionQueryParams,
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
+  createQuickCaptureTransactionInput,
   createRequestGuard,
+  createWorkspaceGenerationGuard,
   FinanceAdapterError,
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
   mergeTransactionPage,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
+  transactionAmountPrefix,
+  transactionCardIdForKind,
+  transactionKindLabel,
   transactionQueryFromSearchParams,
   unauthenticatedFinanceAdapter,
 } from "./finance";
@@ -239,6 +244,70 @@ describe("finance adapter", () => {
     ).resolves.toMatchObject({ id: created.id, state: "canceled" });
   });
 
+  it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";
+    const secondWorkspace = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const input = createQuickCaptureTransactionInput({
+      kind: "income",
+      amountMinor: "1200",
+      currency: "USD",
+      planned: false,
+      description: "Freela",
+      cardId: "",
+    });
+
+    const created = await adapter.createTransaction(firstWorkspace, input, "fixture-command-1");
+    const replay = await adapter.createTransaction(firstWorkspace, input, "fixture-command-1");
+    expect(replay).toEqual(created);
+    await expect(
+      adapter.createTransaction(
+        firstWorkspace,
+        { ...input, amount: { ...input.amount, minor: "1300" } },
+        "fixture-command-1",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(adapter.listTransactions(firstWorkspace)).resolves.toMatchObject({
+      items: [expect.objectContaining({ workspaceId: firstWorkspace })],
+    });
+    await expect(adapter.listTransactions(secondWorkspace)).resolves.toMatchObject({
+      items: [],
+    });
+  });
+
+  it("builds USD capture input and never carries a card into income", () => {
+    expect(
+      createQuickCaptureTransactionInput({
+        kind: "income",
+        amountMinor: "1200",
+        currency: "USD",
+        planned: false,
+        description: "Freela",
+        cardId: "card-1",
+      }),
+    ).toEqual({
+      kind: "income",
+      amount: { currency: "USD", minor: "1200" },
+      state: "posted",
+      description: "Freela",
+      cardId: null,
+    });
+    expect(transactionCardIdForKind("income", "card-1")).toBeNull();
+    expect(transactionCardIdForKind("expense", "card-1")).toBe("card-1");
+  });
+
+  it("labels every timeline kind and uses a non-expense sign for transfers and adjustments", () => {
+    expect(transactionKindLabel({ kind: "income", cardId: null })).toBe("Receita");
+    expect(transactionKindLabel({ kind: "expense", cardId: null })).toBe("Despesa");
+    expect(transactionKindLabel({ kind: "expense", cardId: "card-1" })).toBe("Compra no cartão");
+    expect(transactionKindLabel({ kind: "transfer", cardId: null })).toBe("Transferência");
+    expect(transactionKindLabel({ kind: "adjustment", cardId: null })).toBe("Ajuste");
+    expect(transactionAmountPrefix("income")).toBe("+");
+    expect(transactionAmountPrefix("expense")).toBe("−");
+    expect(transactionAmountPrefix("transfer")).toBe("↔");
+    expect(transactionAmountPrefix("adjustment")).toBe("±");
+  });
+
   it("keeps statement pagination metadata and loads a second page over fifty items", async () => {
     const adapter = createFixtureFinanceAdapter();
     const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
@@ -385,6 +454,20 @@ describe("finance adapter", () => {
     await expect(firstAccepted).resolves.toBe(false);
     resolveSecond();
     await expect(secondAccepted).resolves.toBe(true);
+  });
+
+  it("rejects a deferred create result after the workspace changes", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    let resolveCreate!: () => void;
+    const create = new Promise<void>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const request = guard.begin("workspace-a");
+
+    guard.switchWorkspace("workspace-b");
+    resolveCreate();
+
+    await expect(create.then(() => guard.isCurrent(request))).resolves.toBe(false);
   });
 
   it("does not give canceled composition items a misleading financial sign", () => {

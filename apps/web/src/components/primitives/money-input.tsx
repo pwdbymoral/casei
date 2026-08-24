@@ -12,7 +12,7 @@ type MoneyInputProps = {
   label?: string;
   description?: string;
   error?: string;
-  currency?: string;
+  currency: string;
   locale?: string;
   id?: string;
   disabled?: boolean;
@@ -25,7 +25,7 @@ export function MoneyInput({
   label = "Valor",
   description,
   error,
-  currency = "BRL",
+  currency,
   locale = "pt-BR",
   id: providedId,
   disabled,

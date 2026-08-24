@@ -24,12 +24,17 @@ export const workspaceMembershipSchema = z.object({
 
 export type WorkspaceMembership = z.infer<typeof workspaceMembershipSchema>;
 
+export const currencyCodeSchema = z
+  .string()
+  .regex(/^[A-Z]{3}$/, "currency must be an ISO 4217 code");
+
 export const workspaceSummarySchema = z.object({
   id: workspaceIdSchema,
   name: z.string().min(1).max(200),
   role: workspaceRoleSchema,
   locale: z.literal("pt-BR"),
   timeZone: z.string().min(1).max(64),
+  currency: currencyCodeSchema,
   status: z.enum(["active", "deletion_pending", "deactivated"]).default("active"),
   version: z.number().int().nonnegative().default(0),
 });

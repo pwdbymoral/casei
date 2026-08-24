@@ -36,7 +36,9 @@ import {
   type CreditCard,
   canWriteFinance,
   clearTransactionQueryParams,
+  createQuickCaptureTransactionInput,
   createRequestGuard,
+  createWorkspaceGenerationGuard,
   type FinanceAdapter,
   FinanceAdapterError,
   financeAdapterForEnvironment,
@@ -47,6 +49,8 @@ import {
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
+  transactionAmountPrefix,
+  transactionKindLabel,
   transactionQueryFromSearchParams,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
@@ -54,13 +58,9 @@ import type { WorkspaceRole } from "@/lib/workspaces";
 
 function transactionLabel(transaction: Transaction): string {
   if (transaction.description.trim()) return transaction.description;
-  return transaction.kind === "income" ? "Receita sem descrição" : "Despesa sem descrição";
-}
-
-function transactionKindLabel(transaction: Transaction): string {
-  if (transaction.kind === "income") return "Receita";
-  if (transaction.cardId) return "Compra no cartão";
-  return "Despesa";
+  if (transaction.kind === "income") return "Receita sem descrição";
+  if (transaction.kind === "expense") return "Despesa sem descrição";
+  return transaction.kind === "transfer" ? "Transferência sem descrição" : "Ajuste sem descrição";
 }
 
 function statementLabel(statement: Statement): string {
@@ -76,7 +76,7 @@ type FinanceDashboardProps = {
   fixtureMode?: boolean;
   workspaceId: string;
   role: WorkspaceRole;
-  currency?: string;
+  currency: string;
 };
 
 function FinanceDashboard({
@@ -84,7 +84,7 @@ function FinanceDashboard({
   fixtureMode = false,
   workspaceId,
   role,
-  currency = "BRL",
+  currency,
 }: FinanceDashboardProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -124,6 +124,7 @@ function FinanceDashboard({
   } | null>(null);
   const [statementItemsRequest] = useState(createRequestGuard);
   const [timelineRequest] = useState(createRequestGuard);
+  const [workspaceRequests] = useState(() => createWorkspaceGenerationGuard(workspaceId));
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineFrom, setTimelineFrom] = useState("");
   const [timelineTo, setTimelineTo] = useState("");
@@ -157,6 +158,19 @@ function FinanceDashboard({
   }, [undoableTransaction]);
 
   useEffect(() => {
+    workspaceRequests.switchWorkspace(workspaceId);
+    timelineRequest.invalidate();
+    statementItemsRequest.invalidate();
+    transactionCommandKey.current = null;
+    setSaving(false);
+    setUndoing(false);
+    setSavingCard(false);
+    setBusyStatementId(null);
+    setPendingStatementAction(null);
+    setUndoableTransaction(null);
+  }, [statementItemsRequest, timelineRequest, workspaceId, workspaceRequests]);
+
+  useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
     transactionCommandWorkspace.current = workspaceId;
     transactionCommandKey.current = null;
@@ -183,6 +197,7 @@ function FinanceDashboard({
   const load = useCallback(
     async (append = false) => {
       const request = timelineRequest.begin();
+      const workspaceRequest = workspaceRequests.begin(workspaceId);
       setStatus("loading");
       setError(null);
       setViewingStatement(null);
@@ -195,7 +210,8 @@ function FinanceDashboard({
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
         ]);
-        if (!timelineRequest.isCurrent(request)) return;
+        if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
+          return;
         setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
         setTransactionsNextCursor(nextTransactions.nextCursor);
         setTransactionsHasMore(nextTransactions.hasMore);
@@ -203,14 +219,15 @@ function FinanceDashboard({
         setStatements(nextStatements);
         setStatus("success");
       } catch (cause) {
-        if (!timelineRequest.isCurrent(request)) return;
+        if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
+          return;
         setStatus("error");
         setError(
           cause instanceof Error ? cause.message : "Não foi possível carregar suas finanças.",
         );
       }
     },
-    [adapter, timelineQuery, timelineRequest, workspaceId],
+    [adapter, timelineQuery, timelineRequest, workspaceId, workspaceRequests],
   );
 
   useEffect(() => {
@@ -222,7 +239,9 @@ function FinanceDashboard({
       transactions.reduce((total, transaction) => {
         if (transaction.state !== "posted" || transaction.cardId) return total;
         const value = BigInt(transaction.amount.minor);
-        return total + (transaction.kind === "income" ? value : -value);
+        if (transaction.kind === "income") return total + value;
+        if (transaction.kind === "expense") return total - value;
+        return total;
       }, BigInt(0)),
     [transactions],
   );
@@ -236,20 +255,23 @@ function FinanceDashboard({
     setSaving(true);
     setError(null);
     setNotice(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     const commandKey = transactionCommandKey.current ?? `web-${crypto.randomUUID()}`;
     transactionCommandKey.current = commandKey;
     try {
       const created = await adapter.createTransaction(
         workspaceId,
-        {
+        createQuickCaptureTransactionInput({
           kind: transactionType,
-          amount: { currency, minor: amount },
-          state: planned ? "planned" : "posted",
+          amountMinor: amount,
+          currency,
+          planned,
           description,
-          cardId: transactionCardId || null,
-        },
+          cardId: transactionCardId,
+        }),
         commandKey,
       );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       transactionCommandKey.current = null;
       setAmount("0");
       setDescription("");
@@ -257,13 +279,15 @@ function FinanceDashboard({
       setPlanned(false);
       if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
       else await load(false);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice(planned ? "Compromisso salvo." : "Lançamento salvo.");
       setUndoableTransaction(planned ? null : created);
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       if (!shouldRetryIdempotentCommand(cause)) transactionCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível salvar o lançamento.");
     } finally {
-      setSaving(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSaving(false);
     }
   }
 
@@ -271,16 +295,20 @@ function FinanceDashboard({
     if (!undoableTransaction || undoing) return;
     setUndoing(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       await adapter.reverseTransaction(workspaceId, undoableTransaction);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setUndoableTransaction(null);
       if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
       else await load(false);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice("Lançamento desfeito.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível desfazer o lançamento.");
     } finally {
-      setUndoing(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setUndoing(false);
     }
   }
 
@@ -311,20 +339,23 @@ function FinanceDashboard({
     if (savingCard || !cardName.trim()) return;
     setSavingCard(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const card = await adapter.createCard(workspaceId, {
         name: cardName.trim(),
         closingDay: Number(closingDay),
         dueDay: Number(dueDay),
       });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setCards((current) => [...current, card]);
       setCardName("");
       setShowCardForm(false);
       setNotice("Cartão cadastrado.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível cadastrar o cartão.");
     } finally {
-      setSavingCard(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCard(false);
     }
   }
 
@@ -332,11 +363,13 @@ function FinanceDashboard({
     if (busyStatementId) return;
     setBusyStatementId(statement.id);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const updated =
         type === "close"
           ? await adapter.closeStatement(workspaceId, statement)
           : await adapter.reopenStatement(workspaceId, statement);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setStatements((current) =>
         current.map((value) => (value.id === updated.id ? updated : value)),
       );
@@ -348,20 +381,23 @@ function FinanceDashboard({
       );
     } catch (cause) {
       if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setPendingStatementAction(null);
         await load();
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setNotice(
           "A fatura mudou enquanto você revisava. Recarregamos os dados; revise antes de tentar novamente.",
         );
         return;
       }
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(
         cause instanceof Error
           ? cause.message
           : `Não foi possível ${type === "close" ? "fechar" : "reabrir"} a fatura.`,
       );
     } finally {
-      setBusyStatementId(null);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
     }
   }
 
@@ -370,6 +406,7 @@ function FinanceDashboard({
   const loadStatementItems = useCallback(
     async (statementId: string, cursor: string | undefined, append: boolean) => {
       const request = statementItemsRequest.begin();
+      const workspaceRequest = workspaceRequests.begin(workspaceId);
       if (append) {
         setLoadingMoreStatementItems(true);
       } else {
@@ -384,18 +421,29 @@ function FinanceDashboard({
           cursor,
           limit: 50,
         });
-        if (!statementItemsRequest.isCurrent(request)) return;
+        if (
+          !statementItemsRequest.isCurrent(request) ||
+          !workspaceRequests.isCurrent(workspaceRequest)
+        )
+          return;
         setStatementItems((current) => (append ? [...current, ...page.items] : page.items));
         setStatementItemsNextCursor(page.nextCursor);
         setStatementItemsHasMore(page.hasMore);
       } catch (cause) {
-        if (!statementItemsRequest.isCurrent(request)) return;
+        if (
+          !statementItemsRequest.isCurrent(request) ||
+          !workspaceRequests.isCurrent(workspaceRequest)
+        )
+          return;
         setError(
           cause instanceof Error ? cause.message : "Não foi possível carregar a composição.",
         );
         if (!append) setViewingStatement(null);
       } finally {
-        if (statementItemsRequest.isCurrent(request)) {
+        if (
+          statementItemsRequest.isCurrent(request) &&
+          workspaceRequests.isCurrent(workspaceRequest)
+        ) {
           if (append) {
             setLoadingMoreStatementItems(false);
           } else {
@@ -404,7 +452,7 @@ function FinanceDashboard({
         }
       }
     },
-    [adapter, statementItemsRequest, workspaceId],
+    [adapter, statementItemsRequest, workspaceId, workspaceRequests],
   );
 
   useEffect(() => {
@@ -425,14 +473,18 @@ function FinanceDashboard({
     if (busyStatementId || BigInt(statement.openAmount.minor) <= BigInt(0)) return;
     setBusyStatementId(statement.id);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       await adapter.payStatement(workspaceId, statement);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       await load();
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice("Pagamento registrado na carteira.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setError(cause instanceof Error ? cause.message : "Não foi possível pagar a fatura.");
     } finally {
-      setBusyStatementId(null);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
     }
   }
 
@@ -538,9 +590,11 @@ function FinanceDashboard({
                   id="transaction-kind"
                   className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm"
                   value={transactionType}
-                  onChange={(event) =>
-                    setTransactionType(event.target.value as "expense" | "income")
-                  }
+                  onChange={(event) => {
+                    const nextType = event.target.value as "expense" | "income";
+                    setTransactionType(nextType);
+                    if (nextType === "income") setTransactionCardId("");
+                  }}
                 >
                   <option value="expense">Despesa</option>
                   <option value="income">Receita</option>
@@ -734,7 +788,7 @@ function FinanceDashboard({
                               : "font-semibold text-foreground"
                         }
                       >
-                        {transaction.kind === "income" ? "+" : "−"}
+                        {transactionAmountPrefix(transaction.kind)}
                         {formatMoneyMinor(transaction.amount.minor, transaction.amount.currency)}
                       </span>
                       <Button
@@ -976,7 +1030,7 @@ function FinanceDashboard({
               <div>
                 <dt className="text-muted-foreground">Valor</dt>
                 <dd className="mt-1 font-medium">
-                  {viewingTransaction.kind === "income" ? "+" : "−"}
+                  {transactionAmountPrefix(viewingTransaction.kind)}
                   {formatMoneyMinor(
                     viewingTransaction.amount.minor,
                     viewingTransaction.amount.currency,

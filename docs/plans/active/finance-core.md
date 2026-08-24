@@ -35,5 +35,6 @@ Esses itens são incompletudes de implementação, não escolhas de produto. Nã
 - `apps/api/test/finance-routes.test.ts` exerce o `createApp` exportado com `options.identity` + `finance`, verifica o actor autenticado e o role resolvido no scope antes de acessar cartões.
 - `apps/web/src/lib/finance.test.ts` cobre origem canônica, fixtures explicitamente habilitadas, ausência de origem, roles `owner`/`member`/`viewer`, paginação e itens cancelados.
 - `apps/web/src/lib/finance.test.ts` também cobre serialização de filtros, preservação da query de timeline, concatenação de página e reversão usada pelo desfazer da captura rápida.
-- `apps/web/src/lib/workspaces.test.ts` cobre a falha fechada do adapter de sessão sem origem configurada.
-- Validações executadas nesta revisão: `pnpm lint`, `pnpm typecheck` e `pnpm test` no monorepo. A integração PostgreSQL `identity-service.integration.test.ts` permanece ignorada localmente porque `DATABASE_URL_TEST` não está configurada; CI deve executar o cenário descartável.
+- `apps/web/src/lib/finance.test.ts` cobre captura em USD, isolamento por workspace, replay idempotente de fixtures, classificação explícita de receita/despesa/transferência/ajuste e descarte de mutação após troca de espaço.
+- `apps/web/src/lib/workspaces.test.ts` cobre a falha fechada do adapter de sessão sem origem configurada e a rejeição de sessão sem moeda válida.
+- Validações executadas nesta revisão: `pnpm lint`, `pnpm typecheck`, `pnpm test` e `pnpm build` no monorepo. A integração PostgreSQL `identity-service.integration.test.ts` permanece ignorada localmente porque `DATABASE_URL_TEST` não está configurada; CI deve executar o cenário descartável.

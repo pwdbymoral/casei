@@ -108,6 +108,44 @@ export function clearTransactionQueryParams(params: URLSearchParams): URLSearchP
   return next;
 }
 
+export function createQuickCaptureTransactionInput(input: {
+  kind: "income" | "expense";
+  amountMinor: string;
+  currency: string;
+  planned: boolean;
+  description: string;
+  cardId: string;
+}): CreateTransactionInput {
+  return {
+    kind: input.kind,
+    amount: { currency: input.currency, minor: input.amountMinor },
+    state: input.planned ? "planned" : "posted",
+    description: input.description,
+    cardId: transactionCardIdForKind(input.kind, input.cardId),
+  };
+}
+
+export function transactionCardIdForKind(
+  kind: "income" | "expense",
+  cardId: string,
+): string | null {
+  return kind === "expense" ? cardId || null : null;
+}
+
+export function transactionKindLabel(transaction: Pick<Transaction, "kind" | "cardId">): string {
+  if (transaction.kind === "income") return "Receita";
+  if (transaction.kind === "expense") {
+    return transaction.cardId ? "Compra no cartão" : "Despesa";
+  }
+  return transaction.kind === "transfer" ? "Transferência" : "Ajuste";
+}
+
+export function transactionAmountPrefix(kind: Transaction["kind"]): string {
+  if (kind === "income") return "+";
+  if (kind === "expense") return "−";
+  return kind === "transfer" ? "↔" : "±";
+}
+
 /** Network/5xx failures leave a logical command safe to retry with its same key. */
 export function shouldRetryIdempotentCommand(error: unknown): boolean {
   if (!(error instanceof FinanceAdapterError)) return true;
@@ -407,39 +445,77 @@ function fixtureId(seed: number): string {
 
 /** Local-only data makes the shell usable before AUTH-002 supplies a session API. */
 export function createFixtureFinanceAdapter(): FinanceAdapter {
-  const transactions: Transaction[] = [];
-  const cards: CreditCard[] = [
-    {
-      id: fixtureCardId,
-      workspaceId: fixtureWorkspaceId,
-      name: "Cartão principal",
-      closingDay: 10,
-      dueDay: 17,
-      holder: "Marina",
-      lastFour: "4242",
-      limit: { currency: "BRL", minor: "500000" },
-      archived: false,
-      version: 0,
-    },
-  ];
-  const statements: Statement[] = [
-    {
-      id: fixtureStatementId,
-      workspaceId: fixtureWorkspaceId,
-      cardId: fixtureCardId,
-      periodStart: "2026-08-11",
-      closingOn: "2026-09-10",
-      dueOn: "2026-09-17",
-      state: "open",
-      total: { currency: "BRL", minor: "0" },
-      paid: { currency: "BRL", minor: "0" },
-      openAmount: { currency: "BRL", minor: "0" },
-      version: 0,
-    },
-  ];
+  type FixtureWorkspaceState = {
+    currency: string | null;
+    transactions: Transaction[];
+    cards: CreditCard[];
+    statements: Statement[];
+    transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
+  };
+  const createWorkspaceState = (
+    workspaceId: string,
+    currency: string | null,
+    withCard = false,
+  ): FixtureWorkspaceState => {
+    const cards: CreditCard[] = withCard
+      ? [
+          {
+            id: fixtureCardId,
+            workspaceId,
+            name: "Cartão principal",
+            closingDay: 10,
+            dueDay: 17,
+            holder: "Marina",
+            lastFour: "4242",
+            limit: { currency: currency ?? "USD", minor: "500000" },
+            archived: false,
+            version: 0,
+          },
+        ]
+      : [];
+    const statements: Statement[] = withCard
+      ? [
+          {
+            id: fixtureStatementId,
+            workspaceId,
+            cardId: fixtureCardId,
+            periodStart: "2026-08-11",
+            closingOn: "2026-09-10",
+            dueOn: "2026-09-17",
+            state: "open",
+            total: { currency: currency ?? "USD", minor: "0" },
+            paid: { currency: currency ?? "USD", minor: "0" },
+            openAmount: { currency: currency ?? "USD", minor: "0" },
+            version: 0,
+          },
+        ]
+      : [];
+    return {
+      currency,
+      transactions: [],
+      cards,
+      statements,
+      transactionCommands: new Map(),
+    };
+  };
+  const workspaceStates = new Map<string, FixtureWorkspaceState>([
+    [fixtureWorkspaceId, createWorkspaceState(fixtureWorkspaceId, "BRL", true)],
+    [
+      "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202",
+      createWorkspaceState("019b5d9e-3c12-7a02-8d47-7b5b5dd7a202", "USD"),
+    ],
+  ]);
+  const stateFor = (workspaceId: string): FixtureWorkspaceState => {
+    const existing = workspaceStates.get(workspaceId);
+    if (existing) return existing;
+    const created = createWorkspaceState(workspaceId, null);
+    workspaceStates.set(workspaceId, created);
+    return created;
+  };
   return {
-    listTransactions: async (_workspaceId, query = {}) => {
-      const filtered = transactions.filter((transaction) => {
+    listTransactions: async (workspaceId, query = {}) => {
+      const state = stateFor(workspaceId);
+      const filtered = state.transactions.filter((transaction) => {
         if (
           query.search &&
           !transaction.description.toLowerCase().includes(query.search.toLowerCase())
@@ -465,9 +541,27 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         hasMore,
       };
     },
-    createTransaction: async (workspaceId, input) => {
+    createTransaction: async (workspaceId, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const fingerprint = JSON.stringify(input);
+      if (commandKey) {
+        const previous = state.transactionCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro lançamento.", 409);
+          }
+          return previous.transaction;
+        }
+      }
+      if (!state.currency) state.currency = input.amount.currency;
+      if (state.currency !== input.amount.currency) {
+        throw new FinanceAdapterError("A moeda não corresponde à moeda do espaço.", 422);
+      }
+      if (input.cardId && !state.cards.some((card) => card.id === input.cardId)) {
+        throw new FinanceAdapterError("Cartão não encontrado neste espaço.", 404);
+      }
       const value: Transaction = {
-        id: fixtureId(transactions.length + 1),
+        id: fixtureId(state.transactions.length + 1),
         workspaceId,
         kind: input.kind,
         state: input.state ?? "posted",
@@ -483,9 +577,9 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         statementId: null,
         version: 0,
       };
-      transactions.unshift(value);
+      state.transactions.unshift(value);
       if (input.cardId) {
-        const statement = statements.find(
+        const statement = state.statements.find(
           (item) => item.cardId === input.cardId && item.state === "open",
         );
         if (statement) {
@@ -498,20 +592,24 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           value.statementId = statement.id;
         }
       }
+      if (commandKey)
+        state.transactionCommands.set(commandKey, { fingerprint, transaction: value });
       return value;
     },
-    reverseTransaction: async (_workspaceId, transaction) => {
-      const current = transactions.find((value) => value.id === transaction.id);
+    reverseTransaction: async (workspaceId, transaction) => {
+      const state = stateFor(workspaceId);
+      const current = state.transactions.find((value) => value.id === transaction.id);
       if (!current) throw new FinanceAdapterError("Lançamento não encontrado.", 404);
       const value = { ...current, state: "canceled" as const, version: current.version + 1 };
-      transactions[transactions.indexOf(current)] = value;
+      state.transactions[state.transactions.indexOf(current)] = value;
       return value;
     },
     listCategories: async () => [],
-    listCards: async () => [...cards],
+    listCards: async (workspaceId) => [...stateFor(workspaceId).cards],
     createCard: async (workspaceId, input) => {
+      const state = stateFor(workspaceId);
       const card: CreditCard = {
-        id: fixtureId(cards.length + 10),
+        id: fixtureId(state.cards.length + 10),
         workspaceId,
         name: input.name,
         closingDay: input.closingDay,
@@ -522,13 +620,16 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         archived: false,
         version: 0,
       };
-      cards.push(card);
+      state.cards.push(card);
       return card;
     },
-    listStatements: async (_workspaceId, cardId) =>
-      statements.filter((statement) => !cardId || statement.cardId === cardId),
-    listStatementItems: async (_workspaceId, statementId, query = {}) => {
-      const allItems = transactions
+    listStatements: async (workspaceId, cardId) =>
+      stateFor(workspaceId).statements.filter(
+        (statement) => !cardId || statement.cardId === cardId,
+      ),
+    listStatementItems: async (workspaceId, statementId, query = {}) => {
+      const state = stateFor(workspaceId);
+      const allItems = state.transactions
         .filter((transaction) => transaction.statementId === statementId)
         .map((transaction) => ({
           id: transaction.id,
@@ -553,13 +654,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         hasMore,
       };
     },
-    closeStatement: async (_workspaceId, statement) => {
+    closeStatement: async (workspaceId, statement) => {
+      const state = stateFor(workspaceId);
       const value = { ...statement, state: "closed" as const, version: statement.version + 1 };
-      const index = statements.findIndex(({ id }) => id === statement.id);
-      if (index >= 0) statements[index] = value;
+      const index = state.statements.findIndex(({ id }) => id === statement.id);
+      if (index >= 0) state.statements[index] = value;
       return value;
     },
-    reopenStatement: async (_workspaceId, statement) => {
+    reopenStatement: async (workspaceId, statement) => {
+      const state = stateFor(workspaceId);
       if (statement.state !== "closed" || BigInt(statement.paid.minor) > BigInt(0)) {
         throw new FinanceAdapterError(
           "Apenas faturas fechadas e sem pagamentos podem ser reabertas.",
@@ -567,17 +670,18 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         );
       }
       const value = { ...statement, state: "open" as const, version: statement.version + 1 };
-      const index = statements.findIndex(({ id }) => id === statement.id);
-      if (index >= 0) statements[index] = value;
+      const index = state.statements.findIndex(({ id }) => id === statement.id);
+      if (index >= 0) state.statements[index] = value;
       return value;
     },
-    payStatement: async (_workspaceId, statement, amount) => {
+    payStatement: async (workspaceId, statement, amount) => {
+      const state = stateFor(workspaceId);
       const paid = amount ?? statement.openAmount;
       const nextPaid = BigInt(statement.paid.minor) + BigInt(paid.minor);
       const nextOpen = BigInt(statement.total.minor) - nextPaid;
-      const index = statements.findIndex(({ id }) => id === statement.id);
+      const index = state.statements.findIndex(({ id }) => id === statement.id);
       if (index >= 0) {
-        statements[index] = {
+        state.statements[index] = {
           ...statement,
           paid: { ...paid, minor: nextPaid.toString() },
           openAmount: { ...paid, minor: nextOpen.toString() },
@@ -629,6 +733,24 @@ export function createRequestGuard() {
     },
     isCurrent(request: number): boolean {
       return request === latestRequest;
+    },
+  };
+}
+
+export function createWorkspaceGenerationGuard(initialWorkspaceId: string) {
+  let currentWorkspaceId = initialWorkspaceId;
+  let generation = 0;
+  return {
+    switchWorkspace(workspaceId: string): void {
+      if (workspaceId === currentWorkspaceId) return;
+      currentWorkspaceId = workspaceId;
+      generation += 1;
+    },
+    begin(workspaceId: string): { workspaceId: string; generation: number } {
+      return { workspaceId, generation };
+    },
+    isCurrent(request: { workspaceId: string; generation: number }): boolean {
+      return request.workspaceId === currentWorkspaceId && request.generation === generation;
     },
   };
 }

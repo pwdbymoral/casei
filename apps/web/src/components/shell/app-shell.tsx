@@ -62,7 +62,7 @@ export type AuthenticatedWorkspaceScope = {
   workspaceId: string;
   role: NonNullable<ReturnType<typeof getActiveWorkspace>>["role"];
   fixtureMode: boolean;
-  currency?: string;
+  currency: string;
 };
 
 const AuthenticatedWorkspaceContext = createContext<AuthenticatedWorkspaceScope | null>(null);

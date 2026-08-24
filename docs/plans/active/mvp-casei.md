@@ -69,6 +69,8 @@ Executar schema/base antes das fatias paralelas.
 
 Implementação web publicada no PR #16. O guard de produção não usa fixtures: sem um `WorkspaceAdapter` autenticado ou papel `platform_admin`, `/app` e `/admin` exibem somente estado de acesso negado. Fixtures permanecem disponíveis apenas para testes/componentes isolados.
 
+A sessão autenticada propaga a moeda configurada em cada resumo de espaço até a captura e a apresentação financeira; sessões sem código válido falham fechadas. A troca de espaço invalida carregamentos e mutações pendentes, e fixtures financeiras particionam estado por workspace com replay de chave de criação.
+
 AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspaces`, o adapter de troca/logout ao boundary Better Auth e o onboarding ao comando idempotente `/v1/onboarding`. A validação de banco continua dependente do job PostgreSQL descartável do CI quando `DATABASE_URL_TEST` não estiver configurado localmente.
 
 **Gate 1:** usuário autenticado cria/troca espaço; permissões são comprovadas no servidor; shell passa teclado, 320 px, tablet e desktop; nenhum dado cruza espaços.
