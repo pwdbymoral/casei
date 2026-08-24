@@ -1,6 +1,6 @@
 # Plano: núcleo financeiro vertical
 
-- Status: fatia FIN-004/FIN-005 implementada; hardening aplicado; revisão agêntica em andamento
+- Status: FIN-004/FIN-005, FIN-005b e PLAN-001 backend implementados; hardening aplicado; revisão agêntica em andamento
 - Specs: [finanças](../../specs/financas.md), [cartões](../../specs/cartoes-de-credito.md), [metas e planejamento](../../specs/metas-e-planejamento.md)
 - Arquitetura: [modelo de domínio](../../architecture/modelo-de-dominio-mvp.md) e [ADR do ledger](../../architecture/decisions/0004-livro-razao-financeiro.md)
 
@@ -14,6 +14,7 @@
 - [x] Correções de invariantes: reversão atualiza fatura aberta atomicamente, faturas fechadas/pagas não mudam silenciosamente, recorrência variável não liquida sem confirmação, pagamentos cancelados são rejeitados e eventos/lançamentos publicados permanecem append-only.
 - [x] Rotas `/v1/workspaces/:workspaceId/{transactions,categories,cards,recurrences,installments}` e pagamento de fatura, compostas no `createApp` com o actor autenticado e o scope/membership do AUTH-004.
 - [x] Testes de domínio/contrato e integração PostgreSQL cobrindo soma zero, parcelas, meses curtos, datas civis, role real e imutabilidade de eventos publicados.
+- [x] PLAN-001 backend: liquidação parcial com valor/data efetivos opcionais, `If-Match`, idempotência, transições de estado, delta por evento e reversão de todos os deltas.
 - [x] Incremento de fatura: composição ordenada de compras e pagamentos com cursor/limite estável e `hasMore`, reabertura explícita somente para fatura fechada sem pagamentos, conflito otimista com versão atual e recarregar/revisar na interface, além de confirmação acessível.
 - [x] FIN-004/FIN-005 base: captura rápida autenticada com defaults, moeda do espaço, feedback e desfazer por reversão; linha do tempo com busca, período, estado/tipo, filtros persistidos na URL, cursor assinado, carregamento incremental, estados e detalhe básico.
 - [ ] FIN-005b: histórico auditável detalhado, com eventos, origem, antes/depois sanitizado e consequências relacionadas.
@@ -23,10 +24,12 @@
 Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara FIN/PLAN/CARD completos. Permanecem tarefas posteriores sem decisão de negócio nova:
 
 - `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública, histórico auditável detalhado e defaults de categorias.
-- `PLAN`: liquidação parcial, janela móvel materializada por job, pausa/retomada e comandos de edição por escopo; a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
+- `PLAN`: janela móvel materializada por job, pausa/retomada, comandos de edição por escopo e UI de compromissos permanecem; PLAN-001 backend já liquida parcialmente, enquanto a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
 - `CARD`: movimentação entre faturas abertas, ajuste pós-fechamento, estorno/tarifas e crédito excedente ainda permanecem; listagem, fechamento, composição e reabertura sem pagamentos já possuem API e interface.
 - `GOAL/INSIGHT`: persistência de metas/reservas, projeção/read models e UI ficam em fatias próprias; as funções puras de contribuição/valor seguro não persistem dados.
 - A UI financeira recebe `workspaceId` e `role` do shell autenticado; ela não escolhe escopo por `localStorage`, não concede papel padrão e desabilita escrita para `viewer`. Fixtures só ficam disponíveis com `CASEI_UI_FIXTURES=1`; sem origem explícita `NEXT_PUBLIC_CASEI_API_ORIGIN`, os adapters terminam em estado não autenticado.
+- A migration `0010_plan_partial_settlement` segue estoque `0008` e auditoria `0009`; se a sequência de migrations mudar antes do merge, ela deve ser renumerada para o próximo número livre sem aplicar duas vezes nem descartar dados.
+- O rollback de `0010_plan_partial_settlement` falha explicitamente se já houver múltiplos deltas parciais para a mesma transação; os eventos não são apagados nem mesclados para satisfazer a unicidade antiga. Nesse caso, preserve a migration aplicada ou faça uma migração de compensação explícita.
 
 Esses itens são incompletudes de implementação, não escolhas de produto. Não criar CRUD genérico sobre o ledger: eventos publicados continuam append-only e qualquer correção deve usar reversão/substituição atômica.
 
