@@ -262,7 +262,7 @@ export default function GoalsPage() {
   const [allowUncovered, setAllowUncovered] = useState(false);
   const [uncoveredPrompt, setUncoveredPrompt] = useState(false);
 
-  const load = useCallback(async (): Promise<Goal[]> => {
+  const load = useCallback(async (): Promise<Goal[] | null> => {
     setStatus("loading");
     setError(null);
     try {
@@ -281,7 +281,7 @@ export default function GoalsPage() {
     } catch (cause) {
       setStatus(errorStatus(cause));
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar suas metas.");
-      return [];
+      return null;
     }
   }, [adapter, workspaceId]);
 
@@ -397,7 +397,11 @@ export default function GoalsPage() {
               description: note || "Gasto da meta",
             }));
       // Um gasto reduz a carteira compartilhada e pode descobrir outras metas.
-      await load();
+      const refreshed = await load();
+      if (refreshed === null) {
+        setFormError("A alteração foi salva, mas não conseguimos atualizar todas as metas. Tente recarregar.");
+        return;
+      }
       setAction(null);
       setNotice(
         action.kind === "allocate"
@@ -409,9 +413,13 @@ export default function GoalsPage() {
     } catch (cause) {
       if (cause instanceof GoalsAdapterError && cause.status === 412) {
         const refreshed = await load();
-        const current = refreshed.find((goal) => goal.id === action.goal.id);
-        if (current) setAction({ ...action, goal: current });
-        setFormError("A meta mudou enquanto você revisava. Atualizamos os dados; tente novamente.");
+        const current = refreshed?.find((goal) => goal.id === action.goal.id);
+        if (current) {
+          setAction({ ...action, goal: current });
+          setFormError("A meta mudou enquanto você revisava. Atualizamos os dados; tente novamente.");
+        } else {
+          setFormError("A meta mudou, mas não conseguimos atualizar os dados. Tente recarregar.");
+        }
       } else if (
         action.kind === "allocate" &&
         cause instanceof GoalsAdapterError &&

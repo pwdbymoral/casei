@@ -16,7 +16,7 @@ export default async function AppLayout({ children }: Readonly<{ children: React
   if (session.workspaces.length === 0) redirect("/onboarding");
   return (
     <Suspense fallback={<ShellSkeleton />}>
-      <AppShell adapterMode={useFixture ? "fixture" : "unauthenticated"} initialSession={session}>
+      <AppShell adapterMode={useFixture ? "fixture" : "authenticated"} initialSession={session}>
         {children}
       </AppShell>
     </Suspense>

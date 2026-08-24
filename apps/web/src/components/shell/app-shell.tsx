@@ -43,6 +43,7 @@ import { clearAllStockOfflineSnapshots } from "@/lib/stock";
 import { cn } from "@/lib/utils";
 import {
   clearWorkspaceClientState,
+  authenticatedWorkspaceAdapter,
   fixtureWorkspaceAdapter,
   getActiveWorkspace,
   unauthenticatedWorkspaceAdapter,
@@ -53,7 +54,7 @@ import {
 
 type AppShellProps = {
   children: ReactNode;
-  adapterMode?: "fixture" | "unauthenticated";
+  adapterMode?: "fixture" | "authenticated" | "unauthenticated";
   initialSession?: WorkspaceSession;
   onLogout?: () => Promise<void>;
 };
@@ -212,7 +213,11 @@ export function AppShell({
   onLogout,
 }: AppShellProps) {
   const adapter: WorkspaceAdapter =
-    adapterMode === "fixture" ? fixtureWorkspaceAdapter : unauthenticatedWorkspaceAdapter;
+    adapterMode === "fixture"
+      ? fixtureWorkspaceAdapter
+      : adapterMode === "authenticated"
+        ? authenticatedWorkspaceAdapter
+        : unauthenticatedWorkspaceAdapter;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [session, setSession] = useState<WorkspaceSession | null>(initialSession ?? null);
