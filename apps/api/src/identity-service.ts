@@ -135,6 +135,7 @@ export class IdentityVersionConflictError extends Error {
   readonly code = "version_conflict" as const;
   constructor(readonly currentVersion: number) {
     super("O membro foi alterado. Recarregue a lista antes de tentar novamente.");
+    this.name = "IdentityVersionConflictError";
   }
 }
 

@@ -10,6 +10,13 @@ import {
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 
 describe("AUTH-002..005 HTTP boundary", () => {
+  it("preserves the typed identity version conflict for API error mapping", () => {
+    const error = new IdentityVersionConflictError(7);
+    expect(error.name).toBe("IdentityVersionConflictError");
+    expect(error.code).toBe("version_conflict");
+    expect(error.currentVersion).toBe(7);
+  });
+
   it("requires an authenticated actor and keeps onboarding idempotency explicit", async () => {
     const unauthenticated = createApp(undefined, {
       identity: {
