@@ -26,6 +26,18 @@ export type WorkspacePreferences = {
 
 export type WorkspacePreferencesDraft = Omit<WorkspacePreferences, "workspaceId" | "version">;
 
+/** Captures the exact values shown in the confirmation preview. */
+export function snapshotPreferencesDraft(
+  draft: WorkspacePreferencesDraft,
+): WorkspacePreferencesDraft {
+  return {
+    name: draft.name,
+    currency: draft.currency,
+    timeZone: draft.timeZone,
+    safetyMarginMinor: draft.safetyMarginMinor,
+  };
+}
+
 export function preferenceChangeSummary(
   current: WorkspacePreferences,
   next: WorkspacePreferencesDraft,

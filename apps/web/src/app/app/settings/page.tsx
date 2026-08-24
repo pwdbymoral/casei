@@ -25,6 +25,7 @@ import {
   authenticatedSettingsAdapter,
   preferenceChangeSummary,
   settingsErrorMessage,
+  snapshotPreferencesDraft,
   type UserProfile,
   type WorkspacePreferences,
 } from "@/lib/settings";
@@ -222,12 +223,14 @@ export default function SettingsPage() {
     event.preventDefault();
     if (!preferences || busy || !isOwner) return;
     setMessage(null);
-    setPreferencesPreview({
-      name: workspaceName.trim(),
-      currency: currency.toUpperCase(),
-      timeZone: timeZone.trim(),
-      safetyMarginMinor: safetyMarginMinor.trim() || "0",
-    });
+    setPreferencesPreview(
+      snapshotPreferencesDraft({
+        name: workspaceName.trim(),
+        currency: currency.toUpperCase(),
+        timeZone: timeZone.trim(),
+        safetyMarginMinor: safetyMarginMinor.trim() || "0",
+      }),
+    );
   }
 
   async function confirmPreferences() {

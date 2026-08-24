@@ -4,6 +4,7 @@ import {
   authenticatedSettingsAdapter,
   preferenceChangeSummary,
   settingsErrorMessage,
+  snapshotPreferencesDraft,
 } from "./settings";
 import { WorkspaceManagementError } from "./workspaces";
 
@@ -142,5 +143,23 @@ describe("settings HTTP boundary", () => {
       "Fuso horário: America/Fortaleza → America/Sao_Paulo (datas futuras serão exibidas neste fuso)",
       "Margem de segurança: 0 → 1200 centavos",
     ]);
+  });
+
+  it("keeps the preview payload independent from later draft edits", () => {
+    const draft = {
+      name: "Casa",
+      currency: "BRL",
+      timeZone: "America/Fortaleza",
+      safetyMarginMinor: "0",
+    };
+    const snapshot = snapshotPreferencesDraft(draft);
+    draft.name = "Casa alterada";
+    draft.currency = "USD";
+    expect(snapshot).toEqual({
+      name: "Casa",
+      currency: "BRL",
+      timeZone: "America/Fortaleza",
+      safetyMarginMinor: "0",
+    });
   });
 });

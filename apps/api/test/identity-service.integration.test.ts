@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/database";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { describe, expect, it } from "vitest";
+import { FinanceService } from "../src/finance-service.js";
 import { IdentityService, InvitationRateLimitError } from "../src/identity-service.js";
 import { runWorkspaceWorkerOnce } from "../src/workspace-worker.js";
 
@@ -253,6 +254,87 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           movementPreferences.version,
         ),
       ).rejects.toMatchObject({ name: "IdentityConflictError" });
+
+      const raceWorkspace = await pool.query<{ id: string }>(
+        `INSERT INTO workspace (name) VALUES ('Casa concorrência moeda') RETURNING id`,
+      );
+      const raceWorkspaceId = raceWorkspace.rows[0]?.id;
+      expect(raceWorkspaceId).toBeTruthy();
+      if (!raceWorkspaceId) throw new Error("race workspace was not created");
+      await pool.query(
+        `INSERT INTO workspace_preference (workspace_id, currency_code, timezone)
+         VALUES ($1, 'BRL', 'America/Fortaleza')`,
+        [raceWorkspaceId],
+      );
+      await pool.query(
+        `INSERT INTO membership (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [raceWorkspaceId, ownerId],
+      );
+      const raceScope = await service.resolveScope(
+        owner,
+        raceWorkspaceId,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+      );
+      expect(raceScope?.role).toBe("owner");
+      if (!raceScope) throw new Error("race scope was not resolved");
+      const financeService = new FinanceService(pool, { cursorSecret: "integration-secret" });
+      const financeScope = {
+        workspaceId: raceWorkspaceId,
+        actorId: ownerId,
+        role: "owner" as const,
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+      };
+      const blocker = await pool.connect();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query(
+          `SELECT w.id FROM workspace w
+             JOIN workspace_preference p ON p.workspace_id = w.id
+            WHERE w.id = $1
+            FOR UPDATE OF w, p`,
+          [raceWorkspaceId],
+        );
+        const preferenceAttempt = service.updateWorkspacePreferences(
+          raceScope,
+          {
+            name: "Casa concorrência moeda",
+            currency: "USD",
+            timeZone: "America/Fortaleza",
+            safetyMarginMinor: "0",
+          },
+          0,
+        );
+        const transactionAttempt = financeService.createTransaction(
+          financeScope,
+          {
+            kind: "expense",
+            state: "planned",
+            amount: { currency: "BRL", minor: "100" },
+            occurredOn: "2030-01-01",
+            description: "disputa de moeda",
+          },
+          "currency-race-transaction",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await blocker.query("COMMIT");
+        const raceResults = await Promise.allSettled([preferenceAttempt, transactionAttempt]);
+        expect(raceResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+        const racePreferences = await service.getWorkspacePreferences(raceScope);
+        const raceTransactions = await pool.query<{ currency_code: string }>(
+          `SELECT currency_code FROM finance_transaction WHERE workspace_id = $1`,
+          [raceWorkspaceId],
+        );
+        if (racePreferences.currency === "USD") {
+          expect(raceTransactions.rows).toHaveLength(0);
+        } else {
+          expect(racePreferences.currency).toBe("BRL");
+          expect(raceTransactions.rows).toEqual([{ currency_code: "BRL" }]);
+        }
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        blocker.release();
+      }
 
       const invitation = await service.createInvitation(
         scope,
