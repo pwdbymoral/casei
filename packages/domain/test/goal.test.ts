@@ -3,6 +3,7 @@ import {
   calculateGoalCoverage,
   calculateGoalReservation,
   goalAllocation,
+  goalContributionPeriods,
   goalStatusAfterReservation,
 } from "../src/goal.js";
 
@@ -69,5 +70,12 @@ describe("goal reservation subledger", () => {
     expect(
       goalStatusAfterReservation({ status: "completed", targetMinor: 1000n, reservedMinor: 900n }),
     ).toBe("active");
+  });
+
+  it("counts monthly contribution windows through the deadline", () => {
+    expect(goalContributionPeriods("2026-08-24", "2027-01-31")).toBe(5);
+    expect(goalContributionPeriods("2026-08-24", "2026-08-24")).toBe(1);
+    expect(goalContributionPeriods("2026-08-24", "2026-08-23")).toBe(0);
+    expect(goalContributionPeriods("2026-08-24", null)).toBeNull();
   });
 });
