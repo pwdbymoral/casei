@@ -125,6 +125,30 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         ),
       ).resolves.toMatchObject({ rows: [] });
 
+      const acceptedInvitation = await service.createInvitation(
+        scope,
+        { email: `${revokedId}@example.test`, role: "viewer" },
+        "auth005-accepted-invite-key",
+      );
+      const acceptedToken = decodeURIComponent(
+        acceptedInvitation.invitation.inviteUrl?.split("/invite/")[1] ?? "",
+      );
+      await service.acceptInvitation(
+        { userId: revokedId, email: `${revokedId}@example.test` },
+        acceptedToken,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+      );
+      await expect(
+        pool.query(
+          `SELECT id FROM auth_email_outbox WHERE message_kind = 'invitation' AND source_id = $1`,
+          [acceptedInvitation.invitation.id],
+        ),
+      ).resolves.toMatchObject({ rows: [] });
+      await pool.query(
+        `UPDATE membership SET role = 'member', status = 'revoked' WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, revokedId],
+      );
+
       const expiringInvitation = await service.createInvitation(
         scope,
         { email: `expired-${suffix}@example.test`, role: "viewer" },
@@ -147,7 +171,7 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         ]),
       ).resolves.toMatchObject({ rows: [{ status: "expired" }] });
       clock.now = new Date("2030-01-01T00:00:00.000Z");
-      for (let index = 0; index < 3; index += 1) {
+      for (let index = 0; index < 2; index += 1) {
         await service.createInvitation(
           scope,
           { email: `rate-${index}-${suffix}@example.test`, role: "viewer" },
@@ -303,6 +327,14 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         },
         2,
       );
+      await expect(
+        pool.query<{ reason: string }>(
+          `SELECT reason FROM audit_event
+             WHERE action = 'workspace.deletion_requested' AND target_id = $1
+             ORDER BY occurred_at DESC LIMIT 1`,
+          [workspaceId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ reason: "teste do cutoff" }] });
       clock.now = new Date("2030-01-30T23:59:59.999Z");
       await expect(service.getRecovery(owner, workspaceId)).resolves.toMatchObject({
         status: "active",
@@ -337,10 +369,10 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
         rows: [
           {
             status: "deactivated",
-            deactivated_at: new Date("2030-01-31T00:00:00.000Z"),
+            deactivated_at: new Date("2030-01-01T00:00:00.000Z"),
             purge_at: new Date("2030-01-31T00:00:00.000Z"),
-            backup_expires_at: new Date("2030-03-07T00:00:00.000Z"),
-            audit_purge_at: new Date("2031-01-31T00:00:00.000Z"),
+            backup_expires_at: new Date("2030-02-05T00:00:00.000Z"),
+            audit_purge_at: new Date("2031-01-01T00:00:00.000Z"),
           },
         ],
       });
@@ -356,13 +388,13 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
       await expect(
         pool.query(`SELECT app.assert_workspace_backup_allowed($1, $2)`, [
           workspaceId,
-          "2030-03-06T23:59:59.999Z",
+          "2030-02-04T23:59:59.999Z",
         ]),
       ).resolves.toBeTruthy();
       await expect(
         pool.query(`SELECT app.assert_workspace_backup_allowed($1, $2)`, [
           workspaceId,
-          "2030-03-07T00:00:00.000Z",
+          "2030-02-05T00:00:00.000Z",
         ]),
       ).rejects.toBeTruthy();
       await expect(
@@ -374,16 +406,16 @@ describe("AUTH-005 lifecycle PostgreSQL", () => {
           WHERE action = 'workspace.deletion_requested' AND target_id = $1`,
         [workspaceId],
       );
-      expect(lifecycleAudit.rows[0]?.reason).toBe("deactivation_reason_provided");
-      expect(lifecycleAudit.rows[0]?.retention_until).toEqual(new Date("2031-01-31T00:00:00.000Z"));
+      expect(lifecycleAudit.rows[0]?.reason).toBe("deactivation_reason_redacted");
+      expect(lifecycleAudit.rows[0]?.retention_until).toEqual(new Date("2031-01-01T00:00:00.000Z"));
       await expect(
-        service.purgeExpiredTombstones(new Date("2031-01-30T23:59:59.999Z")),
+        service.purgeExpiredTombstones(new Date("2030-12-31T23:59:59.999Z")),
       ).resolves.toMatchObject({ tombstones: 0 });
       const previousWorkerUrl = process.env.DATABASE_URL_WORKER;
       process.env.DATABASE_URL_WORKER = databaseUrl.toString();
       try {
         await expect(
-          runWorkspaceWorkerOnce(new Date("2031-01-31T00:00:00.000Z")),
+          runWorkspaceWorkerOnce(new Date("2031-01-01T00:00:00.000Z")),
         ).resolves.toBeGreaterThan(0);
       } finally {
         if (previousWorkerUrl === undefined) delete process.env.DATABASE_URL_WORKER;

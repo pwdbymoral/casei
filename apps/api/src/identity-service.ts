@@ -570,6 +570,7 @@ export class IdentityService {
         }
         if (invite.workspace_status !== "active")
           throw new IdentityConflictError("O espaço não está disponível.");
+        await this.deleteInvitationEmailArtifacts(client, workspaceId, invitationId);
         const current = await client.query<{ id: string; role: WorkspaceRole; status: string }>(
           `SELECT id, role, status FROM membership WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
           [workspaceId, actor.userId],
@@ -781,7 +782,7 @@ export class IdentityService {
         correlationId: scope.correlationId,
         action: "workspace.deletion_requested",
         targetId: scope.workspaceId,
-        reason: "deactivation_reason_provided",
+        reason: parsed.reason,
       });
       return { recoveryUntil: until.toISOString(), version: row.version + 1 };
     });
@@ -953,22 +954,24 @@ export class IdentityService {
           );
           if (!lease.rows[0]) throw new JobLeaseLostError();
         }
+        const deactivatedAt = new Date(row.expires_at.getTime() - RECOVERY_TTL_MS);
         await client.query(
           `INSERT INTO workspace_tombstone
              (workspace_id, pseudonymous_owner_hash, deactivated_at, purge_at, backup_expires_at, audit_purge_at)
-           VALUES ($1, $2, $3, $3, $4, $5)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (workspace_id) DO NOTHING`,
           [
             workspaceId,
             createHash("sha256").update(row.owner_user_id).digest("hex"),
+            deactivatedAt,
             at,
-            new Date(at.getTime() + BACKUP_RETENTION_MS),
-            new Date(at.getTime() + AUDIT_RETENTION_MS),
+            new Date(deactivatedAt.getTime() + BACKUP_RETENTION_MS),
+            new Date(deactivatedAt.getTime() + AUDIT_RETENTION_MS),
           ],
         );
         await client.query(`SELECT app.detach_workspace_audit($1, $2)::int`, [
           workspaceId,
-          new Date(at.getTime() + AUDIT_RETENTION_MS),
+          new Date(deactivatedAt.getTime() + AUDIT_RETENTION_MS),
         ]);
         await client.query(
           `UPDATE job SET state = 'cancelled', lease_until = NULL, lease_token = NULL

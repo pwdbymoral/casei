@@ -260,7 +260,8 @@ DECLARE
 BEGIN
   UPDATE audit_event
      SET workspace_id = NULL,
-         retention_until = until_at
+         retention_until = until_at,
+         reason = CASE WHEN reason IS NULL THEN NULL ELSE 'deactivation_reason_redacted' END
    WHERE workspace_id = candidate;
   GET DIAGNOSTICS detached = ROW_COUNT;
   RETURN detached;
