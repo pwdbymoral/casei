@@ -5,6 +5,7 @@ import { configureFinanceRoutes } from "../src/finance-routes.js";
 import type { FinanceService } from "../src/finance-service.js";
 import { createActorMiddleware, createWorkspaceScopeMiddleware } from "../src/http/middleware.js";
 import type { IdentityService } from "../src/identity-service.js";
+import type { InsightService } from "../src/insight-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
@@ -13,6 +14,54 @@ const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
 const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
 
 describe("finance HTTP composition", () => {
+  it("mounts deterministic insight endpoints behind the workspace scope", async () => {
+    const received: string[] = [];
+    const app = createApp(undefined, {
+      identity: {
+        pool: {} as Pool,
+        service: {
+          resolveScope: async (_actor: unknown, id: string) => ({
+            actor: { userId: "user-1" },
+            workspaceId: id,
+            role: "member" as const,
+            correlationId: "correlation-insight",
+          }),
+        } as unknown as IdentityService,
+        actorResolver: async () => ({ userId: "user-1" }),
+      },
+      finance: {
+        pool: {} as Pool,
+        service: {} as FinanceService,
+        insightService: {
+          getFinancialReadModel: async (
+            scope: { workspaceId: string },
+            query: { from?: string },
+          ) => {
+            received.push(`${scope.workspaceId}:${query.from ?? "default"}`);
+            return { endpoint: "financial" };
+          },
+          getSafeToSpend: async (_scope: unknown, query: { horizonDays: number }) => ({
+            endpoint: "safe-to-spend",
+            horizonDays: query.horizonDays,
+          }),
+        } as unknown as InsightService,
+      },
+    });
+
+    const financial = await app.request(
+      `/v1/workspaces/${workspaceId}/insights/financial?from=2026-08-01&to=2026-08-31`,
+    );
+    expect(financial.status).toBe(200);
+    await expect(financial.json()).resolves.toEqual({ endpoint: "financial" });
+    expect(received).toEqual([`${workspaceId}:2026-08-01`]);
+
+    const safe = await app.request(
+      `/v1/workspaces/${workspaceId}/insights/safe-to-spend?horizonDays=45`,
+    );
+    expect(safe.status).toBe(200);
+    await expect(safe.json()).resolves.toEqual({ endpoint: "safe-to-spend", horizonDays: 45 });
+  });
+
   it("routes category edits and archive actions with preconditions and idempotency", async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const category = {
