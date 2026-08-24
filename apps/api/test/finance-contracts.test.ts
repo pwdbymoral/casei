@@ -23,6 +23,15 @@ describe("finance contracts", () => {
     });
   });
 
+  it("leaves the transaction date to the workspace clock when omitted", () => {
+    expect(
+      createTransactionSchema.parse({
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+      }),
+    ).not.toHaveProperty("occurredOn");
+  });
+
   it("parses timeline filters and rejects an inverted period", () => {
     expect(
       transactionListQuerySchema.parse({

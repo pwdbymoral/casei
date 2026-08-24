@@ -15,13 +15,14 @@
 - [x] Rotas `/v1/workspaces/:workspaceId/{transactions,categories,cards,recurrences,installments}` e pagamento de fatura, compostas no `createApp` com o actor autenticado e o scope/membership do AUTH-004.
 - [x] Testes de domínio/contrato e integração PostgreSQL cobrindo soma zero, parcelas, meses curtos, datas civis, role real e imutabilidade de eventos publicados.
 - [x] Incremento de fatura: composição ordenada de compras e pagamentos com cursor/limite estável e `hasMore`, reabertura explícita somente para fatura fechada sem pagamentos, conflito otimista com versão atual e recarregar/revisar na interface, além de confirmação acessível.
-- [x] FIN-004/FIN-005: captura rápida autenticada com defaults, moeda do espaço, feedback e desfazer por reversão; linha do tempo com busca, período, estado/tipo, filtros persistidos na URL, cursor assinado e carregamento incremental com estados vazio/erro/carregando.
+- [x] FIN-004/FIN-005 base: captura rápida autenticada com defaults, moeda do espaço, feedback e desfazer por reversão; linha do tempo com busca, período, estado/tipo, filtros persistidos na URL, cursor assinado, carregamento incremental, estados e detalhe básico.
+- [ ] FIN-005b: histórico auditável detalhado, com eventos, origem, antes/depois sanitizado e consequências relacionadas.
 
 ## Limitações rastreáveis
 
 Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara FIN/PLAN/CARD completos. Permanecem tarefas posteriores sem decisão de negócio nova:
 
-- `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública e defaults de categorias.
+- `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública, histórico auditável detalhado e defaults de categorias.
 - `PLAN`: liquidação parcial, janela móvel materializada por job, pausa/retomada e comandos de edição por escopo; a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
 - `CARD`: movimentação entre faturas abertas, ajuste pós-fechamento, estorno/tarifas e crédito excedente ainda permanecem; listagem, fechamento, composição e reabertura sem pagamentos já possuem API e interface.
 - `GOAL/INSIGHT`: persistência de metas/reservas, projeção/read models e UI ficam em fatias próprias; as funções puras de contribuição/valor seguro não persistem dados.

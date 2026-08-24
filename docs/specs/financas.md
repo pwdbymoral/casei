@@ -70,6 +70,9 @@ Sem descrição, a UI usa rótulo neutro como `Despesa sem descrição`, sem inv
   decrescente e ID decrescente; o cursor é opaco e assinado. A lista retorna envelope `items/page`.
 - A UI mantém os filtros da linha do tempo na URL, distingue vazio inicial de vazio filtrado e
   permite carregar a próxima página sem substituir os itens já visíveis.
+- Cada item oferece detalhe básico com estado, valor, data e versão. O histórico completo de
+  auditoria, incluindo antes/depois sanitizado e consequências relacionadas, permanece uma etapa
+  posterior e não é apresentado como concluído nesta fatia.
 
 ### Conta a pagar ou receber
 

@@ -5,8 +5,10 @@ import {
   createFixtureFinanceAdapter,
   createHttpFinanceAdapter,
   createRequestGuard,
+  FinanceAdapterError,
   financeAdapterForEnvironment,
   mergeTransactionPage,
+  shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   transactionQueryFromSearchParams,
   unauthenticatedFinanceAdapter,
@@ -63,6 +65,7 @@ describe("finance adapter", () => {
         kind: "expense",
         amount: { currency: "BRL", minor: "1200" },
       });
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("occurredOn");
       return new Response(
         JSON.stringify({
           id: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a299",
@@ -93,10 +96,77 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("reuses the logical idempotency key after a network failure", async () => {
+    let attempts = 0;
+    const keys: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempts += 1;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (attempts === 1) throw new TypeError("network interrupted");
+      return Response.json(
+        {
+          id: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a299",
+          workspaceId: "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201",
+          kind: "expense",
+          state: "posted",
+          amount: { currency: "USD", minor: "1200" },
+          settledAmount: { currency: "USD", minor: "1200" },
+          occurredOn: "2026-08-23",
+          dueOn: null,
+          postedOn: "2026-08-23T12:00:00.000Z",
+          description: "Coffee",
+          categoryId: null,
+          cardId: null,
+          statementId: null,
+          version: 0,
+        },
+        { status: 201 },
+      );
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const input = { kind: "expense" as const, amount: { currency: "USD", minor: "1200" } };
+
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-001"),
+    ).rejects.toThrow("network interrupted");
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-001"),
+    ).resolves.toMatchObject({
+      amount: { currency: "USD" },
+    });
+    expect(keys).toEqual(["logical-command-001", "logical-command-001"]);
+  });
+
+  it("keeps the same key available for a server-error retry", async () => {
+    let attempts = 0;
+    const keys: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempts += 1;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (attempts === 1)
+        return Response.json({ error: { message: "temporarily unavailable" } }, { status: 503 });
+      return Response.json({ id: "transaction-after-retry" }, { status: 201 });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const input = { kind: "expense" as const, amount: { currency: "BRL", minor: "100" } };
+
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-002"),
+    ).rejects.toMatchObject({
+      status: 503,
+    });
+    await expect(
+      adapter.createTransaction("workspace", input, "logical-command-002"),
+    ).resolves.toMatchObject({
+      id: "transaction-after-retry",
+    });
+    expect(keys).toEqual(["logical-command-002", "logical-command-002"]);
+  });
+
   it("serializes timeline filters and cursor in the API request", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       expect(input).toBe(
-        "/v1/workspaces/workspace/transactions?cursor=cursor-1&limit=25&search=mercado&from=2026-08-01&to=2026-08-31&state=posted&kind=expense",
+        "/v1/workspaces/workspace/transactions?cursor=cursor-1&limit=25&search=mercado&from=2026-08-01&to=2026-08-31&state=posted&kind=expense&cardId=card-1",
       );
       return Response.json({ items: [], page: { nextCursor: null, hasMore: false } });
     });
@@ -111,19 +181,23 @@ describe("finance adapter", () => {
         to: "2026-08-31",
         state: "posted",
         kind: "expense",
+        cardId: "card-1",
       }),
     ).resolves.toEqual({ items: [], nextCursor: null, hasMore: false });
   });
 
   it("keeps timeline filters in URL parameters and appends the next page", () => {
     const query = transactionQueryFromSearchParams(
-      new URLSearchParams("search=mercado&from=2026-08-01&state=posted&cursor=cursor-2"),
+      new URLSearchParams(
+        "search=mercado&from=2026-08-01&state=posted&cursor=cursor-2&cardId=card-1",
+      ),
     );
     expect(query).toEqual({
       search: "mercado",
       from: "2026-08-01",
       state: "posted",
       cursor: "cursor-2",
+      cardId: "card-1",
     });
 
     const first = { id: "first" } as never;
@@ -134,6 +208,9 @@ describe("finance adapter", () => {
     expect(
       mergeTransactionPage([first], { items: [second], nextCursor: null, hasMore: false }, false),
     ).toEqual([second]);
+    expect(shouldRetryIdempotentCommand(new TypeError("network"))).toBe(true);
+    expect(shouldRetryIdempotentCommand(new FinanceAdapterError("server", 500))).toBe(true);
+    expect(shouldRetryIdempotentCommand(new FinanceAdapterError("invalid", 422))).toBe(false);
   });
 
   it("keeps fixture writes in the same adapter for quick capture", async () => {

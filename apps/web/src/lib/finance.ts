@@ -95,7 +95,20 @@ export function transactionQueryFromSearchParams(params: URLSearchParams): Trans
     to: value("to"),
     state: value("state") as Transaction["state"] | undefined,
     kind: value("kind") as Transaction["kind"] | undefined,
+    cardId: value("cardId"),
   };
+}
+
+/** Network/5xx failures leave a logical command safe to retry with its same key. */
+export function shouldRetryIdempotentCommand(error: unknown): boolean {
+  if (!(error instanceof FinanceAdapterError)) return true;
+  return (
+    error.status === undefined ||
+    error.status === 408 ||
+    error.status === 425 ||
+    error.status === 429 ||
+    error.status >= 500
+  );
 }
 
 export function mergeTransactionPage(
@@ -128,7 +141,11 @@ export type CreateTransactionInput = {
 
 export type FinanceAdapter = {
   listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
-  createTransaction(workspaceId: string, input: CreateTransactionInput): Promise<Transaction>;
+  createTransaction(
+    workspaceId: string,
+    input: CreateTransactionInput,
+    idempotencyKey?: string,
+  ): Promise<Transaction>;
   reverseTransaction(workspaceId: string, transaction: Transaction): Promise<Transaction>;
   listCategories(workspaceId: string): Promise<Category[]>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
@@ -280,10 +297,10 @@ export function createHttpFinanceAdapter(
         hasMore: response.page.hasMore,
       }));
     },
-    createTransaction: async (workspaceId, input) =>
+    createTransaction: async (workspaceId, input, commandKey) =>
       call<Transaction>(`/workspaces/${workspaceId}/transactions`, {
         method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
+        headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
     reverseTransaction: (workspaceId, transaction) =>

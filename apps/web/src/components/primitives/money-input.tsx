@@ -23,7 +23,7 @@ export function MoneyInput({
   value,
   onChange,
   label = "Valor",
-  description = "Digite o valor em reais. Os centavos são preservados.",
+  description,
   error,
   currency = "BRL",
   locale = "pt-BR",
@@ -37,6 +37,10 @@ export function MoneyInput({
   const [digitsBeforeCaret, setDigitsBeforeCaret] = useState<number | null>(null);
   const descriptionId = `${id}-description`;
   const errorId = `${id}-error`;
+  const defaultDescription =
+    currency === "BRL"
+      ? "Digite o valor em reais. Os centavos são preservados."
+      : `Digite o valor em ${currency}. Os centavos são preservados.`;
 
   useLayoutEffect(() => {
     if (digitsBeforeCaret === null || !inputRef.current) return;
@@ -69,7 +73,7 @@ export function MoneyInput({
       {error ? (
         <FieldError id={errorId}>{error}</FieldError>
       ) : (
-        <FieldDescription id={descriptionId}>{description}</FieldDescription>
+        <FieldDescription id={descriptionId}>{description ?? defaultDescription}</FieldDescription>
       )}
     </Field>
   );

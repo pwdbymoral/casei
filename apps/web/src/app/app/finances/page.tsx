@@ -14,7 +14,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MoneyInput } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
@@ -42,17 +42,13 @@ import {
   mergeTransactionPage,
   type Statement,
   type StatementItem,
+  shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
   transactionQueryFromSearchParams,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
-
-function today(): string {
-  const date = new Date();
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
 
 function transactionLabel(transaction: Transaction): string {
   if (transaction.description.trim()) return transaction.description;
@@ -132,6 +128,7 @@ function FinanceDashboard({
   const [timelineKind, setTimelineKind] = useState<"" | Transaction["kind"]>("");
   const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
   const [undoing, setUndoing] = useState(false);
+  const transactionCommandKey = useRef<string | null>(null);
   const writeAccess = canWriteFinance(role);
 
   const timelineQuery = useMemo(
@@ -160,6 +157,10 @@ function FinanceDashboard({
     const timeout = window.setTimeout(() => setUndoableTransaction(null), 10_000);
     return () => window.clearTimeout(timeout);
   }, [undoableTransaction]);
+
+  useEffect(() => {
+    transactionCommandKey.current = null;
+  }, [workspaceId]);
 
   function updateTimelineQuery(values: {
     search?: string;
@@ -232,24 +233,31 @@ function FinanceDashboard({
     setSaving(true);
     setError(null);
     setNotice(null);
+    const commandKey = transactionCommandKey.current ?? `web-${crypto.randomUUID()}`;
+    transactionCommandKey.current = commandKey;
     try {
-      const created = await adapter.createTransaction(workspaceId, {
-        kind: transactionType,
-        amount: { currency, minor: amount },
-        occurredOn: today(),
-        state: planned ? "planned" : "posted",
-        description,
-        cardId: transactionCardId || null,
-      });
-      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
-      else await load(false);
+      const created = await adapter.createTransaction(
+        workspaceId,
+        {
+          kind: transactionType,
+          amount: { currency, minor: amount },
+          state: planned ? "planned" : "posted",
+          description,
+          cardId: transactionCardId || null,
+        },
+        commandKey,
+      );
+      transactionCommandKey.current = null;
       setAmount("0");
       setDescription("");
       setTransactionCardId("");
       setPlanned(false);
+      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
+      else await load(false);
       setNotice(planned ? "Compromisso salvo." : "Lançamento salvo.");
       setUndoableTransaction(planned ? null : created);
     } catch (cause) {
+      if (!shouldRetryIdempotentCommand(cause)) transactionCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível salvar o lançamento.");
     } finally {
       setSaving(false);
@@ -474,7 +482,7 @@ function FinanceDashboard({
               Saldo dos lançamentos carregados
             </CardDescription>
             <CardTitle className="text-3xl font-semibold tracking-tight">
-              {formatMoneyMinor(walletTotal.toString())}
+              {formatMoneyMinor(walletTotal.toString(), currency)}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-primary-foreground/80">
@@ -552,7 +560,7 @@ function FinanceDashboard({
                     ))}
                 </select>
               </Field>
-              <MoneyInput value={amount} onChange={setAmount} label="Valor" />
+              <MoneyInput value={amount} onChange={setAmount} label="Valor" currency={currency} />
               <Field>
                 <FieldLabel htmlFor="transaction-description">Descrição (opcional)</FieldLabel>
                 <Input
@@ -722,7 +730,7 @@ function FinanceDashboard({
                         }
                       >
                         {transaction.kind === "income" ? "+" : "−"}
-                        {formatMoneyMinor(transaction.amount.minor)}
+                        {formatMoneyMinor(transaction.amount.minor, transaction.amount.currency)}
                       </span>
                       <Button
                         type="button"
@@ -846,7 +854,10 @@ function FinanceDashboard({
                       </div>
                       <div className="text-right">
                         <p className="font-semibold">
-                          {formatMoneyMinor(statement.openAmount.minor)}
+                          {formatMoneyMinor(
+                            statement.openAmount.minor,
+                            statement.openAmount.currency,
+                          )}
                         </p>
                         <div className="mt-1 flex gap-2">
                           <Button
@@ -961,7 +972,10 @@ function FinanceDashboard({
                 <dt className="text-muted-foreground">Valor</dt>
                 <dd className="mt-1 font-medium">
                   {viewingTransaction.kind === "income" ? "+" : "−"}
-                  {formatMoneyMinor(viewingTransaction.amount.minor)}
+                  {formatMoneyMinor(
+                    viewingTransaction.amount.minor,
+                    viewingTransaction.amount.currency,
+                  )}
                 </dd>
               </div>
               <div>
@@ -1011,19 +1025,25 @@ function FinanceDashboard({
                 <div>
                   <dt className="text-muted-foreground">Total</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.total.minor)}
+                    {formatMoneyMinor(
+                      viewingStatement.total.minor,
+                      viewingStatement.total.currency,
+                    )}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Pago</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.paid.minor)}
+                    {formatMoneyMinor(viewingStatement.paid.minor, viewingStatement.paid.currency)}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Em aberto</dt>
                   <dd className="mt-1 font-semibold">
-                    {formatMoneyMinor(viewingStatement.openAmount.minor)}
+                    {formatMoneyMinor(
+                      viewingStatement.openAmount.minor,
+                      viewingStatement.openAmount.currency,
+                    )}
                   </dd>
                 </div>
               </dl>
@@ -1063,7 +1083,7 @@ function FinanceDashboard({
                           }
                         >
                           {statementItemAmountPrefix(item)}
-                          {formatMoneyMinor(item.amount.minor)}
+                          {formatMoneyMinor(item.amount.minor, item.amount.currency)}
                         </span>
                       </li>
                     );
@@ -1113,7 +1133,12 @@ function FinanceDashboard({
           {pendingStatementAction ? (
             <p className="rounded-lg bg-muted/50 p-3 text-sm">
               Fatura com vencimento em {pendingStatementAction.statement.dueOn} · valor em aberto{" "}
-              <strong>{formatMoneyMinor(pendingStatementAction.statement.openAmount.minor)}</strong>
+              <strong>
+                {formatMoneyMinor(
+                  pendingStatementAction.statement.openAmount.minor,
+                  pendingStatementAction.statement.openAmount.currency,
+                )}
+              </strong>
             </p>
           ) : null}
           <DialogFooter>

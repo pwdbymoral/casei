@@ -79,7 +79,8 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 - [ ] **FIN-002 Carteira:** saldo inicial, saldo atual, conferência e ajuste com motivo; testes de conservação e concorrência.
 - [ ] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
 - [x] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer por reversão auditável.
-- [x] **FIN-005 Linha do tempo:** busca, período, filtros em URL, paginação incremental e estados de carregamento/vazio/erro.
+- [x] **FIN-005 Linha do tempo — base:** busca, período, filtros em URL, paginação incremental, detalhe básico e estados de carregamento/vazio/erro.
+- [ ] **FIN-005b Histórico auditável:** detalhe com eventos de auditoria, origem, antes/depois sanitizado e consequências relacionadas.
 - [ ] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia.
 
 O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
