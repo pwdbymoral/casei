@@ -16,9 +16,11 @@ import {
   calculateGoalReservation,
   canonicalTransactionPostings,
   goalAllocation,
+  goalContributionPeriods,
   goalStatusAfterReservation,
   Money,
   parseLocalDate,
+  requiredGoalContribution,
 } from "@casei/domain";
 import {
   assertFinanceCapability,
@@ -32,6 +34,7 @@ import { decodeCursor, encodeCursor, InvalidCursorError } from "./http/cursor.js
 export interface GoalServiceOptions {
   applicationRole?: string;
   cursorSecret?: string;
+  clock?: () => Date;
 }
 
 export interface GoalView {
@@ -41,6 +44,9 @@ export interface GoalView {
   target: { currency: string; minor: string };
   reserved: { currency: string; minor: string };
   uncovered: { currency: string; minor: string };
+  remaining: { currency: string; minor: string };
+  contributionPeriodsRemaining: number | null;
+  requiredContribution: { currency: string; minor: string } | null;
   deadline: string | null;
   priority: "low" | "normal" | "high";
   status: "active" | "completed" | "paused" | "canceled";
@@ -99,6 +105,7 @@ interface GoalMovementRow {
 export class GoalService {
   private readonly applicationRole: string;
   private readonly cursorSecret: string;
+  private readonly clock: () => Date;
 
   constructor(
     private readonly pool: Pool,
@@ -110,6 +117,7 @@ export class GoalService {
       throw new Error("CASEI_CURSOR_SECRET is required in production");
     }
     this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
+    this.clock = options.clock ?? (() => new Date());
   }
 
   async createGoal(
@@ -184,6 +192,7 @@ export class GoalService {
       const hasMore = result.rows.length > parsed.limit;
       const rows = hasMore ? result.rows.slice(0, parsed.limit) : result.rows;
       const walletBalance = await this.walletBalance(client, scope.workspaceId);
+      const today = await this.workspaceToday(client, scope.workspaceId);
       const last = rows.at(-1);
       const nextCursor =
         hasMore && last?.created_at
@@ -196,7 +205,7 @@ export class GoalService {
             )
           : null;
       return {
-        items: rows.map((row) => toGoalView(row, row, walletBalance)),
+        items: rows.map((row) => toGoalView(row, row, walletBalance, today)),
         nextCursor,
         hasMore,
       };
@@ -605,7 +614,8 @@ export class GoalService {
     if (!row) return null;
     const totals = await this.goalTotals(client, workspaceId, goalId);
     const walletBalance = await this.walletBalance(client, workspaceId);
-    return toGoalView(row, totals, walletBalance);
+    const today = await this.workspaceToday(client, workspaceId);
+    return toGoalView(row, totals, walletBalance, today);
   }
 
   private async requireGoal(
@@ -702,7 +712,7 @@ export class GoalService {
           month: "2-digit",
           day: "2-digit",
         })
-          .formatToParts(new Date())
+          .formatToParts(this.clock())
           .map((part) => [part.type, part.value]),
       );
       const date = `${values.year}-${values.month}-${values.day}`;
@@ -900,9 +910,21 @@ function reservedFromTotals(totals: GoalTotals): bigint {
   });
 }
 
-function toGoalView(row: GoalRow, totals: GoalTotals, walletBalanceMinor: bigint): GoalView {
+function toGoalView(
+  row: GoalRow,
+  totals: GoalTotals,
+  walletBalanceMinor: bigint,
+  today: string,
+): GoalView {
   const reservedMinor = reservedFromTotals(totals);
   const uncoveredMinor = calculateGoalCoverage(reservedMinor, walletBalanceMinor).uncoveredMinor;
+  const targetMinor = BigInt(row.target_minor);
+  const remainingMinor = targetMinor > reservedMinor ? targetMinor - reservedMinor : BigInt(0);
+  const contributionPeriodsRemaining = goalContributionPeriods(today, row.deadline);
+  const requiredMinor =
+    remainingMinor > BigInt(0) && contributionPeriodsRemaining !== null
+      ? requiredGoalContribution(targetMinor, reservedMinor, contributionPeriodsRemaining)
+      : null;
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -910,6 +932,12 @@ function toGoalView(row: GoalRow, totals: GoalTotals, walletBalanceMinor: bigint
     target: { currency: row.currency_code, minor: BigInt(row.target_minor).toString() },
     reserved: { currency: row.currency_code, minor: reservedMinor.toString() },
     uncovered: { currency: row.currency_code, minor: uncoveredMinor.toString() },
+    remaining: { currency: row.currency_code, minor: remainingMinor.toString() },
+    contributionPeriodsRemaining,
+    requiredContribution:
+      requiredMinor === null
+        ? null
+        : { currency: row.currency_code, minor: requiredMinor.toString() },
     deadline: row.deadline,
     priority: row.priority,
     status: row.status,
