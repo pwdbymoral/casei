@@ -813,6 +813,8 @@ export const recurrenceRule = pgTable(
     kind: text("kind").notNull(),
     amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
     description: text("description").notNull().default(""),
+    status: text("status").notNull().default("active"),
+    invalidReason: text("invalid_reason"),
     pausedOn: date("paused_on"),
     version: integer("version").notNull().default(0),
     createdAt: instant("created_at").defaultNow().notNull(),
@@ -821,11 +823,15 @@ export const recurrenceRule = pgTable(
   (table) => [
     check("recurrence_frequency_check", sql`${table.frequency} in ('weekly', 'monthly', 'annual')`),
     check("recurrence_interval_check", sql`${table.interval} > 0`),
-    check("recurrence_kind_check", sql`${table.kind} in ('income', 'expense')`),
-    check("recurrence_amount_check", sql`${table.amountMinor} > 0`),
+    check("recurrence_status_check", sql`${table.status} in ('active', 'archived')`),
+    check(
+      "recurrence_kind_check",
+      sql`${table.status} = 'archived' or ${table.kind} in ('income', 'expense')`,
+    ),
+    check("recurrence_amount_check", sql`${table.status} = 'archived' or ${table.amountMinor} > 0`),
     check(
       "recurrence_date_order_check",
-      sql`${table.endOn} is null or ${table.endOn} >= ${table.startOn}`,
+      sql`${table.status} = 'archived' or ${table.endOn} is null or ${table.endOn} >= ${table.startOn}`,
     ),
   ],
 );

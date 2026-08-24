@@ -99,6 +99,10 @@ uma reversão estorna todos os deltas publicados atomicamente.
 - Regra fixa replica o valor planejado. Regra variável pode usar valor estimado opcional e exige confirmação do valor efetivo antes da liquidação.
 - Cada ocorrência materializada é um compromisso `planned` da carteira única e conserva a moeda, tipo, valor-base e descrição da regra.
 - O sistema materializa ocorrências em janela móvel inclusiva de hoje até hoje + 12 meses civis, no fuso do espaço, de modo idempotente, e amplia a janela por job durável de sistema. A data civil usada pelo job fica persistida no payload para retries determinísticos.
+- Regras legadas sem uma ocorrência-fonte recuperável, ou com tipo/data incompatível,
+  ficam arquivadas com motivo explícito durante a migração e não geram novos compromissos.
+  O scheduler semeia e repara jobs por espaço a partir das regras ativas, sem depender
+  apenas da existência de um job histórico.
 - A chave natural `(workspace, recurrence, occurredOn)` impede que retries ou workers concorrentes criem outra ocorrência ou transação para a mesma data.
 - Editar oferece escopo `Somente esta`, `Esta e futuras` ou `Toda a série ainda não liquidada`.
 - Ocorrências realizadas nunca são reescritas por edição da regra.

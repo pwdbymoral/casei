@@ -28,6 +28,10 @@ liquidadas.
   que retry reproduza o mesmo resultado.
 - A expansão roda como job durável de sistema, com lease/fencing e chave natural por
   espaço/data; uma falha é reprocessável sem duplicação.
+- A migration arquiva explicitamente regras legadas sem ocorrência-fonte, com motivo
+  verificável, e não as expõe ao motor ativo. A migration também semeia um job por
+  espaço com regra ativa; o scheduler redescobre regras diretamente como reparo caso
+  o job histórico esteja ausente.
 
 ## Estratégia
 
@@ -50,6 +54,7 @@ workers/reties e comprovar a constraint natural, RLS e a expansão do horizonte.
 - Domínio: testes de datas civis, âncoras mensais e ano bissexto.
 - Contratos/API: criação, pausa, retomada, `If-Match`, idempotência e ETag.
 - Banco: migration `0012_recurrence_engine`, constraint natural parcial,
-  backfill da fonte da regra e política RLS para jobs de sistema.
+  backfill da fonte da regra, arquivamento de legado inválido, política RLS para
+  jobs de sistema e job inicial por espaço.
 - Integração PostgreSQL: expansão de 12 ocorrências, retry idempotente, meses
   curtos, pausa inclusiva e cancelamento de ocorrências planejadas.

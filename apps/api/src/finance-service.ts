@@ -144,6 +144,7 @@ interface RecurrenceRuleRow {
   variable: boolean;
   estimated_minor: string | null;
   description: string;
+  status: "active" | "archived";
   paused_on: string | null;
   version: number;
 }
@@ -1320,6 +1321,7 @@ export class FinanceService {
             variable: parsed.variable,
             estimated_minor: parsed.estimatedAmount?.minor ?? null,
             description: parsed.description,
+            status: "active",
             paused_on: null,
             version: 0,
           };
@@ -1370,9 +1372,9 @@ export class FinanceService {
             `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
                     start_on::text AS start_on, end_on::text AS end_on,
                     max_occurrences, variable, estimated_minor, description,
-                    paused_on::text AS paused_on, version
+                    status, paused_on::text AS paused_on, version
                FROM recurrence_rule
-              WHERE workspace_id = $1 AND id = $2
+              WHERE workspace_id = $1 AND id = $2 AND status = 'active'
               FOR UPDATE`,
             [scope.workspaceId, recurrenceId],
           );
@@ -1435,9 +1437,9 @@ export class FinanceService {
             `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
                     start_on::text AS start_on, end_on::text AS end_on,
                     max_occurrences, variable, estimated_minor, description,
-                    paused_on::text AS paused_on, version
+                    status, paused_on::text AS paused_on, version
                FROM recurrence_rule
-              WHERE workspace_id = $1 AND id = $2`,
+              WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
             [scope.workspaceId, recurrenceId],
           );
           const next = updated.rows[0];
@@ -1474,9 +1476,9 @@ export class FinanceService {
                 `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
                         start_on::text AS start_on, end_on::text AS end_on,
                         max_occurrences, variable, estimated_minor, description,
-                        paused_on::text AS paused_on, version
+                        status, paused_on::text AS paused_on, version
                    FROM recurrence_rule
-                  WHERE workspace_id = $1
+                  WHERE workspace_id = $1 AND status = 'active'
                   ORDER BY id
                   FOR UPDATE`,
                 [payload.workspaceId],
@@ -1513,14 +1515,7 @@ export class FinanceService {
 
   /** Enqueues one idempotent expansion job per workspace and local civil day. */
   async scheduleRecurrenceExpansions(at = this.clock.now()): Promise<number> {
-    const workspaces = await this.pool.query<{ workspace_id: string }>(
-      `SELECT DISTINCT workspace_id
-         FROM job
-        WHERE job_type = 'recurrence.expand' AND job_version = 1
-          AND actor_id IS NULL AND required_capability = 'system.recurrence'
-          AND workspace_id IS NOT NULL
-        ORDER BY workspace_id`,
-    );
+    const workspaces = await this.listActiveRecurrenceWorkspaces();
     let scheduled = 0;
     for (const row of workspaces.rows) {
       await withUnitOfWork(
@@ -1540,6 +1535,40 @@ export class FinanceService {
       );
     }
     return scheduled;
+  }
+
+  /**
+   * Lists active recurrence workspaces under the read-only system RLS policy.
+   * This is deliberately independent from `job`: old rules may have no seed
+   * job after an interrupted migration or a restored database.
+   */
+  private async listActiveRecurrenceWorkspaces(): Promise<{ rows: { workspace_id: string }[] }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(this.applicationRole)) {
+        throw new Error("Invalid PostgreSQL role identifier");
+      }
+      await client.query(`SET LOCAL ROLE "${this.applicationRole}"`);
+      await client.query(
+        `SELECT set_config('app.workspace_id', '', true),
+                set_config('app.actor_id', 'system', true),
+                set_config('app.correlation_id', '', true)`,
+      );
+      const result = await client.query<{ workspace_id: string }>(
+        `SELECT DISTINCT workspace_id
+           FROM recurrence_rule
+          WHERE status = 'active'
+          ORDER BY workspace_id`,
+      );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private async enqueueRecurrenceExpansion(

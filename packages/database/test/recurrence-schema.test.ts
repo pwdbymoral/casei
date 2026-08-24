@@ -22,9 +22,15 @@ test("PLAN-002 migration makes recurrence transaction creation naturally idempot
   assert.match(migration, /WHERE "recurrence_id" IS NOT NULL/i);
   assert.match(migration, /ADD COLUMN "kind" text/i);
   assert.match(migration, /ADD COLUMN "amount_minor" bigint/i);
+  assert.match(migration, /ADD COLUMN "status" text/i);
+  assert.match(migration, /"status" = 'archived'/i);
+  assert.match(migration, /archived|invalid_reason/i);
   assert.match(migration, /recurrence_date_order_check/i);
+  assert.match(migration, /recurrence_rule_system_scope/i);
   assert.match(migration, /job_type = 'recurrence\.expand'/i);
   assert.match(migration, /system\.recurrence/i);
+  assert.match(migration, /INSERT INTO "job"/i);
+  assert.match(migration, /FROM "recurrence_rule"/i);
   assert.match(down, /DROP INDEX.*finance_transaction_recurrence_date_unique/i);
   assert.match(down, /DROP POLICY IF EXISTS "job_scope"/i);
   assert.match(down, /job_type = 'workspace\.purge'/i);

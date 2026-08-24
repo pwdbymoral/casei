@@ -91,6 +91,41 @@ describe("PLAN-002 recurrence PostgreSQL", () => {
       await fixture.close();
     }
   });
+
+  integrationIt("discovers legacy active rules even when no expansion job exists", async () => {
+    const fixture = await createFixture();
+    try {
+      const recurrence = await fixture.pool.query<{ id: string }>(
+        `INSERT INTO recurrence_rule
+          (workspace_id, kind, amount_minor, frequency, interval, start_on, variable, description)
+         VALUES ($1, 'expense', 125, 'monthly', 1, '2030-01-31', false, 'Regra legada')
+         RETURNING id`,
+        [fixture.workspaceId],
+      );
+      const recurrenceId = recurrence.rows[0]?.id;
+      expect(recurrenceId).toBeTruthy();
+
+      const service = new FinanceService(fixture.pool, {
+        cursorSecret: "recurrence-discovery-secret",
+        clock: fixedClock(new Date("2030-01-15T12:00:00.000Z")),
+      });
+      const scheduled = await service.scheduleRecurrenceExpansions(
+        new Date("2030-01-15T12:00:00.000Z"),
+      );
+      expect(scheduled).toBe(1);
+
+      const queued = await fixture.pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM job
+          WHERE workspace_id = $1
+            AND job_type = 'recurrence.expand'`,
+        [fixture.workspaceId],
+      );
+      expect(queued.rows[0]?.count).toBe("1");
+    } finally {
+      await fixture.close();
+    }
+  });
 });
 
 async function createFixture() {

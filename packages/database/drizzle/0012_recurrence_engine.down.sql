@@ -1,8 +1,12 @@
 DROP INDEX IF EXISTS "finance_transaction_recurrence_date_unique";
+DROP POLICY IF EXISTS "recurrence_rule_system_scope" ON "recurrence_rule";
 ALTER TABLE "recurrence_rule"
   DROP CONSTRAINT IF EXISTS "recurrence_date_order_check",
   DROP CONSTRAINT IF EXISTS "recurrence_amount_check",
   DROP CONSTRAINT IF EXISTS "recurrence_kind_check",
+  DROP CONSTRAINT IF EXISTS "recurrence_status_check",
+  DROP COLUMN IF EXISTS "invalid_reason",
+  DROP COLUMN IF EXISTS "status",
   DROP COLUMN IF EXISTS "description",
   DROP COLUMN IF EXISTS "amount_minor",
   DROP COLUMN IF EXISTS "kind";
