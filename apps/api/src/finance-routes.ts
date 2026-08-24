@@ -1,4 +1,5 @@
 import {
+  categoryTransitionSchema,
   closeStatementSchema,
   createCategorySchema,
   createCreditCardSchema,
@@ -15,10 +16,13 @@ import {
   loanPaymentSchema,
   paginationQuerySchema,
   payStatementSchema,
+  recurrenceTransitionSchema,
   reopenStatementSchema,
   settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
+  updateCategorySchema,
+  updateCreditCardSchema,
   updateGoalSchema,
 } from "@casei/contracts";
 import { IdempotencyConflictError } from "@casei/database";
@@ -347,6 +351,45 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
   });
 
+  router.patch("/workspaces/:workspaceId/categories/:categoryId", async (context) => {
+    const categoryId = parseDomainId(context.req.param("categoryId"));
+    const input = await parseJsonBody(context, updateCategorySchema);
+    const result = await service.updateCategory(
+      scopeOf(context),
+      categoryId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.category.version);
+    return context.json(result.category);
+  });
+
+  for (const action of ["archive", "restore"] as const) {
+    router.post(`/workspaces/:workspaceId/categories/:categoryId/${action}`, async (context) => {
+      const categoryId = parseDomainId(context.req.param("categoryId"));
+      await parseJsonBody(context, categoryTransitionSchema);
+      const result =
+        action === "archive"
+          ? await service.archiveCategory(
+              scopeOf(context),
+              categoryId,
+              requiredIdempotencyKey(context),
+              requireIfMatch(context),
+            )
+          : await service.restoreCategory(
+              scopeOf(context),
+              categoryId,
+              requiredIdempotencyKey(context),
+              requireIfMatch(context),
+            );
+      context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+      setVersionHeaders(context, result.category.version);
+      return context.json(result.category);
+    });
+  }
+
   router.post("/workspaces/:workspaceId/cards", async (context) => {
     const input = await parseJsonBody(context, createCreditCardSchema);
     const result = await service.createCard(
@@ -355,6 +398,34 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       requiredIdempotencyKey(context),
     );
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+  });
+
+  router.patch("/workspaces/:workspaceId/cards/:cardId", async (context) => {
+    const cardId = parseDomainId(context.req.param("cardId"));
+    const input = await parseJsonBody(context, updateCreditCardSchema);
+    const result = await service.updateCard(
+      scopeOf(context),
+      cardId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.card.version);
+    return context.json(result.card);
+  });
+
+  router.post("/workspaces/:workspaceId/cards/:cardId/archive", async (context) => {
+    const cardId = parseDomainId(context.req.param("cardId"));
+    const result = await service.archiveCard(
+      scopeOf(context),
+      cardId,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.card.version);
+    return context.json(result.card);
   });
 
   router.post("/workspaces/:workspaceId/cards/:cardId/purchases", async (context) => {
@@ -398,8 +469,29 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       input,
       requiredIdempotencyKey(context),
     );
-    return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+    return context.json(
+      result.response as unknown as Record<string, unknown>,
+      result.replayed ? 200 : 201,
+    );
   });
+
+  for (const action of ["pause", "resume"] as const) {
+    router.post(`/workspaces/:workspaceId/recurrences/:recurrenceId/${action}`, async (context) => {
+      const recurrenceId = parseDomainId(context.req.param("recurrenceId"));
+      const expectedVersion = requireIfMatch(context);
+      const input = await parseJsonBody(context, recurrenceTransitionSchema);
+      const result = await service.transitionRecurrence(
+        scopeOf(context),
+        recurrenceId,
+        action,
+        input,
+        requiredIdempotencyKey(context),
+        expectedVersion,
+      );
+      setVersionHeaders(context, result.recurrence.version);
+      return context.json(result.recurrence);
+    });
+  }
 
   router.post("/workspaces/:workspaceId/statements/:statementId/close", async (context) => {
     const statementId = parseDomainId(context.req.param("statementId"));

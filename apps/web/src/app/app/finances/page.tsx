@@ -1,11 +1,13 @@
 "use client";
 
 import {
+  ArchiveIcon,
   CalendarClockIcon,
   CheckIcon,
   CreditCardIcon,
   ListTreeIcon,
   LoaderCircleIcon,
+  PencilIcon,
   PlusIcon,
   ReceiptTextIcon,
   RefreshCwIcon,
@@ -33,6 +35,7 @@ import {
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  type Category,
   type CreditCard,
   canWriteFinance,
   clearTransactionQueryParams,
@@ -53,6 +56,7 @@ import {
   transactionAmountPrefix,
   transactionKindLabel,
   transactionQueryFromSearchParams,
+  type UpdateCreditCardInput,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
@@ -121,12 +125,14 @@ function FinanceDashboard({
   > | null>(null);
   const [loadingAuditDetail, setLoadingAuditDetail] = useState(false);
   const [cards, setCards] = useState<CreditCard[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [transactionType, setTransactionType] = useState<"expense" | "income">("expense");
   const [transactionCardId, setTransactionCardId] = useState("");
+  const [transactionCategoryId, setTransactionCategoryId] = useState("");
   const [amount, setAmount] = useState("0");
   const [description, setDescription] = useState("");
   const [planned, setPlanned] = useState(false);
@@ -136,6 +142,20 @@ function FinanceDashboard({
   const [closingDay, setClosingDay] = useState("10");
   const [dueDay, setDueDay] = useState("17");
   const [savingCard, setSavingCard] = useState(false);
+  const [categoryName, setCategoryName] = useState("");
+  const [categoryKind, setCategoryKind] = useState<Category["kind"]>("expense");
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [editingCard, setEditingCard] = useState<CreditCard | null>(null);
+  const [cardEditName, setCardEditName] = useState("");
+  const [cardEditClosingDay, setCardEditClosingDay] = useState("10");
+  const [cardEditDueDay, setCardEditDueDay] = useState("17");
+  const [cardEditHolder, setCardEditHolder] = useState("");
+  const [cardEditLastFour, setCardEditLastFour] = useState("");
+  const [cardEditLimit, setCardEditLimit] = useState("");
+  const [savingCardEdit, setSavingCardEdit] = useState(false);
+  const [pendingCardArchive, setPendingCardArchive] = useState<CreditCard | null>(null);
+  const [archivingCardId, setArchivingCardId] = useState<string | null>(null);
   const [busyStatementId, setBusyStatementId] = useState<string | null>(null);
   const [viewingStatement, setViewingStatement] = useState<Statement | null>(null);
   const [statementItems, setStatementItems] = useState<StatementItem[]>([]);
@@ -198,6 +218,7 @@ function FinanceDashboard({
     setTransactionsNextCursor(null);
     setTransactionsHasMore(false);
     setCards([]);
+    setCategories([]);
     setStatements([]);
     setStatus("loading");
     setError(null);
@@ -223,6 +244,14 @@ function FinanceDashboard({
     setSaving(false);
     setUndoing(false);
     setSavingCard(false);
+    setSavingCategory(false);
+    setCategoryName("");
+    setCategoryKind("expense");
+    setEditingCategory(null);
+    setEditingCard(null);
+    setSavingCardEdit(false);
+    setPendingCardArchive(null);
+    setArchivingCardId(null);
     setBusyStatementId(null);
     setPendingStatementAction(null);
     setUndoableTransaction(null);
@@ -240,6 +269,7 @@ function FinanceDashboard({
   const workspaceDataReady = dataWorkspaceId === workspaceId;
   const visibleTransactions = workspaceDataReady ? transactions : [];
   const visibleCards = workspaceDataReady ? cards : [];
+  const visibleCategories = workspaceDataReady ? categories : [];
   const visibleStatements = workspaceDataReady ? statements : [];
   const visibleError = workspaceDataReady ? error : null;
   const visibleNotice = workspaceDataReady ? notice : null;
@@ -250,6 +280,8 @@ function FinanceDashboard({
   const visibleSelectedAudit = workspaceDataReady ? selectedAudit : null;
   const visibleViewingStatement = workspaceDataReady ? viewingStatement : null;
   const visiblePendingStatementAction = workspaceDataReady ? pendingStatementAction : null;
+  const visibleEditingCard = workspaceDataReady ? editingCard : null;
+  const visiblePendingCardArchive = workspaceDataReady ? pendingCardArchive : null;
 
   useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
@@ -286,10 +318,11 @@ function FinanceDashboard({
       setStatementItemsNextCursor(null);
       setStatementItemsHasMore(false);
       try {
-        const [nextTransactions, nextCards, nextStatements] = await Promise.all([
+        const [nextTransactions, nextCards, nextStatements, nextCategories] = await Promise.all([
           adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
+          adapter.listCategories(workspaceId),
         ]);
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
           return;
@@ -298,6 +331,7 @@ function FinanceDashboard({
         setTransactionsHasMore(nextTransactions.hasMore);
         setCards(nextCards);
         setStatements(nextStatements);
+        setCategories(nextCategories);
         setStatus("success");
       } catch (cause) {
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
@@ -349,6 +383,7 @@ function FinanceDashboard({
           planned,
           description,
           cardId: transactionCardId,
+          categoryId: transactionCategoryId,
         }),
         commandKey,
       );
@@ -357,6 +392,7 @@ function FinanceDashboard({
       setAmount("0");
       setDescription("");
       setTransactionCardId("");
+      setTransactionCategoryId("");
       setPlanned(false);
       if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
       else await load(false);
@@ -441,6 +477,162 @@ function FinanceDashboard({
       setError(cause instanceof Error ? cause.message : "Não foi possível cadastrar o cartão.");
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCard(false);
+    }
+  }
+
+  async function handleCategorySubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = categoryName.trim();
+    if (savingCategory || !name || !writeAccess) return;
+    setSavingCategory(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const value = editingCategory
+        ? await adapter.updateCategory(workspaceId, editingCategory, {
+            name,
+            kind: categoryKind,
+          })
+        : await adapter.createCategory(workspaceId, { name, kind: categoryKind });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setCategories((current) => {
+        const index = current.findIndex((category) => category.id === value.id);
+        if (index < 0) return [...current, value];
+        return current.map((category) => (category.id === value.id ? value : category));
+      });
+      setCategoryName("");
+      setCategoryKind("expense");
+      setEditingCategory(null);
+      setNotice(editingCategory ? "Categoria atualizada." : "Categoria criada.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setError(cause instanceof Error ? cause.message : "Não foi possível salvar a categoria.");
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCategory(false);
+    }
+  }
+
+  async function transitionCategory(category: Category, action: "archive" | "restore") {
+    if (savingCategory || !writeAccess) return;
+    setSavingCategory(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const value =
+        action === "archive"
+          ? await adapter.archiveCategory(workspaceId, category)
+          : await adapter.restoreCategory(workspaceId, category);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setCategories((current) => current.map((item) => (item.id === value.id ? value : item)));
+      setNotice(action === "archive" ? "Categoria arquivada." : "Categoria restaurada.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : `Não foi possível ${action === "archive" ? "arquivar" : "restaurar"} a categoria.`,
+      );
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCategory(false);
+    }
+  }
+
+  function openCardEditor(card: CreditCard) {
+    setEditingCard(card);
+    setCardEditName(card.name);
+    setCardEditClosingDay(String(card.closingDay));
+    setCardEditDueDay(String(card.dueDay));
+    setCardEditHolder(card.holder ?? "");
+    setCardEditLastFour(card.lastFour ?? "");
+    setCardEditLimit(card.limit?.minor ?? "");
+    setError(null);
+  }
+
+  async function handleCardEditSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingCard || savingCardEdit) return;
+    const nextClosingDay = Number(cardEditClosingDay);
+    const nextDueDay = Number(cardEditDueDay);
+    if (!cardEditName.trim()) {
+      setError("Informe um nome para o cartão.");
+      return;
+    }
+    if (
+      !Number.isInteger(nextClosingDay) ||
+      nextClosingDay < 1 ||
+      nextClosingDay > 31 ||
+      !Number.isInteger(nextDueDay) ||
+      nextDueDay < 1 ||
+      nextDueDay > 31
+    ) {
+      setError("Fechamento e vencimento devem estar entre 1 e 31.");
+      return;
+    }
+    const normalizedLastFour = cardEditLastFour.trim();
+    if (normalizedLastFour && !/^\d{4}$/.test(normalizedLastFour)) {
+      setError("Os últimos quatro dígitos devem conter somente quatro números.");
+      return;
+    }
+    const input: UpdateCreditCardInput = {
+      name: cardEditName.trim(),
+      closingDay: nextClosingDay,
+      dueDay: nextDueDay,
+      holder: cardEditHolder.trim() || null,
+      lastFour: normalizedLastFour || null,
+      limit: cardEditLimit ? { currency, minor: cardEditLimit } : null,
+    };
+    setSavingCardEdit(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const updated = await adapter.updateCard(workspaceId, editingCard, input);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setCards((current) => current.map((value) => (value.id === updated.id ? updated : value)));
+      setEditingCard(null);
+      setNotice("Configuração do cartão atualizada.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setEditingCard(null);
+        await load();
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+        setNotice(
+          "O cartão mudou enquanto você o editava. Recarregamos os dados; revise antes de tentar novamente.",
+        );
+      } else {
+        setError(cause instanceof Error ? cause.message : "Não foi possível atualizar o cartão.");
+      }
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingCardEdit(false);
+    }
+  }
+
+  async function handleCardArchive() {
+    if (!pendingCardArchive || archivingCardId) return;
+    const card = pendingCardArchive;
+    setArchivingCardId(card.id);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const archived = await adapter.archiveCard(workspaceId, card);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setCards((current) => current.map((value) => (value.id === archived.id ? archived : value)));
+      setPendingCardArchive(null);
+      setNotice("Cartão arquivado. O histórico de faturas foi preservado.");
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setPendingCardArchive(null);
+        await load();
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+        setNotice(
+          "O cartão mudou enquanto você o revisava. Recarregamos os dados; revise antes de tentar novamente.",
+        );
+      } else {
+        setError(cause instanceof Error ? cause.message : "Não foi possível arquivar o cartão.");
+      }
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setArchivingCardId(null);
     }
   }
 
@@ -809,7 +1001,10 @@ function FinanceDashboard({
                   onChange={(event) => {
                     const nextType = event.target.value as "expense" | "income";
                     setTransactionType(nextType);
-                    if (nextType === "income") setTransactionCardId("");
+                    if (nextType === "income") {
+                      setTransactionCardId("");
+                      setTransactionCategoryId("");
+                    }
                   }}
                 >
                   <option value="expense">Despesa</option>
@@ -852,6 +1047,28 @@ function FinanceDashboard({
                     />
                     <FieldDescription>Você pode detalhar depois.</FieldDescription>
                   </Field>
+                  <Field className="mt-3">
+                    <FieldLabel htmlFor="transaction-category">Categoria (opcional)</FieldLabel>
+                    <select
+                      id="transaction-category"
+                      className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                      value={transactionCategoryId}
+                      onChange={(event) => setTransactionCategoryId(event.target.value)}
+                    >
+                      <option value="">Sem categoria</option>
+                      {visibleCategories
+                        .filter(
+                          (category) =>
+                            !category.archived &&
+                            (category.kind === "both" || category.kind === transactionType),
+                        )
+                        .map((category) => (
+                          <option key={category.id} value={category.id}>
+                            {category.name}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
                 </div>
               </details>
               <div className="flex flex-col gap-2">
@@ -873,6 +1090,146 @@ function FinanceDashboard({
                 </Button>
               </div>
             </form>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section aria-labelledby="categories-title">
+        <Card>
+          <CardHeader>
+            <CardTitle id="categories-title">Categorias</CardTitle>
+            <CardDescription>
+              Organize receitas e despesas sem apagar o histórico. Categorias arquivadas continuam
+              visíveis nos lançamentos antigos.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)]">
+            <form
+              className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+              onSubmit={handleCategorySubmit}
+            >
+              <Field>
+                <FieldLabel htmlFor="category-name">Nome</FieldLabel>
+                <Input
+                  id="category-name"
+                  value={categoryName}
+                  onChange={(event) => setCategoryName(event.target.value)}
+                  placeholder="Ex.: Mercado"
+                  maxLength={80}
+                  disabled={!writeAccess || savingCategory}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="category-kind">Tipo</FieldLabel>
+                <select
+                  id="category-kind"
+                  className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={categoryKind}
+                  onChange={(event) => setCategoryKind(event.target.value as Category["kind"])}
+                  disabled={!writeAccess || savingCategory}
+                >
+                  <option value="expense">Despesa</option>
+                  <option value="income">Receita</option>
+                  <option value="both">Receita e despesa</option>
+                </select>
+              </Field>
+              <div className="flex gap-2">
+                <Button
+                  type="submit"
+                  disabled={!writeAccess || savingCategory || !categoryName.trim()}
+                >
+                  {savingCategory ? (
+                    <LoaderCircleIcon className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <PlusIcon aria-hidden="true" />
+                  )}
+                  {editingCategory ? "Salvar" : "Adicionar"}
+                </Button>
+                {editingCategory ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setEditingCategory(null);
+                      setCategoryName("");
+                      setCategoryKind("expense");
+                    }}
+                    disabled={savingCategory}
+                  >
+                    Cancelar
+                  </Button>
+                ) : null}
+              </div>
+            </form>
+            <div className="rounded-lg border bg-muted/20 p-3" aria-live="polite">
+              {visibleCategories.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Nenhuma categoria cadastrada. A primeira pode ser criada acima.
+                </p>
+              ) : (
+                <ul className="divide-y">
+                  {visibleCategories.map((category) => (
+                    <li
+                      key={category.id}
+                      className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{category.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {category.kind === "both"
+                            ? "Receita e despesa"
+                            : category.kind === "income"
+                              ? "Receita"
+                              : "Despesa"}
+                          {category.archived ? " · Arquivada" : ""}
+                        </p>
+                      </div>
+                      {writeAccess ? (
+                        <div className="flex shrink-0 gap-1">
+                          {!category.archived ? (
+                            <>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                aria-label={`Editar categoria ${category.name}`}
+                                onClick={() => {
+                                  setEditingCategory(category);
+                                  setCategoryName(category.name);
+                                  setCategoryKind(category.kind);
+                                }}
+                                disabled={savingCategory}
+                              >
+                                <PencilIcon aria-hidden="true" />
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => void transitionCategory(category, "archive")}
+                                disabled={savingCategory}
+                              >
+                                Arquivar
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void transitionCategory(category, "restore")}
+                              disabled={savingCategory}
+                            >
+                              Restaurar
+                            </Button>
+                          )}
+                        </div>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </CardContent>
         </Card>
       </section>
@@ -1116,10 +1473,46 @@ function FinanceDashboard({
             {visibleCards.map((card) => (
               <div key={card.id} className="rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="font-medium">{card.name}</p>
-                  <span className="text-sm text-muted-foreground">
-                    Fecha {card.closingDay} · vence {card.dueDay}
-                  </span>
+                  <div>
+                    <p className="font-medium">
+                      {card.name}
+                      {card.archived ? (
+                        <span className="ml-2 text-xs font-normal text-muted-foreground">
+                          Arquivado
+                        </span>
+                      ) : null}
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Fecha {card.closingDay} · vence {card.dueDay}
+                      {card.lastFour ? ` · •••• ${card.lastFour}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Editar ${card.name}`}
+                      onClick={() => openCardEditor(card)}
+                      disabled={!writeAccess || savingCardEdit || archivingCardId !== null}
+                    >
+                      <PencilIcon aria-hidden="true" />
+                      <span className="sr-only">Editar</span>
+                    </Button>
+                    {!card.archived ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Arquivar ${card.name}`}
+                        onClick={() => setPendingCardArchive(card)}
+                        disabled={!writeAccess || savingCardEdit || archivingCardId !== null}
+                      >
+                        <ArchiveIcon aria-hidden="true" />
+                        <span className="sr-only">Arquivar</span>
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
                 {visibleStatements
                   .filter((statement) => statement.cardId === card.id)
@@ -1521,6 +1914,140 @@ function FinanceDashboard({
           ) : null}
           <DialogFooter>
             <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={visibleEditingCard !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingCardEdit) setEditingCard(null);
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Editar cartão</DialogTitle>
+            <DialogDescription>
+              A nova configuração vale para ciclos futuros. Faturas já fechadas preservam suas datas
+              e valores.
+            </DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={handleCardEditSubmit}>
+            <Field>
+              <FieldLabel htmlFor="edit-card-name">Nome do cartão</FieldLabel>
+              <Input
+                id="edit-card-name"
+                value={cardEditName}
+                onChange={(event) => setCardEditName(event.target.value)}
+                required
+                disabled={savingCardEdit}
+              />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <FieldLabel htmlFor="edit-card-closing">Fecha dia</FieldLabel>
+                <Input
+                  id="edit-card-closing"
+                  type="number"
+                  min={1}
+                  max={31}
+                  value={cardEditClosingDay}
+                  onChange={(event) => setCardEditClosingDay(event.target.value)}
+                  required
+                  disabled={savingCardEdit}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="edit-card-due">Vence dia</FieldLabel>
+                <Input
+                  id="edit-card-due"
+                  type="number"
+                  min={1}
+                  max={31}
+                  value={cardEditDueDay}
+                  onChange={(event) => setCardEditDueDay(event.target.value)}
+                  required
+                  disabled={savingCardEdit}
+                />
+              </Field>
+            </div>
+            <Field>
+              <FieldLabel htmlFor="edit-card-holder">Titular (opcional)</FieldLabel>
+              <Input
+                id="edit-card-holder"
+                value={cardEditHolder}
+                onChange={(event) => setCardEditHolder(event.target.value)}
+                disabled={savingCardEdit}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="edit-card-last-four">Últimos quatro dígitos</FieldLabel>
+              <Input
+                id="edit-card-last-four"
+                inputMode="numeric"
+                maxLength={4}
+                value={cardEditLastFour}
+                onChange={(event) => setCardEditLastFour(event.target.value.replace(/\D/g, ""))}
+                disabled={savingCardEdit}
+              />
+            </Field>
+            <MoneyInput
+              id="edit-card-limit"
+              value={cardEditLimit}
+              onChange={setCardEditLimit}
+              label="Limite (opcional)"
+              currency={currency}
+              disabled={savingCardEdit}
+            />
+            <DialogFooter>
+              <DialogClose
+                render={<Button type="button" variant="outline" />}
+                disabled={savingCardEdit}
+              >
+                Cancelar
+              </DialogClose>
+              <Button type="submit" disabled={savingCardEdit}>
+                {savingCardEdit ? "Salvando…" : "Salvar alterações"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={visiblePendingCardArchive !== null}
+        onOpenChange={(open) => {
+          if (!open && archivingCardId === null) setPendingCardArchive(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Arquivar cartão?</DialogTitle>
+            <DialogDescription>
+              O cartão deixará de aceitar novas compras, mas suas faturas e pagamentos continuarão
+              no histórico.
+            </DialogDescription>
+          </DialogHeader>
+          {visiblePendingCardArchive ? (
+            <p className="rounded-lg bg-muted/50 p-3 text-sm">
+              O arquivamento só é permitido quando não há saldo em aberto nem fatura pendente para
+              este cartão.
+            </p>
+          ) : null}
+          <DialogFooter>
+            <DialogClose
+              render={<Button type="button" variant="outline" />}
+              disabled={archivingCardId !== null}
+            >
+              Cancelar
+            </DialogClose>
+            <Button
+              type="button"
+              onClick={() => void handleCardArchive()}
+              disabled={archivingCardId !== null}
+            >
+              {archivingCardId ? "Arquivando…" : "Arquivar cartão"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -10,7 +10,7 @@ Recorrências, fechamento de faturas, e-mails, imports, exports e expiração de
 
 ## Decisão
 
-Persistir outbox e fila de jobs no PostgreSQL 18. Um processo `apps/worker`, produzido no mesmo monorepo e imagem própria, executa handlers compartilhados com a API. A API nunca depende de worker no mesmo processo.
+Persistir outbox e fila de jobs no PostgreSQL 18. Processos standalone produzidos no mesmo monorepo e imagem própria executam handlers compartilhados com a API (por exemplo, `worker:workspace` e `worker:recurrence`). A API nunca depende de worker no mesmo processo.
 
 Cada job possui tipo versionado, payload mínimo, chave idempotente, estado, prioridade, tentativas, `availableAt`, lease com expiração, correlation ID e erro sanitizado. Workers selecionam jobs elegíveis em transação curta com row lock e `FOR UPDATE SKIP LOCKED`, registram lease e processam fora da transação de aquisição. Conclusão, retry e dead-letter usam compare-and-set do lease.
 

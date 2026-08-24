@@ -32,6 +32,15 @@ export type CreditCard = {
   version: number;
 };
 
+export type UpdateCreditCardInput = {
+  name?: string;
+  closingDay?: number;
+  dueDay?: number;
+  holder?: string | null;
+  lastFour?: string | null;
+  limit?: Money | null;
+};
+
 export type Statement = {
   id: string;
   workspaceId: string;
@@ -154,6 +163,7 @@ export function createQuickCaptureTransactionInput(input: {
   planned: boolean;
   description: string;
   cardId: string;
+  categoryId?: string;
 }): CreateTransactionInput {
   return {
     kind: input.kind,
@@ -161,6 +171,7 @@ export function createQuickCaptureTransactionInput(input: {
     state: input.planned ? "planned" : "posted",
     description: input.description,
     cardId: transactionCardIdForKind(input.kind, input.cardId),
+    categoryId: input.categoryId || null,
   };
 }
 
@@ -231,6 +242,8 @@ export type CreateTransactionInput = {
   cardId?: string | null;
 };
 
+export type UpdateCategoryInput = { name?: string; kind?: Category["kind"] };
+
 export type FinanceAdapter = {
   listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
   listTransactionAudit(
@@ -254,6 +267,17 @@ export type FinanceAdapter = {
     idempotencyKey?: string,
   ): Promise<Transaction>;
   listCategories(workspaceId: string): Promise<Category[]>;
+  createCategory(
+    workspaceId: string,
+    input: { name: string; kind: Category["kind"] },
+  ): Promise<Category>;
+  updateCategory(
+    workspaceId: string,
+    category: Category,
+    input: UpdateCategoryInput,
+  ): Promise<Category>;
+  archiveCategory(workspaceId: string, category: Category): Promise<Category>;
+  restoreCategory(workspaceId: string, category: Category): Promise<Category>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
   createCard(
     workspaceId: string,
@@ -266,6 +290,12 @@ export type FinanceAdapter = {
       limit?: Money | null;
     },
   ): Promise<CreditCard>;
+  updateCard(
+    workspaceId: string,
+    card: CreditCard,
+    input: UpdateCreditCardInput,
+  ): Promise<CreditCard>;
+  archiveCard(workspaceId: string, card: CreditCard): Promise<CreditCard>;
   listStatements(workspaceId: string, cardId?: string): Promise<Statement[]>;
   listStatementItems(
     workspaceId: string,
@@ -331,8 +361,14 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   createTransaction: unavailableFinanceOperation,
   reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
+  createCategory: unavailableFinanceOperation,
+  updateCategory: unavailableFinanceOperation,
+  archiveCategory: unavailableFinanceOperation,
+  restoreCategory: unavailableFinanceOperation,
   listCards: unavailableFinanceOperation,
   createCard: unavailableFinanceOperation,
+  updateCard: unavailableFinanceOperation,
+  archiveCard: unavailableFinanceOperation,
   listStatements: unavailableFinanceOperation,
   listStatementItems: unavailableFinanceOperation,
   closeStatement: unavailableFinanceOperation,
@@ -437,12 +473,62 @@ export function createHttpFinanceAdapter(
         },
       }),
     listCategories: (workspaceId) => list<Category>(`/workspaces/${workspaceId}/categories`),
+    createCategory: (workspaceId, input) =>
+      call<Category>(`/workspaces/${workspaceId}/categories`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey() },
+        body: JSON.stringify(input),
+      }),
+    updateCategory: (workspaceId, category, input) =>
+      call<Category>(`/workspaces/${workspaceId}/categories/${category.id}`, {
+        method: "PATCH",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${category.version}"`,
+        },
+        body: JSON.stringify(input),
+      }),
+    archiveCategory: (workspaceId, category) =>
+      call<Category>(`/workspaces/${workspaceId}/categories/${category.id}/archive`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${category.version}"`,
+        },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    restoreCategory: (workspaceId, category) =>
+      call<Category>(`/workspaces/${workspaceId}/categories/${category.id}/restore`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${category.version}"`,
+        },
+        body: JSON.stringify({ confirm: true }),
+      }),
     listCards: (workspaceId) => list<CreditCard>(`/workspaces/${workspaceId}/cards`),
     createCard: (workspaceId, input) =>
       call<CreditCard>(`/workspaces/${workspaceId}/cards`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify(input),
+      }),
+    updateCard: (workspaceId, card, input) =>
+      call<CreditCard>(`/workspaces/${workspaceId}/cards/${card.id}`, {
+        method: "PATCH",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${card.version}"`,
+        },
+        body: JSON.stringify(input),
+      }),
+    archiveCard: (workspaceId, card) =>
+      call<CreditCard>(`/workspaces/${workspaceId}/cards/${card.id}/archive`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey(),
+          "If-Match": `"v${card.version}"`,
+        },
       }),
     listStatements: (workspaceId, cardId) =>
       list<Statement>(
@@ -520,6 +606,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
   type FixtureWorkspaceState = {
     currency: string | null;
     transactions: Transaction[];
+    categories: Category[];
     cards: CreditCard[];
     statements: Statement[];
     transactionAudit: Map<string, FinanceAuditEvent[]>;
@@ -570,6 +657,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     return {
       currency,
       transactions: [],
+      categories: [],
       cards,
       statements,
       transactionAudit: new Map(),
@@ -770,7 +858,42 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       if (!event) throw new FinanceAdapterError("Evento de auditoria não encontrado.", 404);
       return { ...event, consequences: { ledgerEvents: [] } };
     },
-    listCategories: async () => [],
+    listCategories: async (workspaceId) => [...stateFor(workspaceId).categories],
+    createCategory: async (workspaceId, input) => {
+      const state = stateFor(workspaceId);
+      const categories = state.categories;
+      const category: Category = {
+        id: fixtureId(120 + categories.length),
+        workspaceId,
+        name: input.name,
+        kind: input.kind,
+        archived: false,
+        version: 0,
+      };
+      categories.push(category);
+      return category;
+    },
+    updateCategory: async (workspaceId, category, input) => {
+      const state = stateFor(workspaceId);
+      const next = { ...category, ...input, version: category.version + 1 };
+      const index = state.categories.findIndex((value) => value.id === category.id);
+      if (index >= 0) state.categories[index] = next;
+      return next;
+    },
+    archiveCategory: async (workspaceId, category) => {
+      const state = stateFor(workspaceId);
+      const next = { ...category, archived: true, version: category.version + 1 };
+      const index = state.categories.findIndex((value) => value.id === category.id);
+      if (index >= 0) state.categories[index] = next;
+      return next;
+    },
+    restoreCategory: async (workspaceId, category) => {
+      const state = stateFor(workspaceId);
+      const next = { ...category, archived: false, version: category.version + 1 };
+      const index = state.categories.findIndex((value) => value.id === category.id);
+      if (index >= 0) state.categories[index] = next;
+      return next;
+    },
     listCards: async (workspaceId) => [...stateFor(workspaceId).cards],
     createCard: async (workspaceId, input) => {
       const state = stateFor(workspaceId);
@@ -788,6 +911,61 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       };
       state.cards.push(card);
       return card;
+    },
+    updateCard: async (workspaceId, card, input) => {
+      const state = stateFor(workspaceId);
+      const current = state.cards.find((item) => item.id === card.id);
+      if (!current) throw new FinanceAdapterError("Cartão não encontrado.", 404);
+      if (current.version !== card.version) {
+        throw new FinanceAdapterError(
+          "O cartão foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      if (input.closingDay !== undefined && (input.closingDay < 1 || input.closingDay > 31)) {
+        throw new FinanceAdapterError("O fechamento deve estar entre 1 e 31.", 422);
+      }
+      if (input.dueDay !== undefined && (input.dueDay < 1 || input.dueDay > 31)) {
+        throw new FinanceAdapterError("O vencimento deve estar entre 1 e 31.", 422);
+      }
+      const value: CreditCard = {
+        ...current,
+        ...input,
+        holder: input.holder === undefined ? current.holder : input.holder,
+        lastFour: input.lastFour === undefined ? current.lastFour : input.lastFour,
+        limit: input.limit === undefined ? current.limit : input.limit,
+        version: current.version + 1,
+      };
+      state.cards[state.cards.indexOf(current)] = value;
+      return value;
+    },
+    archiveCard: async (workspaceId, card) => {
+      const state = stateFor(workspaceId);
+      const current = state.cards.find((item) => item.id === card.id);
+      if (!current) throw new FinanceAdapterError("Cartão não encontrado.", 404);
+      if (current.version !== card.version) {
+        throw new FinanceAdapterError(
+          "O cartão foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      const hasOpenBalance = state.statements.some(
+        (statement) =>
+          statement.cardId === current.id &&
+          statement.state !== "canceled" &&
+          (statement.state === "open" || BigInt(statement.openAmount.minor) > BigInt(0)),
+      );
+      if (hasOpenBalance) {
+        throw new FinanceAdapterError(
+          "Quite o saldo e feche ou transfira a fatura antes de arquivar o cartão.",
+          409,
+        );
+      }
+      const value = { ...current, archived: true, version: current.version + 1 };
+      state.cards[state.cards.indexOf(current)] = value;
+      return value;
     },
     listStatements: async (workspaceId, cardId) =>
       stateFor(workspaceId).statements.filter(

@@ -13,6 +13,79 @@ const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
 const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
 
 describe("finance HTTP composition", () => {
+  it("routes category edits and archive actions with preconditions and idempotency", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const category = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890b0",
+      workspaceId,
+      name: "Mercado",
+      kind: "expense" as const,
+      archived: false,
+      version: 1,
+    };
+    const fakeService = {
+      updateCategory: async (...args: unknown[]) => {
+        calls.push({ method: "updateCategory", args });
+        return { replayed: false, category };
+      },
+      archiveCategory: async (...args: unknown[]) => {
+        calls.push({ method: "archiveCategory", args });
+        return { replayed: false, category: { ...category, archived: true, version: 2 } };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const edited = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/categories/${category.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "category-edit-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ name: "Mercado e feira", kind: "expense" }),
+      },
+    );
+    expect(edited.status).toBe(200);
+    expect(edited.headers.get("ETag")).toBe('"v1"');
+
+    const archived = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/categories/${category.id}/archive`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "category-archive-route-001",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+    expect(archived.status).toBe(200);
+    expect(archived.headers.get("ETag")).toBe('"v2"');
+    expect(calls[0]?.args.slice(1)).toEqual([
+      category.id,
+      { name: "Mercado e feira", kind: "expense" },
+      "category-edit-route-001",
+      0,
+    ]);
+    expect(calls[1]?.args.slice(1)).toEqual([category.id, "category-archive-route-001", 1]);
+  });
+
   it("wires finance through createApp's authenticated actor and workspace scope", async () => {
     let receivedActor: unknown;
     let receivedWorkspaceId: string | undefined;
@@ -267,7 +340,77 @@ describe("finance HTTP composition", () => {
     expect(received?.input).toEqual({});
   });
 
+  it("routes recurrence pause with an optimistic version and idempotency key", async () => {
+    let received: { action: string; input: unknown; version: number } | undefined;
+    const fakeService = {
+      transitionRecurrence: async (
+        _scope: unknown,
+        _id: string,
+        action: "pause" | "resume",
+        input: unknown,
+        _key: string,
+        version: number,
+      ) => {
+        received = { action, input, version };
+        return {
+          replayed: false,
+          recurrence: {
+            id: transactionId,
+            workspaceId,
+            kind: "expense",
+            amount: { currency: "BRL", minor: "100" },
+            frequency: "monthly",
+            interval: 1,
+            startOn: "2026-01-31",
+            endOn: null,
+            maxOccurrences: null,
+            variable: false,
+            estimatedAmount: null,
+            description: "Conta",
+            pausedOn: "2026-08-24",
+            version: 2,
+          },
+        };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/recurrences/${transactionId}/pause`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "recurrence-pause-route-001",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ effectiveOn: "2026-08-24" }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe('"v2"');
+    expect(received).toEqual({
+      action: "pause",
+      input: { effectiveOn: "2026-08-24" },
+      version: 1,
+    });
+  });
+
   it("lists cards and statements and closes an open statement with a version", async () => {
+    let receivedCardUpdate: { input: unknown; expectedVersion: number } | undefined;
     const fakeService = {
       listCards: async () => [
         {
@@ -298,6 +441,45 @@ describe("finance HTTP composition", () => {
           version: 0,
         },
       ],
+      updateCard: async (
+        _scope: unknown,
+        _id: string,
+        input: unknown,
+        _key: string,
+        expectedVersion: number,
+      ) => {
+        receivedCardUpdate = { input, expectedVersion };
+        return {
+          replayed: false,
+          card: {
+            id: cardId,
+            workspaceId,
+            name: "Nubank atualizado",
+            closingDay: 31,
+            dueDay: 5,
+            holder: "Marina",
+            lastFour: "1234",
+            limit: { currency: "BRL", minor: "100000" },
+            archived: false,
+            version: 1,
+          },
+        };
+      },
+      archiveCard: async () => ({
+        replayed: false,
+        card: {
+          id: cardId,
+          workspaceId,
+          name: "Nubank atualizado",
+          closingDay: 31,
+          dueDay: 5,
+          holder: "Marina",
+          lastFour: "1234",
+          limit: { currency: "BRL", minor: "100000" },
+          archived: true,
+          version: 2,
+        },
+      }),
       closeStatement: async () => ({
         id: statementId,
         workspaceId,
@@ -333,6 +515,53 @@ describe("finance HTTP composition", () => {
       items: [expect.objectContaining({ id: cardId, name: "Nubank" })],
       page: { nextCursor: null, hasMore: false },
     });
+
+    const missingCardVersion = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/cards/${cardId}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "card-update-route-002",
+        },
+        body: JSON.stringify({ closingDay: 31 }),
+      },
+    );
+    expect(missingCardVersion.status).toBe(428);
+
+    const updatedCard = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/cards/${cardId}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "card-update-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ closingDay: 31, dueDay: 5, holder: "Marina" }),
+      },
+    );
+    expect(updatedCard.status).toBe(200);
+    expect(receivedCardUpdate).toEqual({
+      input: { closingDay: 31, dueDay: 5, holder: "Marina" },
+      expectedVersion: 0,
+    });
+    expect(updatedCard.headers.get("etag")).toBe('"v1"');
+    await expect(updatedCard.json()).resolves.toMatchObject({ name: "Nubank atualizado" });
+
+    const archivedCard = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/cards/${cardId}/archive`,
+      {
+        method: "POST",
+        headers: {
+          "idempotency-key": "card-archive-route-001",
+          "if-match": '"v1"',
+        },
+      },
+    );
+    expect(archivedCard.status).toBe(200);
+    expect(archivedCard.headers.get("etag")).toBe('"v2"');
+    await expect(archivedCard.json()).resolves.toMatchObject({ archived: true });
 
     const statements = await app.request(
       `http://localhost/v1/workspaces/${workspaceId}/statements?cardId=${cardId}`,

@@ -97,10 +97,17 @@ uma reversão estorna todos os deltas publicados atomicamente.
 
 - Frequências MVP: semanal, mensal e anual; intervalo configurável; início obrigatório e fim opcional por data ou quantidade.
 - Regra fixa replica o valor planejado. Regra variável pode usar valor estimado opcional e exige confirmação do valor efetivo antes da liquidação.
-- O sistema materializa ocorrências em janela móvel de 12 meses, de modo idempotente, e amplia a janela por job seguro.
+- Cada ocorrência materializada é um compromisso `planned` da carteira única e conserva a moeda, tipo, valor-base e descrição da regra.
+- O sistema materializa ocorrências em janela móvel inclusiva de hoje até hoje + 12 meses civis, no fuso do espaço, de modo idempotente, e amplia a janela por job durável de sistema. A data civil usada pelo job fica persistida no payload para retries determinísticos.
+- Regras legadas sem uma ocorrência-fonte recuperável, ou com tipo/data incompatível,
+  ficam arquivadas com motivo explícito durante a migração e não geram novos compromissos.
+  O scheduler semeia e repara jobs por espaço a partir das regras ativas, sem depender
+  apenas da existência de um job histórico.
+- A chave natural `(workspace, recurrence, occurredOn)` impede que retries ou workers concorrentes criem outra ocorrência ou transação para a mesma data.
 - Editar oferece escopo `Somente esta`, `Esta e futuras` ou `Toda a série ainda não liquidada`.
 - Ocorrências realizadas nunca são reescritas por edição da regra.
-- Pausar impede novas ocorrências após a data efetiva; retomar não recria ocorrências canceladas sem confirmação.
+- `POST /v1/workspaces/:workspaceId/recurrences/:recurrenceId/pause` exige `If-Match: "v<version>"` e registra a primeira data civil bloqueada (a data efetiva é inclusiva; se omitida, usa hoje no fuso do espaço). Ocorrências futuras ainda planejadas são canceladas de forma auditável; ocorrências já realizadas não mudam.
+- `POST /v1/workspaces/:workspaceId/recurrences/:recurrenceId/resume` exige a versão atual, remove a pausa e permite novas ocorrências no próximo job; não recria ocorrências canceladas sem confirmação.
 - Para dia mensal inexistente, usa-se o último dia do mês e a UI explica a regra.
 
 ### Parcelamento

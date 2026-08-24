@@ -3,11 +3,161 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertStatementCanReopen,
   assertVariableRecurrenceSettlementAllowed,
+  FinanceConflictError,
   FinanceService,
 } from "../src/finance-service.js";
 import { decodeCursor } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
+  it("turns a concurrent active category name collision into a recoverable conflict", async () => {
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-category" }] };
+        if (sql.includes("INSERT INTO finance_category")) throw { code: "23505" };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    await expect(
+      service.createCategory(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "member",
+        },
+        { name: "Mercado", kind: "expense" },
+        "category-collision-001",
+      ),
+    ).rejects.toBeInstanceOf(FinanceConflictError);
+  });
+
+  it("maps a concurrent category rename collision to a recoverable conflict", async () => {
+    const categoryId = "0190f3c8-2a10-7abc-8def-1234567890b0";
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-category-update" }] };
+        if (sql.includes("SELECT id, workspace_id, name, kind, archived, version"))
+          return {
+            rows: [
+              {
+                id: categoryId,
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                name: "Mercado",
+                kind: "expense",
+                archived: false,
+                version: 0,
+              },
+            ],
+          };
+        if (sql.includes("FROM finance_category") && sql.includes("lower(name)"))
+          return { rows: [] };
+        if (sql.includes("UPDATE finance_category")) throw { code: "23505" };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    await expect(
+      service.updateCategory(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "member",
+        },
+        categoryId,
+        { name: "Feira" },
+        "category-update-collision-001",
+        0,
+      ),
+    ).rejects.toBeInstanceOf(FinanceConflictError);
+  });
+
+  it("updates a category atomically and records its redacted audit transition", async () => {
+    const categoryId = "0190f3c8-2a10-7abc-8def-1234567890b0";
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE")) return { rows: [] };
+        if (sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-1" }] };
+        if (sql.includes("SELECT id, workspace_id, name, kind, archived, version"))
+          return {
+            rows: [
+              {
+                id: categoryId,
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                name: "Mercado",
+                kind: "expense",
+                archived: false,
+                version: 0,
+              },
+            ],
+          };
+        if (sql.includes("FROM finance_category") && sql.includes("lower(name)"))
+          return { rows: [] };
+        if (sql.includes("UPDATE finance_category"))
+          return {
+            rows: [
+              {
+                id: categoryId,
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                name: "Feira",
+                kind: "expense",
+                archived: false,
+                version: 1,
+              },
+            ],
+          };
+        if (sql.includes("INSERT INTO audit_event")) return { rows: [] };
+        if (sql.includes('UPDATE "idempotency_key"')) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const result = await service.updateCategory(
+      {
+        workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "member",
+      },
+      categoryId,
+      { name: "Feira" },
+      "category-service-test-001",
+      0,
+    );
+
+    expect(result).toEqual({
+      replayed: false,
+      category: {
+        id: categoryId,
+        workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+        name: "Feira",
+        kind: "expense",
+        archived: false,
+        version: 1,
+      },
+    });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO audit_event"),
+      expect.arrayContaining(["category.updated"]),
+    );
+  });
+
   it("does not accept an adjustment through the generic transaction command", async () => {
     const service = new FinanceService({} as never);
     await expect(
@@ -41,6 +191,158 @@ describe("finance command guards", () => {
     expect(() => assertVariableRecurrenceSettlementAllowed(true, false)).toThrow("valor efetivo");
     expect(() => assertVariableRecurrenceSettlementAllowed(true, true)).not.toThrow();
     expect(() => assertVariableRecurrenceSettlementAllowed(false, false)).not.toThrow();
+  });
+
+  it("updates only supplied card fields and increments its version", async () => {
+    const current = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      name: "Principal",
+      closing_day: 10,
+      due_day: 17,
+      holder: "Marina",
+      last_four: "1234",
+      limit_minor: "100000",
+      currency_code: "BRL",
+      archived: false,
+      version: 3,
+    };
+    const updated = { ...current, closing_day: 31, holder: null, version: 4 };
+    const client = {
+      query: vi.fn(async (sql: string, _values?: unknown[]) => {
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM credit_card") && sql.includes("FOR UPDATE")) {
+          return { rows: [current] };
+        }
+        if (sql.startsWith("UPDATE credit_card")) return { rows: [updated] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const result = await service.updateCard(
+      {
+        workspaceId: current.workspace_id,
+        actorId: "user-1",
+        correlationId: "correlation-1",
+        role: "member",
+      },
+      current.id,
+      { closingDay: 31, holder: null },
+      "card-update-service-001",
+      3,
+    );
+
+    expect(result.card).toMatchObject({ closingDay: 31, holder: null, version: 4 });
+    const updateCall = client.query.mock.calls.find(([sql]) =>
+      sql.startsWith("UPDATE credit_card"),
+    );
+    expect(updateCall?.[1]).toEqual([
+      current.workspace_id,
+      current.id,
+      current.name,
+      31,
+      current.due_day,
+      null,
+      current.last_four,
+      current.limit_minor,
+      3,
+    ]);
+  });
+
+  it("blocks a cycle-rule change when an open statement already has a purchase", async () => {
+    const current = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      name: "Principal",
+      closing_day: 10,
+      due_day: 17,
+      holder: null,
+      last_four: null,
+      limit_minor: null,
+      currency_code: "BRL",
+      archived: false,
+      version: 0,
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM credit_card") && sql.includes("FOR UPDATE")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("FROM credit_statement") && sql.includes("t.statement_id = s.id")) {
+          return { rows: [{ blocked: true }] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+
+    await expect(
+      service.updateCard(
+        {
+          workspaceId: current.workspace_id,
+          actorId: "user-1",
+          correlationId: "correlation-1",
+          role: "member",
+        },
+        current.id,
+        { closingDay: 31 },
+        "card-update-cycle-guard-001",
+        current.version,
+      ),
+    ).rejects.toThrow("fatura aberta");
+    expect(client.query.mock.calls.some(([sql]) => sql.startsWith("UPDATE credit_card"))).toBe(
+      false,
+    );
+    expect(client.query.mock.calls.some(([sql]) => sql === "ROLLBACK")).toBe(true);
+  });
+
+  it("blocks card archive while a statement has an open balance", async () => {
+    const current = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+      workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+      name: "Principal",
+      closing_day: 10,
+      due_day: 17,
+      holder: null,
+      last_four: null,
+      limit_minor: null,
+      currency_code: "BRL",
+      archived: false,
+      version: 0,
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM credit_card") && sql.includes("FOR UPDATE")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("SELECT EXISTS")) return { rows: [{ blocked: true }] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+
+    await expect(
+      service.archiveCard(
+        {
+          workspaceId: current.workspace_id,
+          actorId: "user-1",
+          correlationId: "correlation-1",
+          role: "member",
+        },
+        current.id,
+        "card-archive-service-001",
+        0,
+      ),
+    ).rejects.toThrow("fatura antes de arquivar");
+    expect(client.query.mock.calls.some(([sql]) => sql.startsWith("UPDATE credit_card"))).toBe(
+      false,
+    );
+    expect(client.query.mock.calls.some(([sql]) => sql === "ROLLBACK")).toBe(true);
   });
 
   it("pages statement composition by a stable date, creation time, and id cursor", async () => {

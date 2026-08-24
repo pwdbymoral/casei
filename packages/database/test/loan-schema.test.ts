@@ -5,11 +5,11 @@ import { fileURLToPath } from "node:url";
 
 test("LOAN-001/002 migration persists scoped IOU contracts and payments", async () => {
   const migration = await readFile(
-    fileURLToPath(new URL("../drizzle/0012_loans.sql", import.meta.url)),
+    fileURLToPath(new URL("../drizzle/0013_loans.sql", import.meta.url)),
     "utf8",
   );
   const down = await readFile(
-    fileURLToPath(new URL("../drizzle/0012_loans.down.sql", import.meta.url)),
+    fileURLToPath(new URL("../drizzle/0013_loans.down.sql", import.meta.url)),
     "utf8",
   );
   const journal = await readFile(
@@ -28,5 +28,5 @@ test("LOAN-001/002 migration persists scoped IOU contracts and payments", async 
   assert.match(migration, /CREATE POLICY "loan_contract_scope"/i);
   assert.match(migration, /CREATE POLICY "loan_payment_scope"/i);
   assert.match(down, /DROP TABLE IF EXISTS.*loan_payment.*loan_contract/is);
-  assert.match(journal, /"idx": 12[\s\S]*"tag": "0012_loans"/i);
+  assert.match(journal, /"idx": 13[\s\S]*"tag": "0013_loans"/i);
 });

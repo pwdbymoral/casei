@@ -45,7 +45,7 @@ RLS e ausência de contas income/expense nos eventos.
 
 - Helpers de postings puros cobrem principal e pagamento nas duas direções.
 - API cobre criação, listagem, detalhe e pagamento com idempotência/versão.
-- PostgreSQL cobre migration `0012_loans`, FKs compostas, RLS, ledger,
+- PostgreSQL cobre migration `0013_loans`, FKs compostas, RLS, ledger,
   auditoria, retry, excedente e concorrência.
 - UI fica deliberadamente em LOAN-003, sem inventar uma jornada visual antes
   do contrato estabilizar.
