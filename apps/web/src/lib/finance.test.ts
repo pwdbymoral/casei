@@ -104,6 +104,38 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("uses If-Match and explicit confirmation for category maintenance", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      if (String(input).endsWith("/categories/category-1")) {
+        expect(init?.method).toBe("PATCH");
+        expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+        return Response.json({ id: "category-1", version: 4, archived: false });
+      }
+      expect(String(input)).toContain("/categories/category-1/archive");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v4"');
+      expect(JSON.parse(String(init?.body))).toEqual({ confirm: true });
+      return Response.json({ id: "category-1", version: 5, archived: true });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const category = {
+      id: "category-1",
+      workspaceId: "workspace",
+      name: "Mercado",
+      kind: "expense" as const,
+      archived: false,
+      version: 3,
+    };
+    const updated = await adapter.updateCategory("workspace", category, { name: "Feira" });
+    expect(updated.version).toBe(4);
+    await expect(
+      adapter.archiveCategory("workspace", { ...category, version: 4 }),
+    ).resolves.toMatchObject({
+      archived: true,
+      version: 5,
+    });
+  });
+
   it("reuses the logical idempotency key after a network failure", async () => {
     let attempts = 0;
     const keys: string[] = [];
@@ -435,6 +467,17 @@ describe("finance adapter", () => {
     expect(guard.isCurrent(oldRequest)).toBe(false);
   });
 
+  it("drops an old category mutation after changing workspace", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    const request = guard.begin("workspace-a");
+    guard.switchWorkspace("workspace-b");
+    const categories: string[] = [];
+    const oldResponse = Promise.resolve("category-from-a");
+    const value = await oldResponse;
+    if (guard.isCurrent(request)) categories.push(value);
+    expect(categories).toEqual([]);
+  });
+
   it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
     const adapter = createFixtureFinanceAdapter();
     const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";
@@ -482,9 +525,21 @@ describe("finance adapter", () => {
       state: "posted",
       description: "Freela",
       cardId: null,
+      categoryId: null,
     });
     expect(transactionCardIdForKind("income", "card-1")).toBeNull();
     expect(transactionCardIdForKind("expense", "card-1")).toBe("card-1");
+    expect(
+      createQuickCaptureTransactionInput({
+        kind: "expense",
+        amountMinor: "500",
+        currency: "USD",
+        planned: false,
+        description: "Feira",
+        cardId: "",
+        categoryId: "category-1",
+      }).categoryId,
+    ).toBe("category-1");
   });
 
   it("labels every timeline kind and uses a non-expense sign for transfers and adjustments", () => {
