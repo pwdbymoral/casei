@@ -346,16 +346,21 @@ describe("proteção de exportação CSV", () => {
   });
 
   it("serializa CSV RFC4180 com proteção por célula, sem executar valores", () => {
-    const result = serializeCsv(
-      [
-        ["Descrição", "Valor"],
-        ['=HYPERLINK("https://evil")', "1000"],
-      ],
-      { protectFormulas: true },
-    );
+    const result = serializeCsv([
+      ["Descrição", "Valor"],
+      ['=HYPERLINK("https://evil")', "1000"],
+    ]);
 
     expect(result).toBe('"Descrição","Valor"\r\n"\'=HYPERLINK(""https://evil"")","1000"\r\n');
     expect(serializeCsv([])).toBe("");
+  });
+
+  it("não permite desativar proteção de fórmula no serializador público", () => {
+    const result = serializeCsv([['=HYPERLINK("https://evil")']], {
+      protectFormulas: false,
+    } as unknown as Parameters<typeof serializeCsv>[1]);
+
+    expect(result).toBe('"\'=HYPERLINK(""https://evil"")"\r\n');
   });
 
   it("protege fórmulas precedidas por whitespace e rejeita célula/valor excessivos", () => {

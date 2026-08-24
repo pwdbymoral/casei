@@ -26,10 +26,11 @@ Os limites são validados como inteiros positivos antes de serem usados. UTF-8 e
 usam Latin-1 detectável. BOM UTF-8 é aceito, UTF-16 e bytes NUL são rejeitados.
 O parser implementa CSV RFC 4180 (aspas, aspas duplicadas, CRLF/LF e quebras de
 linha em campos), mantém linhas com largura incorreta para diagnóstico e nunca
-avalia conteúdo como fórmula ou código. Registros com campos vazios, inclusive
-`""` e linhas fisicamente vazias previstas pelo formato, são mantidos para que
-o preflight produza o resultado e o erro obrigatório daquela linha; uma quebra
-de linha final isolada não cria um registro adicional.
+avalia conteúdo como fórmula ou código.
+Registros com campos vazios, inclusive `""` e linhas fisicamente vazias
+previstas pelo formato, são mantidos para que o preflight produza o resultado e
+o erro obrigatório daquela linha; uma quebra de linha final isolada não cria um
+registro adicional.
 
 O separador é detectado no cabeçalho entre vírgula, ponto e vírgula e TAB. Para
 um arquivo de uma coluna, `locale: "pt-BR"` escolhe ponto e vírgula como fallback
@@ -50,8 +51,8 @@ valida campos com parsers fornecidos pelo domínio e retorna cada linha como
 `valid`, `duplicate` ou `invalid`, incluindo seus erros, avisos, valores
 normalizados e número de origem. Fingerprints SHA-256 incluem domínio, espaço
 opcional, nomes e valores normalizados. Coincidências são somente sugestões:
-repetir um fingerprint não remove nem invalida automaticamente uma linha. A
-API de fingerprint aceita somente valores escalares (`string`, `number`,
+repetir um fingerprint não remove nem invalida automaticamente uma linha.
+A API de fingerprint aceita somente valores escalares (`string`, `number`,
 `bigint`, `boolean`, `null` ou `undefined`); objetos e arrays são rejeitados
 para evitar que a ordem ou a forma de uma estrutura aninhada altere o contrato
 sem uma canonicalização de domínio explícita. Um domínio que precise incluir
@@ -60,7 +61,25 @@ canônica.
 
 ## Proteção de exportação
 
-`protectCsvFormula` e `serializeCsv` prefixam com apóstrofo textos que começam
-com espaço/tab/quebra de linha seguido de `=`, `+`, `-` ou `@`. O resultado
+`protectCsvFormula` e `serializeCsv` sempre prefixam com apóstrofo textos que
+começam com espaço/tab/quebra de linha seguido de `=`, `+`, `-` ou `@`; o
+serializador público não oferece opt-out. O resultado
 expõe também o `logicalValue`, permitindo que DATA-005 preserve o valor lógico
 no manifesto sem entregar uma célula executável a planilhas.
+
+`createVersionedCsvExport` acrescenta as colunas reservadas
+`casei_schema_version` e `casei_id` ao cabeçalho canônico e recebe somente
+colunas declaradas pelo domínio. Ele devolve um `ReadableStream<Uint8Array>`
+UTF-8 de uso único: o hash SHA-256, contagem e tamanho são calculados durante o
+consumo, em chunks limitados, sem acumular o arquivo inteiro em memória. O
+manifesto só resolve após o EOF e contém schema, domínio, horário UTC, fuso,
+moeda, filtros congelados, colunas, checksum do CSV e posições/valores lógicos
+das células protegidas.
+
+O núcleo rejeita linhas sem `casei_id`, campos não declarados, valores que não
+sejam strings/nulos, excesso de linhas/bytes/células e cancelamento do stream.
+`createVersionedCsvExport` aplica essa proteção sempre; não há opt-out na API
+pública, para que nenhum consumidor produza uma planilha executável por
+configuração acidental.
+Jobs, autorização no momento do download, proxy autenticado, ZIP completo e
+armazenamento temporário permanecem fora do pacote.

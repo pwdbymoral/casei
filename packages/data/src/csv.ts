@@ -178,9 +178,8 @@ function parseCsvRows(
   let columnNumber = 1;
   let atFieldStart = true;
   let justClosedQuote = false;
-  // A quoted empty field (`""`) and a delimiter-only record are real CSV
-  // records even though their normalized cells are empty. Keep that physical
-  // presence separate from the cell contents so preflight can report it.
+  // Preserve physically present empty records (e.g. `""` or a delimiter-only
+  // row) so preflight can report required-field errors instead of dropping them.
   let rowHasContent = false;
   const encoder = new TextEncoder();
   let cellByteLength = 0;
@@ -867,13 +866,13 @@ export function protectCsvFormula(value: string): ProtectedCsvCell {
   };
 }
 
-function escapeCsvCell(value: string): string {
+/** Escapes one cell using canonical RFC4180 double-quote notation. */
+export function serializeCsvCell(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
 export interface SerializeCsvOptions {
   readonly delimiter?: CsvDelimiter;
-  readonly protectFormulas?: boolean;
 }
 
 /** Serializes rows with CRLF and RFC4180 quoting; it never evaluates cells. */
@@ -887,9 +886,8 @@ export function serializeCsv(
     .map((row) =>
       row
         .map((cell) => {
-          const protectedCell =
-            options.protectFormulas === false ? cell : protectCsvFormula(cell).value;
-          return escapeCsvCell(protectedCell);
+          const protectedCell = protectCsvFormula(cell).value;
+          return serializeCsvCell(protectedCell);
         })
         .join(delimiter),
     )
