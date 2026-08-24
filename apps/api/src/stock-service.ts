@@ -216,6 +216,7 @@ export class StockService {
                   [scope.workspaceId, row.id, values.quantityMilli, scope.actorId],
                 );
               }
+              await syncAutomaticShoppingItems(client, scope);
             } catch (error) {
               if (isUniqueViolation(error)) {
                 throw new StockConflictError("Já existe um produto ativo com esse nome.");
@@ -317,6 +318,7 @@ export class StockService {
           );
           const row = result.rows[0];
           if (!row) throw new StockVersionConflictError(current.version);
+          await syncAutomaticShoppingItems(client, scope);
           return toProductView(row);
         } catch (error) {
           if (isUniqueViolation(error))
@@ -380,6 +382,7 @@ export class StockService {
             }
             const row = updated.rows[0];
             if (!row) throw new StockVersionConflictError(current.version);
+            await syncAutomaticShoppingItems(client, scope);
             return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
           },
         }),
@@ -458,6 +461,7 @@ export class StockService {
             );
             const productRow = productResult.rows[0];
             if (!productRow) throw new StockVersionConflictError(current.version);
+            await syncAutomaticShoppingItems(client, scope);
             return {
               statusCode: 201,
               response: {
@@ -503,6 +507,7 @@ export class StockService {
             );
             const row = updated.rows[0];
             if (!row) throw new StockVersionConflictError(current.version);
+            await syncAutomaticShoppingItems(client, scope);
             return { statusCode: 200, response: toProductView(row) as unknown as JsonValue };
           },
         }),
@@ -517,7 +522,6 @@ export class StockService {
   ): Promise<StockShoppingItemView[]> {
     const parsed = stockShoppingListQuerySchema.parse(query);
     return this.withUnitOfWork(scope, async ({ client }) => {
-      await syncAutomaticShoppingItems(client, scope);
       const result = await client.query<ShoppingItemRow>(
         `SELECT i.id, i.workspace_id, i.product_id, i.name, i.source,
                 i.quantity_milli,
@@ -538,7 +542,7 @@ export class StockService {
                     WHERE duplicate.workspace_id = i.workspace_id
                       AND duplicate.name_normalized = i.name_normalized
                       AND duplicate.archived = false
-                 )) OR (i.source = 'automatic' AND p.id IS NOT NULL AND p.archived = false
+                 )) OR (i.source = 'automatic' AND p.id IS NOT NULL
                  AND p.shopping_auto = true
                  AND (p.marked_missing OR p.quantity_milli = 0
                       OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
@@ -851,6 +855,19 @@ async function syncAutomaticShoppingItems(client: PoolClient, scope: StockScope)
         AND (p.marked_missing OR p.quantity_milli = 0
              OR (p.quantity_milli IS NOT NULL AND p.minimum_milli IS NOT NULL
                  AND p.quantity_milli <= p.minimum_milli))
+        AND NOT EXISTS (
+          SELECT 1
+            FROM shopping_item prior
+           WHERE prior.workspace_id = p.workspace_id
+             AND prior.product_id = p.id
+             AND prior.purchased = true
+             AND prior.purchased_at >= COALESCE(
+               (SELECT max(m.occurred_at)
+                  FROM stock_movement m
+                 WHERE m.workspace_id = p.workspace_id AND m.product_id = p.id),
+               '-infinity'::timestamptz
+             )
+        )
      ON CONFLICT (workspace_id, name_normalized) WHERE purchased = false DO NOTHING
      RETURNING id`,
     [scope.workspaceId, scope.actorId],

@@ -65,4 +65,23 @@ describe("StockService membership revalidation", () => {
     ).rejects.toBeInstanceOf(StockPermissionError);
     expect(harness.statements.some((sql) => sql.includes("INSERT INTO stock_product"))).toBe(false);
   });
+
+  it("keeps shopping list reads side-effect free for viewers", async () => {
+    const harness = poolFor({ role: "viewer" });
+    const service = new StockService(harness.pool as never);
+
+    await expect(service.listShoppingItems({ ...scope, role: "viewer" })).resolves.toEqual([]);
+    expect(harness.statements.some((sql) => /INSERT INTO shopping_item/i.test(sql))).toBe(false);
+    expect(harness.statements.some((sql) => /shopping_item_event/i.test(sql))).toBe(false);
+  });
+
+  it("suppresses a purchased automatic item until a later stock movement", async () => {
+    const source = await import("node:fs/promises");
+    const implementation = await source.readFile(
+      new URL("../src/stock-service.ts", import.meta.url),
+      "utf8",
+    );
+    expect(implementation).toContain("prior.purchased_at >= COALESCE");
+    expect(implementation).toContain("max(m.occurred_at)");
+  });
 });

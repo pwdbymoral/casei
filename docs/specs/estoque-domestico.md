@@ -41,13 +41,15 @@ Fluxo rápido em um produto oferece `+`, `−`, `Repor` e `Marcar faltando`, com
 
 ### Contrato da implementação STOCK-003
 
-`GET /v1/workspaces/:workspaceId/stock/shopping` materializa entradas automáticas para produtos ativos
-com estado `missing`/`low` e preferência `shoppingAuto`, além de itens livres persistidos. A chave
+`GET /v1/workspaces/:workspaceId/stock/shopping` é uma leitura pura: não insere itens nem eventos,
+inclusive para `viewer`. Entradas automáticas são sincronizadas por comandos de escrita que alteram
+o estado do produto e então ficam disponíveis na leitura, além de itens livres persistidos. A chave
 normalizada do nome possui unicidade parcial por espaço enquanto o item não estiver comprado; uma
 colisão concorrente retorna o item já existente. `POST /stock/shopping/:itemId/purchased` exige
 `If-Match` e `Idempotency-Key`. Seu corpo sempre explicita `addToStock`; somente `true` cria uma
 movimentação `entry`, com quantidade positiva editável, na mesma transação que marca o item comprado.
-Itens livres podem ser concluídos, mas não podem criar movimentação de estoque. A migration `0007`
+Quando um item automático é concluído com `addToStock: false`, ele não reaparece enquanto não houver
+uma nova movimentação real no produto relacionado. Itens livres podem ser concluídos, mas não podem criar movimentação de estoque. A migration `0007`
 mantém eventos de lista append-only, RLS por espaço e constraints de fonte, unidade, quantidade e
 estado comprado.
 
@@ -73,4 +75,5 @@ estado comprado.
 - [ ] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
 - [x] Lista automática e item livre convivem sem duplicação.
 - [x] Concluir compra só altera estoque após confirmação explícita.
+- [ ] A leitura autenticada da lista não muta dados; compra automática sem entrada não reaparece até uma movimentação real.
 - [x] Busca e lista permanecem utilizáveis em telefone e teclado, com alvos de toque e reflow responsivo; o modo avançado tabular fica para STOCK-004.
