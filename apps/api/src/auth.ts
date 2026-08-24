@@ -250,6 +250,15 @@ export function createAuth(options: AuthOptions = {}) {
       resetPasswordTokenExpiresIn: 60 * 60,
       revokeSessionsOnPasswordReset: true,
     },
+    user: {
+      changeEmail: {
+        enabled: true,
+        updateEmailWithoutVerification: false,
+        sendChangeEmailConfirmation: async (data, request) => {
+          await queueEmail("verification", data, request, 60 * 60);
+        },
+      },
+    },
     emailVerification: {
       sendOnSignUp: true,
       sendOnSignIn: true,

@@ -72,7 +72,7 @@ No GitHub, o workflow `Dependency review` executa em pull requests e bloqueia a 
 
 O workflow `CodeQL` executa o job obrigatório `Analyze (javascript-typescript)`. Além desse gate de execução, o ruleset `CodeQL merge protection` exige resultados de code scanning para a `main` e bloqueia alertas de code scanning classificados como erro ou alertas de segurança `high` ou superiores. O ruleset não possui bypass configurado.
 
-Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com a origem pública incorporada no build: `docker build --build-arg NEXT_PUBLIC_CASEI_API_ORIGIN=https://api.example.com -f Dockerfile.web -t casei-web .`.
+Para PostgreSQL local, execute `docker compose up -d postgres`. A imagem de produção do PWA é construída com as origens públicas incorporadas no build: `docker build --build-arg NEXT_PUBLIC_CASEI_API_ORIGIN=https://api.example.com --build-arg NEXT_PUBLIC_CASEI_WEB_ORIGIN=https://app.example.com -f Dockerfile.web -t casei-web .`.
 
 ## AUTH-002..005
 
@@ -81,6 +81,22 @@ chave de idempotência do onboarding. `apps/web/src/lib/workspaces.test.ts` cobr
 troca somente para espaços autorizados e conversão de sessão expirada em estado não autenticado.
 Os cenários que exigem RLS, locks de membership, trigger de owner, expiração de convite e purge
 devem rodar no PostgreSQL descartável do CI junto da migration `0003_identity_workspaces.sql`.
+
+## AUTH-006
+
+`apps/api/test/auth.test.ts` executa o handler Better Auth real para mudança de e-mail, confirmando
+que a confirmação é enfileirada com callback na origem PWA allowlisted. O adapter exige as origens
+explícitas `NEXT_PUBLIC_CASEI_API_ORIGIN` e `NEXT_PUBLIC_CASEI_WEB_ORIGIN`; não há fallback local.
+`apps/api/test/identity-routes.test.ts` cobre o boundary de perfil/preferências, incluindo `If-Match`,
+ETag, papel sem permissão e workspace estrangeiro. `apps/web/src/lib/settings.test.ts` verifica o
+adapter HTTP, envio de ETag e mapeamento seguro de conflito/offline; a tela `app/settings` mantém os
+formulários com drafts durante erro e expõe os estados de carregamento, permissão, conflito e sem
+conexão, além da prévia de consequências antes de salvar. As migrations `0004_profile_preferences.sql`
+e `0005_audit_redacted_fields.sql` têm companions down e o teste PostgreSQL de schema verifica a
+política RLS de `user_preference` e que o rollback não deixa as tabelas/colunas. Quando
+`DATABASE_URL_TEST` estiver disponível, a integração de identidade também comprova defaults `pt-BR`,
+ocultação de valores, auditoria com estados redigidos sem valores sensíveis, versões, serialização da
+primeira preferência e bloqueio server-side da moeda após movimentos ou compromissos pendentes.
 
 ## Identidade
 

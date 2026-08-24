@@ -90,6 +90,10 @@ if (!adminUrl) {
          VALUES ('security', 'schema_test', $1, $2, 'workspace', $3, 'test', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 'success', 'fixture')`,
         [firstUser, firstWorkspaceId, firstWorkspaceId],
       );
+      await pool.query(
+        `INSERT INTO user_preference (user_id, locale, hide_values) VALUES ($1, 'pt-BR', false)`,
+        [firstUser],
+      );
 
       const role = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
         `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'casei_app'`,
@@ -104,6 +108,7 @@ if (!adminUrl) {
           await appClient.query(`SELECT set_config('app.workspace_id', $1, true)`, [
             firstWorkspaceId,
           ]);
+          await appClient.query(`SELECT set_config('app.actor_id', $1, true)`, [firstUser]);
           const visible = await appClient.query<{ id: string }>(
             `SELECT id FROM "workspace" ORDER BY id`,
           );
@@ -111,6 +116,20 @@ if (!adminUrl) {
             visible.rows.map((row) => row.id),
             [firstWorkspaceId],
           );
+
+          const visiblePreferences = await appClient.query<{ user_id: string }>(
+            `SELECT user_id FROM user_preference`,
+          );
+          assert.deepEqual(visiblePreferences.rows, [{ user_id: firstUser }]);
+          await appClient.query("SAVEPOINT user_preference_cross_workspace_attempt");
+          await assert.rejects(
+            appClient.query(
+              `INSERT INTO user_preference (user_id, locale, hide_values)
+               VALUES ($1, 'pt-BR', false)`,
+              [secondUser],
+            ),
+          );
+          await appClient.query("ROLLBACK TO SAVEPOINT user_preference_cross_workspace_attempt");
 
           await appClient.query("SAVEPOINT cross_workspace_attempt");
           await assert.rejects(
@@ -164,6 +183,16 @@ if (!adminUrl) {
         relforcerowsecurity: true,
       });
 
+      const auditRedactionDownSql = await readFile(
+        fileURLToPath(new URL("../drizzle/0005_audit_redacted_fields.down.sql", import.meta.url)),
+        "utf8",
+      );
+      await pool.query(auditRedactionDownSql);
+      const profileDownSql = await readFile(
+        fileURLToPath(new URL("../drizzle/0004_profile_preferences.down.sql", import.meta.url)),
+        "utf8",
+      );
+      await pool.query(profileDownSql);
       const downSql = await readFile(
         fileURLToPath(new URL("../drizzle/0003_identity_workspaces.down.sql", import.meta.url)),
         "utf8",
@@ -184,7 +213,7 @@ if (!adminUrl) {
              'workspace_preference', 'workspace', 'account', 'session',
              'user', 'verification', 'workspace_invitation',
              'workspace_deletion_recovery', 'workspace_tombstone',
-             'workspace_invitation_rate_limit'
+             'workspace_invitation_rate_limit', 'user_preference'
            )
          ORDER BY tablename`,
       );

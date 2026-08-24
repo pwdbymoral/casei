@@ -29,6 +29,20 @@
       "when": 1787518800000,
       "tag": "0003_identity_workspaces",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787530302333,
+      "tag": "0004_profile_preferences",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787533900000,
+      "tag": "0005_audit_redacted_fields",
+      "breakpoints": true
     }
   ]
 }

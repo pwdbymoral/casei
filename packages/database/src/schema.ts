@@ -56,6 +56,24 @@ export const workspacePreference = pgTable("workspace_preference", {
   updatedAt: instant("updated_at").defaultNow().notNull(),
 });
 
+export const userPreference = pgTable(
+  "user_preference",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => user.id, { onDelete: "cascade" }),
+    locale: text("locale").notNull().default("pt-BR"),
+    hideValues: boolean("hide_values").notNull().default(false),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    check("user_preference_locale_check", sql`${table.locale} = 'pt-BR'`),
+    check("user_preference_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
 export const workspaceInvitation = pgTable(
   "workspace_invitation",
   {
@@ -205,6 +223,8 @@ export const auditEvent = pgTable(
     result: text("result").notNull(),
     reason: text("reason"),
     retentionUntil: instant("retention_until"),
+    beforeRedacted: jsonb("before_redacted"),
+    afterRedacted: jsonb("after_redacted"),
   },
   (table) => [
     index("audit_event_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),
@@ -667,6 +687,7 @@ export const cardPayment = pgTable(
 export const schema = {
   workspace,
   workspacePreference,
+  userPreference,
   membership,
   auditEvent,
   idempotencyKey,

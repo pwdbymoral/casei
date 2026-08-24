@@ -166,6 +166,82 @@ describe("AUTH-001 identidade", () => {
     await expect(afterLogout.json()).resolves.toBeNull();
   });
 
+  it("habilita mudança de e-mail com confirmação na origem PWA", async () => {
+    const { app, emailPort, emailStore } = fixture();
+    await authRequest(
+      app,
+      "sign-up/email",
+      jsonBody({
+        name: "Ada Lovelace",
+        email: "ada@example.com",
+        password: "correct-horse-battery",
+        callbackURL: `${webOrigin}/welcome`,
+      }),
+    );
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
+    const verificationMessage = emailPort.messages[0];
+    if (!verificationMessage) throw new Error("expected verification message");
+    await app.request(verificationMessage.url, { headers: { Origin: webOrigin } });
+
+    const login = await authRequest(
+      app,
+      "sign-in/email",
+      jsonBody({ email: "ada@example.com", password: "correct-horse-battery" }),
+    );
+    const cookie = sessionCookie(login);
+    const changed = await authRequest(app, "change-email", {
+      ...jsonBody({
+        newEmail: "ada.new@example.com",
+        callbackURL: `${webOrigin}/app/settings`,
+      }),
+      headers: { Cookie: cookie },
+    });
+    expect(changed.status).toBe(200);
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
+    const confirmation = emailPort.messages[1];
+    if (!confirmation) throw new Error("expected email change confirmation");
+    expect(confirmation).toMatchObject({ kind: "verification", email: "ada@example.com" });
+    expect(confirmation.url).toContain(encodeURIComponent(`${webOrigin}/app/settings`));
+    expect(confirmation.url).not.toContain(encodeURIComponent(`${apiOrigin}/app/settings`));
+
+    const beforeConfirmation = await authRequest(app, "get-session", {
+      headers: { Cookie: cookie },
+    });
+    await expect(beforeConfirmation.json()).resolves.toMatchObject({
+      user: { email: "ada@example.com" },
+    });
+
+    const firstConfirmation = await app.request(confirmation.url, {
+      headers: { Cookie: cookie, Origin: webOrigin },
+    });
+    expect(firstConfirmation.status).toBe(302);
+    await expect(firstConfirmation.headers.get("location")).toBe(`${webOrigin}/app/settings`);
+    await expect(
+      authRequest(app, "get-session", { headers: { Cookie: cookie } }).then((response) =>
+        response.json(),
+      ),
+    ).resolves.toMatchObject({ user: { email: "ada@example.com" } });
+
+    expect(await processPendingAuthEmails(emailStore, emailPort)).toBe(1);
+    const secondConfirmation = emailPort.messages[2];
+    if (!secondConfirmation) throw new Error("expected new email verification");
+    expect(secondConfirmation).toMatchObject({
+      kind: "verification",
+      email: "ada.new@example.com",
+    });
+    expect(secondConfirmation.url).toContain(encodeURIComponent(`${webOrigin}/app/settings`));
+    const secondConfirmationResponse = await app.request(secondConfirmation.url, {
+      headers: { Cookie: cookie, Origin: webOrigin },
+    });
+    expect(secondConfirmationResponse.status).toBe(302);
+    const updatedCookie = sessionCookie(secondConfirmationResponse);
+    await expect(
+      authRequest(app, "get-session", { headers: { Cookie: updatedCookie } }).then((response) =>
+        response.json(),
+      ),
+    ).resolves.toMatchObject({ user: { email: "ada.new@example.com" } });
+  });
+
   it("usa a mesma resposta de recuperação para e-mail existente e inexistente", async () => {
     const { app, emailPort, emailStore } = fixture();
     const unknown = await authRequest(
