@@ -29,7 +29,8 @@ invalida a versão de linhas automáticas ativas quando o produto muda. Se um it
 coincidir com um produto que se tornou `low`/`missing`, a linha é convertida em automática no
 mesmo comando, preservando seu ID e histórico sem criar evento `created` artificial; enquanto o
 produto não for candidato, o item livre continua visível. A FK dos eventos usa cascade apenas no
-purge do workspace, preservando o log append-only durante a operação normal.
+purge do workspace, preservando o log append-only durante a operação normal. A migration forward
+`0008_stock_purge_cascade` atualiza esses FKs em ambientes que já executaram `0006`/`0007`.
 
 ## Etapas
 
