@@ -52,6 +52,8 @@ export interface ImportJobRecord {
   readonly batchSize: number;
   readonly state: ImportJobState;
   readonly expiresAt: string;
+  readonly createdAt?: string;
+  readonly lastError?: string;
   readonly version: number;
   readonly correlationId: string;
 }
@@ -190,6 +192,7 @@ export interface ImportStore {
     workspaceId: string,
     requester?: ImportRequester,
   ): Promise<ImportJobRecord>;
+  retry?(jobId: string, workspaceId: string, requester?: ImportRequester): Promise<ImportJobRecord>;
   markCancelled(
     jobId: string,
     workspaceId: string,
@@ -549,6 +552,24 @@ export class ImportApplication {
     requester?: ImportRequester,
   ): Promise<ImportJobRecord> {
     return this.store.requestCancel(jobId, workspaceId, requester);
+  }
+
+  async retry(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
+    const job = await this.store.getJob(jobId, workspaceId);
+    if (!job) throw new ImportConflictError("Importação não encontrada.");
+    if (job.state !== "failed") {
+      throw new ImportConflictError(
+        "Somente uma importação que falhou pode ser tentada novamente.",
+      );
+    }
+    if (!this.store.retry) {
+      throw new ImportFailure("A repetição de importação não foi configurada.");
+    }
+    return this.store.retry(jobId, workspaceId, requester);
   }
 
   async reverse(
@@ -1024,6 +1045,69 @@ export class PostgresImportStore implements ImportStore {
     );
   }
 
+  async retry(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
+    return withUnitOfWork(
+      this.pool,
+      {
+        workspaceId,
+        actorId: requester?.actorId ?? undefined,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const result = await client.query<ImportJobRow>(
+          `UPDATE "import_job"
+              SET state = 'queued', last_error = NULL, version = version + 1, updated_at = now()
+            WHERE id = $1 AND workspace_id = $2 AND state = 'failed'
+            RETURNING *`,
+          [jobId, workspaceId],
+        );
+        const row = result.rows[0];
+        if (!row) {
+          const current = await client.query<ImportJobRow>(
+            `SELECT * FROM "import_job" WHERE id = $1 AND workspace_id = $2`,
+            [jobId, workspaceId],
+          );
+          if (!current.rows[0]) throw new ImportConflictError("Importação não encontrada.");
+          if (current.rows[0].state !== "queued") {
+            throw new ImportConflictError("A importação não está disponível para repetição.");
+          }
+          return mapImportJob(current.rows[0]);
+        }
+        await client.query(
+          `UPDATE "job"
+              SET state = 'pending', available_at = now(), lease_until = NULL, lease_token = NULL,
+                  last_error = NULL, updated_at = now()
+            WHERE id = $1 AND workspace_id = $2
+              AND state IN ('failed', 'pending', 'running', 'dead')`,
+          [row.job_id, workspaceId],
+        );
+        const auditRequester: ImportRequester = requester ?? {
+          actorId: null,
+          correlationId: row.correlation_id,
+          origin: "api",
+        };
+        await client.query(
+          `INSERT INTO audit_event
+             (category, action, actor_id, workspace_id, target_type, target_id, origin,
+              correlation_id, result)
+           VALUES ('data', 'import.retried', $1, $2, 'import_job', $3, $4, $5, 'success')`,
+          [
+            auditRequester.actorId,
+            workspaceId,
+            row.id,
+            auditRequester.origin,
+            auditRequester.correlationId,
+          ],
+        );
+        return mapImportJob(row);
+      },
+    );
+  }
+
   async markCancelled(
     jobId: string,
     workspaceId: string,
@@ -1194,6 +1278,8 @@ interface ImportJobRow {
   batch_size: number;
   state: ImportJobState;
   expires_at: Date | string;
+  created_at: Date | string;
+  last_error: string | null;
   version: number;
   correlation_id: string;
 }
@@ -1244,6 +1330,11 @@ function mapImportJob(row: ImportJobRow): ImportJobRecord {
       row.expires_at instanceof Date
         ? row.expires_at.toISOString()
         : new Date(row.expires_at).toISOString(),
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : new Date(row.created_at).toISOString(),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
     version: row.version,
     correlationId: row.correlation_id,
   };

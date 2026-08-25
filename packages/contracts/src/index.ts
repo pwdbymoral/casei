@@ -320,6 +320,136 @@ export const importLineListQuerySchema = z.object({
 });
 export type ImportLineListQuery = z.infer<typeof importLineListQuerySchema>;
 
+/** HTTP boundary contracts used by the web data-exchange surface. */
+export const dataExchangeDomainSchema = z.enum(["transactions", "products", "complete"]);
+export type DataExchangeDomain = z.infer<typeof dataExchangeDomainSchema>;
+
+export const dataExchangeFileFormatSchema = z.enum(["csv", "xlsx"]);
+export type DataExchangeFileFormat = z.infer<typeof dataExchangeFileFormatSchema>;
+
+export const dataExchangeLocaleSchema = z.enum(["pt-BR", "en-US"]);
+export type DataExchangeLocale = z.infer<typeof dataExchangeLocaleSchema>;
+
+export const exportFormatSchema = z.enum(["csv", "zip"]);
+export type ExportFormat = z.infer<typeof exportFormatSchema>;
+
+export const exportKindSchema = z.enum(["all", "income", "expense"]);
+
+export const exportCreateRequestSchema = z.object({
+  domain: dataExchangeDomainSchema,
+  format: exportFormatSchema,
+  from: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u)
+    .optional(),
+  to: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u)
+    .optional(),
+  kind: exportKindSchema.optional(),
+  categoryId: z.string().trim().min(1).max(255).nullable().optional(),
+});
+export type ExportCreateRequest = z.infer<typeof exportCreateRequestSchema>;
+
+export const importPreviewRowSchema = z.object({
+  rowNumber: z.number().int().min(2).max(50_001),
+  cells: z.array(z.string()).max(256),
+  status: z.enum(["valid", "duplicate", "invalid"]),
+  errors: z.array(z.string()).max(50),
+  warnings: z.array(z.string()).max(50),
+});
+export type ImportPreviewRowContract = z.infer<typeof importPreviewRowSchema>;
+
+export const importPreviewResponseSchema = z.object({
+  id: z.string().trim().min(1).max(255),
+  workspaceId: workspaceIdSchema,
+  fileName: z.string().trim().min(1).max(255),
+  fileSize: z.number().int().min(1).max(10_000_000),
+  format: dataExchangeFileFormatSchema,
+  domain: importDomainSchema.exclude(["full"]),
+  headers: z.array(z.string().max(1_000)).max(256),
+  rows: z.array(importPreviewRowSchema).max(50_000),
+  fields: z.array(
+    z.object({
+      key: z.string().trim().min(1).max(100),
+      label: z.string().trim().min(1).max(255),
+      required: z.boolean(),
+      aliases: z.array(z.string().max(255)).max(50),
+    }),
+  ),
+  mapping: z.record(z.string().trim().min(1).max(100), z.string().max(1_000)),
+  unknownHeaders: z.array(z.string().max(1_000)).max(256),
+  locale: dataExchangeLocaleSchema,
+  serverBacked: z.literal(true),
+  canConfirm: z.boolean(),
+  counts: z.object({
+    valid: z.number().int().nonnegative(),
+    warnings: z.number().int().nonnegative(),
+    duplicates: z.number().int().nonnegative(),
+    errors: z.number().int().nonnegative(),
+  }),
+  rowLimitExceeded: z.boolean().optional(),
+  message: z.string().max(1_000).optional(),
+  storageKey: z.string().trim().min(1).max(512),
+  sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  previewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  mappingVersion: z.string().trim().min(1).max(80),
+  previewManifest: importPreviewManifestSchema,
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type ImportPreviewResponse = z.infer<typeof importPreviewResponseSchema>;
+
+export const importJobStatusSchema = z.enum([
+  "queued",
+  "processing",
+  "completed",
+  "partial",
+  "failed",
+  "canceled",
+]);
+export type ImportJobStatusContract = z.infer<typeof importJobStatusSchema>;
+
+export const importJobResponseSchema = z.object({
+  id: z.string().trim().min(1).max(255),
+  workspaceId: workspaceIdSchema,
+  status: importJobStatusSchema,
+  progress: z.number().int().min(0).max(100),
+  totalRows: z.number().int().nonnegative(),
+  appliedRows: z.number().int().nonnegative(),
+  ignoredRows: z.number().int().nonnegative(),
+  rejectedRows: z.number().int().nonnegative(),
+  errors: z.array(
+    z.object({ rowNumber: z.number().int().min(0), message: z.string().min(1).max(500) }),
+  ),
+  createdAt: z.string().datetime({ offset: true }),
+  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  message: z.string().max(1_000).optional(),
+});
+export type ImportJobResponse = z.infer<typeof importJobResponseSchema>;
+
+export const exportJobStatusSchema = z.enum([
+  "queued",
+  "processing",
+  "completed",
+  "failed",
+  "expired",
+]);
+export type ExportJobStatusContract = z.infer<typeof exportJobStatusSchema>;
+
+export const exportJobResponseSchema = z.object({
+  id: z.string().trim().min(1).max(255),
+  workspaceId: workspaceIdSchema,
+  domain: dataExchangeDomainSchema,
+  format: exportFormatSchema,
+  status: exportJobStatusSchema,
+  progress: z.number().int().min(0).max(100),
+  fileName: z.string().trim().min(1).max(255).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  message: z.string().max(1_000).optional(),
+});
+export type ExportJobResponse = z.infer<typeof exportJobResponseSchema>;
+
 const stockBulkContentSchema = z
   .string()
   .min(1, "Informe pelo menos uma linha de produto.")
