@@ -13,6 +13,14 @@ describe("money UI boundary", () => {
     expect(parseMoneyInput("99999999999999999")).toBe("999999999999999");
   });
 
+  it("preserves a leading sign only when negative balances are allowed", () => {
+    expect(parseMoneyInput("- R$ 125,00", true)).toBe("-12500");
+    expect(parseMoneyInput("− R$ 125,00", true)).toBe("-12500");
+    expect(parseMoneyInput("R$ -125,00", true)).toBe("-12500");
+    expect(parseMoneyInput("- R$ 125,00")).toBe("12500");
+    expect(parseMoneyInput("- R$ 0,00", true)).toBe("0");
+  });
+
   it("formats the canonical value for pt-BR without losing cents", () => {
     expect(formatMoneyMinor("123456")).toBe("R$ 1.234,56");
   });

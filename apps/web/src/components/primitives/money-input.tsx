@@ -17,6 +17,7 @@ type MoneyInputProps = {
   id?: string;
   disabled?: boolean;
   autoFocus?: boolean;
+  allowNegative?: boolean;
 };
 
 export function MoneyInput({
@@ -30,6 +31,7 @@ export function MoneyInput({
   id: providedId,
   disabled,
   autoFocus,
+  allowNegative = false,
 }: MoneyInputProps) {
   const generatedId = useId();
   const id = providedId ?? generatedId;
@@ -63,7 +65,7 @@ export function MoneyInput({
         onChange={(event) => {
           const cursor = event.target.selectionStart ?? event.target.value.length;
           setDigitsBeforeCaret(event.target.value.slice(0, cursor).replace(/\D/g, "").length);
-          onChange(parseMoneyInput(event.target.value));
+          onChange(parseMoneyInput(event.target.value, allowNegative));
         }}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : descriptionId}

@@ -64,7 +64,8 @@ import {
   transactionKindLabel,
   transactionQueryFromSearchParams,
   type UpdateCreditCardInput,
-  walletTotalMinor,
+  type Wallet,
+  type WalletAdjustmentPreview,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
@@ -119,6 +120,7 @@ function FinanceDashboard({
     () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
   const [walletTransactions, setWalletTransactions] = useState<Transaction[]>([]);
   const [commitmentTransactions, setCommitmentTransactions] = useState<Transaction[]>([]);
   const [dataWorkspaceId, setDataWorkspaceId] = useState(workspaceId);
@@ -219,12 +221,22 @@ function FinanceDashboard({
   const [pendingStatementPayment, setPendingStatementPayment] = useState<Statement | null>(null);
   const [statementPaymentAmount, setStatementPaymentAmount] = useState("");
   const [payingStatement, setPayingStatement] = useState(false);
+  const [walletAdjustmentOpen, setWalletAdjustmentOpen] = useState(false);
+  const [observedWalletBalance, setObservedWalletBalance] = useState("0");
+  const [walletAdjustmentReason, setWalletAdjustmentReason] = useState("");
+  const [walletAdjustmentPreview, setWalletAdjustmentPreview] =
+    useState<WalletAdjustmentPreview | null>(null);
+  const [walletAdjustmentError, setWalletAdjustmentError] = useState<string | null>(null);
+  const [previewingWalletAdjustment, setPreviewingWalletAdjustment] = useState(false);
+  const [savingWalletAdjustment, setSavingWalletAdjustment] = useState(false);
+  const [walletAdjustmentConfirmed, setWalletAdjustmentConfirmed] = useState(false);
   const transactionCommandKey = useRef<string | null>(null);
   const transactionReverseCommandKey = useRef<string | null>(null);
   const settlementCommandKey = useRef<string | null>(null);
   const statementPaymentCommandKey = useRef<string | null>(null);
   const recurrenceCommandKey = useRef<string | null>(null);
   const installmentCommandKey = useRef<string | null>(null);
+  const walletAdjustmentCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
   const today = civilDateInTimeZone(new Date(), timeZone);
@@ -286,6 +298,7 @@ function FinanceDashboard({
     // generation guard prevents late responses from repopulating this empty state.
     setDataWorkspaceId(workspaceId);
     setTransactions([]);
+    setWallet(null);
     setWalletTransactions([]);
     setCommitmentTransactions([]);
     setTransactionsNextCursor(null);
@@ -338,6 +351,15 @@ function FinanceDashboard({
     setShowInstallmentForm(false);
     setPendingStatementPayment(null);
     setStatementPaymentAmount("");
+    setWalletAdjustmentOpen(false);
+    setObservedWalletBalance("0");
+    setWalletAdjustmentReason("");
+    setWalletAdjustmentPreview(null);
+    setWalletAdjustmentError(null);
+    setPreviewingWalletAdjustment(false);
+    setSavingWalletAdjustment(false);
+    setWalletAdjustmentConfirmed(false);
+    walletAdjustmentCommandKey.current = null;
     setSettling(false);
     setSavingRecurrence(false);
     setSavingInstallment(false);
@@ -357,6 +379,7 @@ function FinanceDashboard({
   // old snapshot, keep it out of the new workspace's visible tree.
   const workspaceDataReady = dataWorkspaceId === workspaceId;
   const visibleTransactions = workspaceDataReady ? transactions : [];
+  const visibleWallet = workspaceDataReady ? wallet : null;
   const visibleCards = workspaceDataReady ? cards : [];
   const visibleCategories = workspaceDataReady ? categories : [];
   const visibleStatements = workspaceDataReady ? statements : [];
@@ -367,6 +390,15 @@ function FinanceDashboard({
   const visibleTransactionAudit = workspaceDataReady ? transactionAudit : [];
   const visibleTransactionAuditError = workspaceDataReady ? transactionAuditError : null;
   const visibleSelectedAudit = workspaceDataReady ? selectedAudit : null;
+  const walletAdjustmentDifferenceMinor = walletAdjustmentPreview
+    ? BigInt(walletAdjustmentPreview.difference.minor)
+    : null;
+  const walletAdjustmentAbsoluteDifference =
+    walletAdjustmentDifferenceMinor === null
+      ? null
+      : walletAdjustmentDifferenceMinor < BigInt(0)
+        ? -walletAdjustmentDifferenceMinor
+        : walletAdjustmentDifferenceMinor;
   const visibleViewingStatement = workspaceDataReady ? viewingStatement : null;
   const visiblePendingStatementAction = workspaceDataReady ? pendingStatementAction : null;
   const visibleEditingCard = workspaceDataReady ? editingCard : null;
@@ -485,12 +517,14 @@ function FinanceDashboard({
       try {
         const [
           nextTransactions,
+          nextWallet,
           nextCards,
           nextStatements,
           nextCategories,
           nextWalletTransactions,
         ] = await Promise.all([
           adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
+          adapter.getWallet(workspaceId),
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
           adapter.listCategories(workspaceId),
@@ -499,6 +533,7 @@ function FinanceDashboard({
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
           return;
         setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
+        setWallet(nextWallet);
         setTransactionsNextCursor(nextTransactions.nextCursor);
         setTransactionsHasMore(nextTransactions.hasMore);
         setWalletTransactions(nextWalletTransactions);
@@ -530,8 +565,6 @@ function FinanceDashboard({
   useEffect(() => {
     void load(Boolean(timelineQuery.cursor));
   }, [load, timelineQuery.cursor]);
-
-  const walletTotal = useMemo(() => walletTotalMinor(walletTransactions), [walletTransactions]);
 
   async function handleTransactionSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1300,6 +1333,122 @@ function FinanceDashboard({
     }
   }
 
+  function openWalletAdjustment() {
+    if (!visibleWallet || !writeAccess) return;
+    setObservedWalletBalance(visibleWallet.balance.minor);
+    setWalletAdjustmentReason("");
+    setWalletAdjustmentPreview(null);
+    setWalletAdjustmentError(null);
+    setWalletAdjustmentConfirmed(false);
+    walletAdjustmentCommandKey.current = null;
+    setWalletAdjustmentOpen(true);
+  }
+
+  async function handleWalletAdjustmentPreview(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (walletAdjustmentPreview) {
+      await handleWalletAdjustmentConfirm();
+      return;
+    }
+    if (!visibleWallet || previewingWalletAdjustment || savingWalletAdjustment || !writeAccess)
+      return;
+    setPreviewingWalletAdjustment(true);
+    setWalletAdjustmentError(null);
+    setNotice(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const preview = await adapter.previewWalletAdjustment(workspaceId, {
+        currency: visibleWallet.balance.currency,
+        minor: observedWalletBalance,
+      });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setWallet(preview.wallet);
+      setWalletAdjustmentPreview(preview);
+      walletAdjustmentCommandKey.current = null;
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setWalletAdjustmentError(
+        cause instanceof Error ? cause.message : "Não foi possível conferir o saldo informado.",
+      );
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setPreviewingWalletAdjustment(false);
+    }
+  }
+
+  async function handleWalletAdjustmentConfirm() {
+    if (!walletAdjustmentPreview || savingWalletAdjustment || !writeAccess) return;
+    if (BigInt(walletAdjustmentPreview.difference.minor) === BigInt(0)) {
+      setWalletAdjustmentOpen(false);
+      return;
+    }
+    const reason = walletAdjustmentReason.trim();
+    if (!reason) {
+      setWalletAdjustmentError("Conte brevemente por que o saldo está diferente.");
+      return;
+    }
+    setSavingWalletAdjustment(true);
+    setWalletAdjustmentError(null);
+    setNotice(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey =
+      walletAdjustmentCommandKey.current ?? `web-wallet-adjustment-${crypto.randomUUID()}`;
+    walletAdjustmentCommandKey.current = commandKey;
+    try {
+      const result = await adapter.adjustWallet(
+        workspaceId,
+        walletAdjustmentPreview.wallet,
+        {
+          observedBalance: walletAdjustmentPreview.observedBalance,
+          reason,
+        },
+        commandKey,
+      );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      walletAdjustmentCommandKey.current = null;
+      setWallet(result.wallet);
+      setTransactions((current) => [
+        result.transaction,
+        ...current.filter((transaction) => transaction.id !== result.transaction.id),
+      ]);
+      setWalletTransactions((current) => [
+        result.transaction,
+        ...current.filter((transaction) => transaction.id !== result.transaction.id),
+      ]);
+      setWalletAdjustmentOpen(false);
+      setWalletAdjustmentPreview(null);
+      setWalletAdjustmentReason("");
+      setWalletAdjustmentConfirmed(true);
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        walletAdjustmentCommandKey.current = null;
+        setWalletAdjustmentPreview(null);
+        try {
+          const currentWallet = await adapter.getWallet(workspaceId);
+          if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+          setWallet(currentWallet);
+          setWalletAdjustmentError(
+            "A carteira mudou enquanto você conferia. O saldo atual foi recarregado; calcule a diferença novamente.",
+          );
+        } catch (reloadCause) {
+          if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+          setWalletAdjustmentError(
+            reloadCause instanceof Error
+              ? reloadCause.message
+              : "A carteira mudou e não foi possível recarregar o saldo.",
+          );
+        }
+      } else {
+        if (!shouldRetryIdempotentCommand(cause)) walletAdjustmentCommandKey.current = null;
+        setWalletAdjustmentError(
+          cause instanceof Error ? cause.message : "Não foi possível ajustar a carteira.",
+        );
+      }
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingWalletAdjustment(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -1352,14 +1501,37 @@ function FinanceDashboard({
         <Card className="bg-primary text-primary-foreground">
           <CardHeader>
             <CardDescription className="text-primary-foreground/70">
-              Saldo dos lançamentos carregados
+              Saldo atual da carteira
             </CardDescription>
             <CardTitle className="text-3xl font-semibold tracking-tight">
-              {formatMoneyMinor(walletTotal, currency)}
+              {visibleWallet
+                ? formatMoneyMinor(visibleWallet.balance.minor, visibleWallet.balance.currency)
+                : "Carregando…"}
             </CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-primary-foreground/80">
-            A linha do tempo é paginada; aplique filtros ou carregue mais para revisar os dados.
+          <CardContent className="flex flex-col items-start gap-3 text-sm text-primary-foreground/80">
+            <p>
+              Calculado pelo histórico completo da carteira, mesmo quando a linha do tempo é
+              filtrada.
+            </p>
+            {walletAdjustmentConfirmed ? (
+              <p role="status" className="font-medium text-primary-foreground">
+                Saldo conferido. A carteira foi ajustada pela diferença.
+              </p>
+            ) : null}
+            {writeAccess ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={openWalletAdjustment}
+                disabled={!visibleWallet || visibleStatus === "loading"}
+              >
+                Conferir saldo
+              </Button>
+            ) : (
+              <p>Somente membros que podem editar as finanças conferem este saldo.</p>
+            )}
           </CardContent>
         </Card>
         <Card id="safe-to-spend">
@@ -2452,6 +2624,130 @@ function FinanceDashboard({
               </DialogFooter>
             </form>
           ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={workspaceDataReady && walletAdjustmentOpen}
+        onOpenChange={(open) => {
+          if (open) return;
+          if (previewingWalletAdjustment || savingWalletAdjustment) return;
+          setWalletAdjustmentOpen(false);
+          setWalletAdjustmentPreview(null);
+          setWalletAdjustmentReason("");
+          setWalletAdjustmentError(null);
+          walletAdjustmentCommandKey.current = null;
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Conferir saldo da carteira</DialogTitle>
+            <DialogDescription>
+              Informe o saldo que você vê agora. Antes de criar qualquer registro, mostraremos
+              exatamente a diferença em relação ao histórico do Casei.
+            </DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={handleWalletAdjustmentPreview}>
+            <MoneyInput
+              id="observed-wallet-balance"
+              value={observedWalletBalance}
+              onChange={(minor) => {
+                setObservedWalletBalance(minor);
+                setWalletAdjustmentPreview(null);
+                setWalletAdjustmentError(null);
+                walletAdjustmentCommandKey.current = null;
+              }}
+              label="Saldo que você vê agora"
+              description="Pode ser positivo, zero ou negativo."
+              currency={visibleWallet?.balance.currency ?? currency}
+              allowNegative
+              autoFocus
+              disabled={previewingWalletAdjustment || savingWalletAdjustment}
+            />
+
+            {walletAdjustmentPreview && walletAdjustmentAbsoluteDifference !== null ? (
+              <Alert role="status">
+                <AlertTitle>
+                  {walletAdjustmentDifferenceMinor === BigInt(0)
+                    ? "O saldo já confere"
+                    : "Diferença calculada"}
+                </AlertTitle>
+                <AlertDescription>
+                  {walletAdjustmentDifferenceMinor === BigInt(0)
+                    ? "Nenhum ajuste será criado."
+                    : BigInt(walletAdjustmentPreview.difference.minor) > BigInt(0)
+                      ? `Serão acrescentados ${formatMoneyMinor(
+                          walletAdjustmentAbsoluteDifference.toString(),
+                          walletAdjustmentPreview.difference.currency,
+                        )} à carteira.`
+                      : `Serão retirados ${formatMoneyMinor(
+                          walletAdjustmentAbsoluteDifference.toString(),
+                          walletAdjustmentPreview.difference.currency,
+                        )} da carteira.`}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {walletAdjustmentDifferenceMinor !== null &&
+            walletAdjustmentDifferenceMinor !== BigInt(0) ? (
+              <Field>
+                <FieldLabel htmlFor="wallet-adjustment-reason">Motivo da diferença</FieldLabel>
+                <Input
+                  id="wallet-adjustment-reason"
+                  value={walletAdjustmentReason}
+                  onChange={(event) => {
+                    setWalletAdjustmentReason(event.target.value);
+                    setWalletAdjustmentError(null);
+                  }}
+                  placeholder="Ex.: tarifa bancária que ainda não registrei"
+                  maxLength={500}
+                  required
+                  disabled={savingWalletAdjustment}
+                />
+                <FieldDescription>
+                  Essa observação fica no histórico de auditoria do ajuste.
+                </FieldDescription>
+              </Field>
+            ) : null}
+
+            {walletAdjustmentError ? (
+              <Alert variant="destructive" role="alert">
+                <AlertTitle>Não foi possível concluir</AlertTitle>
+                <AlertDescription>{walletAdjustmentError}</AlertDescription>
+              </Alert>
+            ) : null}
+
+            <DialogFooter>
+              <DialogClose
+                render={<Button type="button" variant="outline" />}
+                disabled={previewingWalletAdjustment || savingWalletAdjustment}
+              >
+                Cancelar
+              </DialogClose>
+              {walletAdjustmentPreview ? (
+                <Button
+                  type="button"
+                  onClick={() => void handleWalletAdjustmentConfirm()}
+                  disabled={
+                    savingWalletAdjustment ||
+                    previewingWalletAdjustment ||
+                    (walletAdjustmentDifferenceMinor !== BigInt(0) &&
+                      !walletAdjustmentReason.trim())
+                  }
+                >
+                  {savingWalletAdjustment
+                    ? "Ajustando…"
+                    : walletAdjustmentDifferenceMinor === BigInt(0)
+                      ? "Fechar"
+                      : "Confirmar ajuste"}
+                </Button>
+              ) : (
+                <Button type="submit" disabled={previewingWalletAdjustment}>
+                  {previewingWalletAdjustment ? "Calculando…" : "Calcular diferença"}
+                </Button>
+              )}
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

@@ -33,3 +33,11 @@ saldo observado sem fabricar renda ou despesa.
 - Migration cobre marcador da abertura e avanço da versão da wallet.
 - Browser percorre prévia, confirmação, erro e atualização do saldo em contexto estreito e amplo,
   ou a indisponibilidade concreta é registrada com validação alternativa.
+
+## Evidência executada
+
+- `pnpm lint`, `pnpm typecheck`, `pnpm test` e `pnpm build` passaram no worktree sincronizado.
+- O teste `finance-wallet.integration.test.ts` passou contra PostgreSQL real isolado, incluindo
+  abertura imediata, replay idempotente e duas confirmações concorrentes na mesma versão.
+- Playwright percorreu diferenças negativa, positiva e zero, motivo obrigatório, confirmação e
+  atualização do saldo em 390 × 844 e desktop; o console não apresentou erros da aplicação.
