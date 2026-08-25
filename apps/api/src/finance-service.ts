@@ -1178,6 +1178,33 @@ export class FinanceService {
     });
   }
 
+  async getStatement(scope: FinanceScope, statementId: string): Promise<StatementView | null> {
+    return this.withScopedClient(scope, async (client) => {
+      const result = await client.query<{
+        id: string;
+        workspace_id: string;
+        card_id: string;
+        period_start: string;
+        closing_on: string;
+        due_on: string;
+        state: StatementView["state"];
+        total_minor: string | bigint;
+        paid_minor: string | bigint;
+        currency_code: string;
+        version: number;
+      }>(
+        `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+           FROM credit_statement s
+           JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
+          WHERE s.workspace_id = $1 AND s.id = $2`,
+        [scope.workspaceId, statementId],
+      );
+      const row = result.rows[0];
+      return row ? toStatementView(row) : null;
+    });
+  }
+
   async listStatementItems(
     scope: FinanceScope,
     statementId: string,
