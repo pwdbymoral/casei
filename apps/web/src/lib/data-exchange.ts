@@ -101,6 +101,8 @@ export type CreateExportInput = {
   format: "csv" | "zip";
   from?: string;
   to?: string;
+  kind?: "all" | "income" | "expense";
+  categoryId?: string | null;
 };
 
 export interface DataExchangeAdapter {
