@@ -87,6 +87,17 @@ entre espaços e o purge autorizado do espaço remove a referência antes da cas
 - A lista de compras é operável com uma mão, preserva itens marcados durante a sessão e mantém controles com alvos confortáveis.
 - O app informa claramente quando mostra dados em cache offline. Consulta pode funcionar com o último snapshot; adicionar ou marcar comprado exige conexão no MVP.
 
+### Paginação dos produtos e movimentações (STOCK-003a)
+
+`GET /v1/workspaces/:workspaceId/stock/products` e
+`GET /v1/workspaces/:workspaceId/stock/products/:productId/movements` aceitam `cursor` e `limit`
+conforme o contrato transversal. A resposta mantém o envelope `{ items, page }`; `page.nextCursor`
+é opaco, assinado pelo servidor e só aparece quando existe outra página. Produtos são ordenados por
+`archived ASC`, estado (`missing`, `low`, demais), `lower(name) ASC` e `id ASC`; movimentações por
+`occurred_at DESC` e `id DESC`. O cursor carrega a posição completa dessa ordenação, respeita o
+limite solicitado (padrão 50, máximo 100) e qualquer cursor adulterado, inválido ou de outra
+ordenação retorna `422 validation_failed` no campo `cursor`.
+
 ## Edge cases
 
 - Unidade de produto com histórico não muda sem conversão explícita; no MVP, a alternativa é criar novo produto ou zerar e reiniciar com confirmação.
@@ -108,4 +119,5 @@ entre espaços e o purge autorizado do espaço remove a referência antes da cas
 - [x] Lista automática e item livre convivem sem duplicação.
 - [x] Concluir compra só altera estoque após confirmação explícita.
 - [x] A leitura autenticada da lista não muta dados; compra automática sem entrada não reaparece até uma movimentação real.
+- [x] Produtos e movimentações usam cursores opacos assinados, preservam continuidade/limite e rejeitam cursor adulterado.
 - [x] Busca e lista permanecem utilizáveis em telefone e teclado, com alvos de toque e reflow responsivo; o modo avançado tabular fica para STOCK-004.
