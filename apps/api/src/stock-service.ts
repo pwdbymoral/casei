@@ -6,7 +6,9 @@ import {
   createStockMovementSchema,
   createStockProductSchema,
   createStockShoppingItemSchema,
+  domainIdSchema,
   markStockMissingSchema,
+  paginationQuerySchema,
   purchaseStockShoppingItemSchema,
   stockBulkApplyRequestSchema,
   stockBulkPreviewRequestSchema,
@@ -29,6 +31,7 @@ import {
   stockMovementAfter,
   suggestedShoppingQuantity,
 } from "@casei/domain";
+import { decodeCursor, encodeCursor, InvalidCursorError } from "./http/cursor.js";
 
 export interface StockScope {
   workspaceId: string;
@@ -132,6 +135,8 @@ interface StockProductRow {
   note: string | null;
   archived: boolean;
   version: number;
+  state_rank?: number;
+  lower_name?: string;
 }
 
 interface StockBulkProductRow extends StockProductRow {
@@ -156,6 +161,12 @@ export interface StockBulkApplyResult {
   readonly applied: readonly StockBulkAppliedRow[];
 }
 
+export interface StockPage<T> {
+  readonly items: T[];
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
 interface StockMovementRow {
   id: string;
   workspace_id: string;
@@ -167,6 +178,7 @@ interface StockMovementRow {
   reason: string | null;
   author_id: string;
   occurred_at: Date | string;
+  occurred_at_cursor?: string;
 }
 
 interface ShoppingItemRow {
@@ -189,12 +201,18 @@ interface ShoppingItemRow {
 
 export class StockService {
   private readonly applicationRole: string;
+  private readonly cursorSecret: string;
 
   constructor(
     private readonly pool: Pool,
-    options: { applicationRole?: string } = {},
+    options: { applicationRole?: string; cursorSecret?: string } = {},
   ) {
     this.applicationRole = options.applicationRole ?? "casei_app";
+    const cursorSecret = options.cursorSecret ?? process.env.CASEI_CURSOR_SECRET;
+    if (process.env.NODE_ENV === "production" && !cursorSecret) {
+      throw new Error("CASEI_CURSOR_SECRET is required in production");
+    }
+    this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
   }
 
   async createProduct(
@@ -266,27 +284,73 @@ export class StockService {
 
   async listProducts(
     scope: StockScope,
-    query: { query?: string; includeArchived?: boolean; limit?: number } = {},
-  ): Promise<StockProductView[]> {
+    query: {
+      query?: string;
+      includeArchived?: boolean;
+      cursor?: string;
+      limit?: number;
+    } = {},
+  ): Promise<StockPage<StockProductView>> {
     const parsed = stockProductListQuerySchema.parse(query);
     const search = parsed.query ? `%${normalizeProductName(parsed.query).key}%` : null;
     return this.withUnitOfWork(scope, async ({ client }) => {
+      const values: unknown[] = [scope.workspaceId, parsed.includeArchived, search];
+      const conditions = [
+        "workspace_id = $1",
+        "($2::boolean OR archived = false)",
+        "($3::text IS NULL OR name_normalized LIKE $3)",
+      ];
+      if (parsed.cursor) {
+        const [archived, stateRank, lowerName, id] = decodeStockProductCursor(
+          parsed.cursor,
+          this.cursorSecret,
+        );
+        values.push(archived, stateRank, lowerName, id);
+        const archivedParam = values.length - 3;
+        const stateRankParam = values.length - 2;
+        const lowerNameParam = values.length - 1;
+        const idParam = values.length;
+        conditions.push(
+          `(archived > $${archivedParam}::boolean
+            OR (archived = $${archivedParam}::boolean AND ${stockStateRankSql} > $${stateRankParam}::int)
+            OR (archived = $${archivedParam}::boolean AND ${stockStateRankSql} = $${stateRankParam}::int
+                AND lower(name) > $${lowerNameParam}::text)
+            OR (archived = $${archivedParam}::boolean AND ${stockStateRankSql} = $${stateRankParam}::int
+                AND lower(name) = $${lowerNameParam}::text AND id > $${idParam}::uuid))`,
+        );
+      }
+      values.push(parsed.limit + 1);
+      const limitParam = values.length;
       const result = await client.query<StockProductRow>(
         `SELECT id, workspace_id, name, unit, unit_label, quantity_milli, minimum_milli,
-                marked_missing, shopping_auto, category, location, note, archived, version
+                marked_missing, shopping_auto, category, location, note, archived, version,
+                ${stockStateRankSql} AS state_rank, lower(name) AS lower_name
            FROM stock_product
-          WHERE workspace_id = $1
-            AND ($2::boolean OR archived = false)
-            AND ($3::text IS NULL OR name_normalized LIKE $3)
+          WHERE ${conditions.join(" AND ")}
           ORDER BY archived ASC,
-                   CASE WHEN marked_missing OR quantity_milli = 0 THEN 0
-                        WHEN minimum_milli IS NOT NULL AND quantity_milli <= minimum_milli THEN 1
-                        ELSE 2 END,
-                   lower(name), id
-          LIMIT $4`,
-        [scope.workspaceId, parsed.includeArchived, search, parsed.limit],
+                   state_rank ASC, lower_name ASC, id ASC
+          LIMIT $${limitParam}`,
+        values,
       );
-      return result.rows.map(toProductView);
+      const hasMore = result.rows.length > parsed.limit;
+      const rows = hasMore ? result.rows.slice(0, parsed.limit) : result.rows;
+      const last = rows.at(-1);
+      const nextCursor =
+        hasMore && last
+          ? encodeCursor(
+              {
+                ordering: stockProductCursorOrdering,
+                position: [
+                  last.archived,
+                  stockProductStateRank(last),
+                  stockProductLowerName(last),
+                  last.id,
+                ],
+              },
+              this.cursorSecret,
+            )
+          : null;
+      return { items: rows.map(toProductView), nextCursor, hasMore };
     });
   }
 
@@ -953,22 +1017,50 @@ export class StockService {
   async listMovements(
     scope: StockScope,
     productId: string,
-    limit = 100,
-  ): Promise<StockMovementView[]> {
+    query: { cursor?: string; limit?: number } = {},
+  ): Promise<StockPage<StockMovementView>> {
+    const parsed = paginationQuerySchema.parse(query);
     return this.withUnitOfWork(scope, async ({ client }) => {
       const product = await client.query<{ id: string }>(
         "SELECT id FROM stock_product WHERE workspace_id = $1 AND id = $2",
         [scope.workspaceId, productId],
       );
       if (!product.rowCount) throw new StockNotFoundError();
+      const values: unknown[] = [scope.workspaceId, productId];
+      const conditions = ["workspace_id = $1", "product_id = $2"];
+      if (parsed.cursor) {
+        const [occurredAt, id] = decodeStockMovementCursor(parsed.cursor, this.cursorSecret);
+        values.push(occurredAt, id);
+        const occurredAtParam = values.length - 1;
+        const idParam = values.length;
+        conditions.push(
+          `(occurred_at < $${occurredAtParam}::timestamptz
+            OR (occurred_at = $${occurredAtParam}::timestamptz AND id < $${idParam}::uuid))`,
+        );
+      }
+      values.push(parsed.limit + 1);
+      const limitParam = values.length;
       const result = await client.query<StockMovementRow>(
         `SELECT id, workspace_id, product_id, kind, quantity_milli, before_milli, after_milli,
-                reason, author_id, occurred_at
-           FROM stock_movement WHERE workspace_id = $1 AND product_id = $2
-          ORDER BY occurred_at DESC, id DESC LIMIT $3`,
-        [scope.workspaceId, productId, Math.min(Math.max(limit, 1), 100)],
+                reason, author_id, occurred_at, occurred_at::text AS occurred_at_cursor
+           FROM stock_movement WHERE ${conditions.join(" AND ")}
+          ORDER BY occurred_at DESC, id DESC LIMIT $${limitParam}`,
+        values,
       );
-      return result.rows.map(toMovementView);
+      const hasMore = result.rows.length > parsed.limit;
+      const rows = hasMore ? result.rows.slice(0, parsed.limit) : result.rows;
+      const last = rows.at(-1);
+      const nextCursor =
+        hasMore && last
+          ? encodeCursor(
+              {
+                ordering: stockMovementCursorOrdering,
+                position: [movementCursorPosition(last), last.id],
+              },
+              this.cursorSecret,
+            )
+          : null;
+      return { items: rows.map(toMovementView), nextCursor, hasMore };
     });
   }
 
@@ -1557,6 +1649,70 @@ function isAutomaticShoppingCandidate(product: StockProductRow): boolean {
       quantity === 0n ||
       (quantity !== null && minimum !== null && quantity <= minimum))
   );
+}
+
+const stockProductCursorOrdering = "archived,state_rank,lower_name,id";
+const stockMovementCursorOrdering = "occurred_at,id";
+const stockStateRankSql = `CASE WHEN marked_missing OR quantity_milli = 0 THEN 0
+                             WHEN minimum_milli IS NOT NULL AND quantity_milli <= minimum_milli THEN 1
+                             ELSE 2 END`;
+
+function stockProductStateRank(row: StockProductRow): number {
+  if (typeof row.state_rank === "number") return row.state_rank;
+  const quantity = normalizeStockValue(row.quantity_milli);
+  const minimum = normalizeStockValue(row.minimum_milli);
+  if (row.marked_missing || quantity === 0n) return 0;
+  if (minimum !== null && quantity !== null && quantity <= minimum) return 1;
+  return 2;
+}
+
+function stockProductLowerName(row: StockProductRow): string {
+  return row.lower_name ?? row.name.toLocaleLowerCase();
+}
+
+function decodeStockProductCursor(
+  cursor: string,
+  secret: string,
+): [boolean, number, string, string] {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== stockProductCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 4 ||
+    typeof position[0] !== "boolean" ||
+    typeof position[1] !== "number" ||
+    !Number.isInteger(position[1]) ||
+    position[1] < 0 ||
+    position[1] > 2 ||
+    typeof position[2] !== "string" ||
+    typeof position[3] !== "string" ||
+    !domainIdSchema.safeParse(position[3]).success
+  ) {
+    throw new InvalidCursorError();
+  }
+  return [position[0], position[1], position[2], position[3]];
+}
+
+function decodeStockMovementCursor(cursor: string, secret: string): [string, string] {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== stockMovementCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 2 ||
+    typeof position[0] !== "string" ||
+    typeof position[1] !== "string" ||
+    Number.isNaN(Date.parse(position[0])) ||
+    !domainIdSchema.safeParse(position[1]).success
+  ) {
+    throw new InvalidCursorError();
+  }
+  return [position[0], position[1]];
+}
+
+function movementCursorPosition(row: StockMovementRow): string {
+  return row.occurred_at_cursor ?? toMovementView(row).occurredAt;
 }
 
 function toProductView(row: StockProductRow): StockProductView {

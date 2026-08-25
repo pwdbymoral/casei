@@ -1,6 +1,7 @@
 import { IdempotencyConflictError, type Pool } from "@casei/database";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { InvalidCursorError } from "../src/http/cursor.js";
 import type { IdentityService } from "../src/identity-service.js";
 import { stockErrorToHttp } from "../src/stock-routes.js";
 import { type StockService, StockVersionConflictError } from "../src/stock-service.js";
@@ -65,6 +66,11 @@ describe("stock HTTP boundary", () => {
   it("maps idempotency conflicts to a stable 409 API error", () => {
     const error = stockErrorToHttp(new IdempotencyConflictError());
     expect(error).toMatchObject({ status: 409, code: "idempotency_conflict" });
+    expect(stockErrorToHttp(new InvalidCursorError())).toMatchObject({
+      status: 422,
+      code: "validation_failed",
+      fieldErrors: { cursor: ["O cursor da lista não é válido."] },
+    });
   });
 
   it("requires idempotency for creation and scopes list to authenticated workspace", async () => {
@@ -72,7 +78,7 @@ describe("stock HTTP boundary", () => {
       listProducts: async (scope: { workspaceId: string; role: string }) => {
         expect(scope.workspaceId).toBe(workspaceId);
         expect(scope.role).toBe("member");
-        return [product];
+        return { items: [product], nextCursor: "next-stock-cursor", hasMore: true };
       },
       createProduct: async () => ({ replayed: false, product }),
     } as unknown as StockService;
@@ -83,7 +89,7 @@ describe("stock HTTP boundary", () => {
     expect(listed.status).toBe(200);
     await expect(listed.json()).resolves.toEqual({
       items: [product],
-      page: { nextCursor: null, hasMore: false },
+      page: { nextCursor: "next-stock-cursor", hasMore: true },
     });
     const missingKey = await app.request(
       `http://localhost/v1/workspaces/${workspaceId}/stock/products`,
@@ -94,6 +100,30 @@ describe("stock HTTP boundary", () => {
       },
     );
     expect(missingKey.status).toBe(422);
+  });
+
+  it("forwards movement cursor pagination and preserves the page envelope", async () => {
+    const received: { productId?: string; query?: unknown } = {};
+    const service = {
+      listMovements: async (_scope: unknown, id: string, query: unknown) => {
+        received.productId = id;
+        received.query = query;
+        return { items: [], nextCursor: "next-movement-cursor", hasMore: true };
+      },
+    } as unknown as StockService;
+    const app = appFor(service);
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/stock/products/${productId}/movements?limit=1&cursor=opaque-cursor`,
+    );
+    expect(response.status).toBe(200);
+    expect(received).toEqual({
+      productId,
+      query: { limit: 1, cursor: "opaque-cursor" },
+    });
+    await expect(response.json()).resolves.toEqual({
+      items: [],
+      page: { nextCursor: "next-movement-cursor", hasMore: true },
+    });
   });
 
   it("requires If-Match for quantity commands and returns current version on conflict", async () => {
