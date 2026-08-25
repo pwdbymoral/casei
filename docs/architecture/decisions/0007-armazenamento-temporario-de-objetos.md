@@ -25,8 +25,9 @@ expiração, `Cache-Control: no-store` e `ServerSideEncryption: AES256`. O
 adapter rejeita chaves com traversal/controle, aplica o limite padrão de 10 MB
 e o TTL máximo de 24 horas, e remove um upload parcial quando a fonte, o hash
 ou a varredura falha. `FormatFileScanPort` valida MIME, assinatura ZIP do XLSX,
-bytes NUL e tamanho; `FileScanPort` é uma injeção explícita para scanner de
-malware do deploy e o scanner de formato nunca declara um antivírus limpo.
+bytes NUL incompatíveis em CSV e tamanho; `FileScanPort` é uma injeção
+explícita para scanner de malware do deploy e o scanner de formato nunca
+declara um antivírus limpo.
 O pacote aceita `CASEI_OBJECT_STORAGE_*` por ambiente, credenciais são
 opcionais para permitir a cadeia padrão do SDK/IAM e um par parcial de chaves é
 rejeitado. A chave é gerada por `createOpaqueStorageKey` no formato

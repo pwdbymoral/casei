@@ -12,7 +12,8 @@ arquivos temporários fora do PostgreSQL, transfiram upload/download em stream,
 limitem o tamanho, validem hash e expiração e nunca emitam credenciais ou URL
 bearer para o browser. A camada também oferece um port de varredura para que o
 deploy injete um scanner de malware; o scanner de formato padrão rejeita MIME,
-assinatura e bytes incompatíveis antes da confirmação do upload.
+assinatura e bytes incompatíveis (como NUL em CSV) antes da confirmação do
+upload.
 
 ## Escopo e decisões já aprovadas
 
