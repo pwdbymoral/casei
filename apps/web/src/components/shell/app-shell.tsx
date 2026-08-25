@@ -2,6 +2,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import {
+  ArrowDownUpIcon,
   BarChart3Icon,
   ChevronDownIcon,
   CircleHelpIcon,
@@ -87,6 +88,7 @@ const primaryNav = [
 const secondaryNav = [
   { href: "/app/loans", label: "Empréstimos", icon: HandCoinsIcon },
   { href: "/app/reports", label: "Relatórios", icon: BarChart3Icon },
+  { href: "/app/data", label: "Importar e exportar", icon: ArrowDownUpIcon },
   { href: "/app/settings", label: "Configurações", icon: SettingsIcon },
   { href: "/app/help", label: "Ajuda", icon: CircleHelpIcon },
 ] as const;
