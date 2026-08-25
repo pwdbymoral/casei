@@ -370,18 +370,18 @@ function FinanceDashboard({
   const statementTargetId = searchParams.get("statement");
 
   useEffect(() => {
-    if (!transactionTargetId) return;
+    if (!workspaceDataReady || !transactionTargetId) return;
     const target = [...walletTransactions, ...transactions].find(
       (transaction) => transaction.id === transactionTargetId,
     );
     if (target) setViewingTransaction(target);
-  }, [transactionTargetId, transactions, walletTransactions]);
+  }, [transactionTargetId, transactions, walletTransactions, workspaceDataReady]);
 
   useEffect(() => {
-    if (!statementTargetId) return;
+    if (!workspaceDataReady || !statementTargetId) return;
     const target = statements.find((statement) => statement.id === statementTargetId);
     if (target) setViewingStatement(target);
-  }, [statementTargetId, statements]);
+  }, [statementTargetId, statements, workspaceDataReady]);
 
   useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
