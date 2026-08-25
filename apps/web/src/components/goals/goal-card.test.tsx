@@ -65,4 +65,16 @@ describe("GoalCard", () => {
 
     expect(html).toContain("Defina um prazo para ver o ritmo sugerido");
   });
+
+  it("disables every reserve mutation while a goal is paused or canceled", () => {
+    for (const status of ["paused", "canceled"] as const) {
+      const html = renderGoalCard({ ...goal, status });
+      const buttons = [...html.matchAll(/<button[^>]*>/g)].map(([tag]) => tag);
+
+      expect(buttons).toHaveLength(5);
+      expect(buttons[0]).toContain("disabled");
+      expect(buttons[1]).toContain("disabled");
+      expect(buttons[2]).toContain("disabled");
+    }
+  });
 });

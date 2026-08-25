@@ -151,7 +151,7 @@ export function GoalCard({
             type="button"
             variant="outline"
             className="min-h-11"
-            disabled={!writable || busy || BigInt(goal.reserved.minor) <= BigInt(0)}
+            disabled={!writable || disabled || BigInt(goal.reserved.minor) <= BigInt(0)}
             onClick={() => onAction(goal, "release")}
           >
             <MinusIcon aria-hidden="true" /> Retirar
