@@ -5,16 +5,13 @@ import {
   CalendarDaysIcon,
   CheckIcon,
   CircleAlertIcon,
-  HistoryIcon,
   LoaderCircleIcon,
-  MinusIcon,
   PlusIcon,
   TargetIcon,
-  WalletCardsIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-
+import { type GoalAction, GoalCard } from "@/components/goals/goal-card";
 import { AsyncState, MoneyInput, StatusBadge } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -36,26 +33,12 @@ import {
   type GoalMovement,
   type GoalsAdapter,
   GoalsAdapterError,
-  goalProgressPercent,
   goalsAdapterForEnvironment,
+  simulateGoalContribution,
 } from "@/lib/goals";
 import { formatMoneyMinor } from "@/lib/money";
 
-type GoalAction = "allocate" | "release" | "spend";
 type PageStatus = "loading" | "success" | "empty" | "error" | "permission" | "offline";
-
-function goalStatusLabel(status: Goal["status"]): string {
-  if (status === "completed") return "Concluída";
-  if (status === "paused") return "Pausada";
-  if (status === "canceled") return "Cancelada";
-  return "Ativa";
-}
-
-function priorityLabel(priority: Goal["priority"]): string {
-  if (priority === "high") return "Prioridade alta";
-  if (priority === "low") return "Prioridade baixa";
-  return "Prioridade normal";
-}
 
 function actionLabel(action: GoalAction): string {
   if (action === "allocate") return "Reservar";
@@ -69,169 +52,11 @@ function movementLabel(kind: GoalMovement["kind"]): string {
   return "Gasto da meta";
 }
 
-function deadlineLabel(deadline: string | null): string {
-  if (!deadline) return "Sem prazo definido";
-  const date = new Date(`${deadline}T12:00:00`);
-  return Number.isNaN(date.getTime())
-    ? `Prazo ${deadline}`
-    : `Prazo em ${new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium" }).format(date)}`;
-}
-
 function errorStatus(error: unknown): PageStatus {
-  if (error instanceof GoalsAdapterError && error.status === 403) return "permission";
+  if (error instanceof GoalsAdapterError && (error.status === 401 || error.status === 403))
+    return "permission";
   if (error instanceof GoalsAdapterError && error.status === undefined) return "offline";
   return "error";
-}
-
-function GoalCard({
-  goal,
-  currency,
-  writable,
-  busy,
-  onAction,
-  onHistory,
-  onSimulation,
-}: {
-  goal: Goal;
-  currency: string;
-  writable: boolean;
-  busy: boolean;
-  onAction: (goal: Goal, action: GoalAction) => void;
-  onHistory: (goal: Goal) => void;
-  onSimulation: (goal: Goal) => void;
-}) {
-  const progress = goalProgressPercent(goal);
-  const uncovered = BigInt(goal.uncovered.minor) > BigInt(0);
-  const disabled = busy || goal.status === "canceled" || goal.status === "paused";
-  const remaining = BigInt(goal.remaining.minor);
-  const pace =
-    remaining <= BigInt(0)
-      ? "Meta atingida"
-      : goal.contributionPeriodsRemaining === null
-        ? "Defina um prazo para ver o ritmo sugerido"
-        : goal.contributionPeriodsRemaining === 0
-          ? "Prazo vencido; revise o objetivo"
-          : goal.requiredContribution
-            ? `${formatMoneyMinor(goal.requiredContribution.minor, currency)} por mês · ${goal.contributionPeriodsRemaining} período(s)`
-            : "Ritmo indisponível";
-
-  return (
-    <Card className="overflow-hidden">
-      <CardHeader className="gap-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <CardTitle className="truncate text-lg">{goal.name}</CardTitle>
-            <CardDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span>{deadlineLabel(goal.deadline)}</span>
-              <span aria-hidden="true">·</span>
-              <span>{priorityLabel(goal.priority)}</span>
-            </CardDescription>
-          </div>
-          <StatusBadge
-            status={goal.status === "completed" ? "success" : uncovered ? "warning" : "info"}
-          >
-            {goalStatusLabel(goal.status)}
-          </StatusBadge>
-        </div>
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <p className="text-sm text-muted-foreground">Reservado</p>
-            <p className="text-2xl font-semibold tracking-tight">
-              {formatMoneyMinor(goal.reserved.minor, currency)}
-            </p>
-          </div>
-          <p className="text-right text-sm text-muted-foreground">
-            de {formatMoneyMinor(goal.target.minor, currency)}
-          </p>
-        </div>
-        <div>
-          <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
-            <span>Progresso</span>
-            <span>{progress}%</span>
-          </div>
-          <div
-            className="h-2 overflow-hidden rounded-full bg-muted"
-            role="progressbar"
-            aria-label={`Progresso da meta ${goal.name}`}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progress}
-          >
-            <div
-              className="h-full rounded-full bg-primary transition-[width]"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-        </div>
-        <p className="flex items-start gap-2 text-sm text-muted-foreground">
-          <CalendarDaysIcon aria-hidden="true" className="mt-0.5 shrink-0" />
-          <span>
-            <span className="font-medium text-foreground">Ritmo sugerido: </span>
-            {pace}
-          </span>
-        </p>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        {uncovered ? (
-          <Alert variant="destructive">
-            <CircleAlertIcon aria-hidden="true" />
-            <AlertTitle>Reserva sem cobertura</AlertTitle>
-            <AlertDescription>
-              {formatMoneyMinor(goal.uncovered.minor, currency)} da reserva excedem o saldo
-              disponível.
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        <div className="grid gap-2 sm:grid-cols-3">
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11"
-            disabled={!writable || disabled}
-            onClick={() => onAction(goal, "allocate")}
-          >
-            <PlusIcon aria-hidden="true" /> Reservar
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11"
-            disabled={!writable || busy || BigInt(goal.reserved.minor) <= BigInt(0)}
-            onClick={() => onAction(goal, "release")}
-          >
-            <MinusIcon aria-hidden="true" /> Retirar
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11"
-            disabled={!writable || disabled || BigInt(goal.reserved.minor) <= BigInt(0)}
-            onClick={() => onAction(goal, "spend")}
-          >
-            <WalletCardsIcon aria-hidden="true" /> Usar
-          </Button>
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          className="min-h-11 justify-start px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
-          disabled={busy}
-          onClick={() => onHistory(goal)}
-        >
-          <HistoryIcon aria-hidden="true" /> Ver histórico
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          className="min-h-11 justify-start px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
-          disabled={busy || remaining <= BigInt(0)}
-          onClick={() => onSimulation(goal)}
-        >
-          <CalendarDaysIcon aria-hidden="true" /> Simular contribuição
-        </Button>
-      </CardContent>
-    </Card>
-  );
 }
 
 export default function GoalsPage() {
@@ -302,19 +127,10 @@ export default function GoalsPage() {
     [goals],
   );
 
-  const simulationPeriods = useMemo(() => {
-    if (!simulationGoal) return null;
-    const contribution = BigInt(simulationMinor || "0");
-    const remaining = BigInt(simulationGoal.remaining.minor);
-    if (contribution <= BigInt(0) || remaining <= BigInt(0)) return null;
-    return (remaining + contribution - BigInt(1)) / contribution;
-  }, [simulationGoal, simulationMinor]);
-
-  const simulationBeyondDeadline = useMemo(() => {
-    if (!simulationGoal || simulationPeriods === null) return false;
-    const deadlinePeriods = simulationGoal.contributionPeriodsRemaining;
-    return deadlinePeriods !== null && simulationPeriods > BigInt(deadlinePeriods);
-  }, [simulationGoal, simulationPeriods]);
+  const simulation = useMemo(
+    () => (simulationGoal ? simulateGoalContribution(simulationGoal, simulationMinor) : null),
+    [simulationGoal, simulationMinor],
+  );
 
   function resetCreateForm() {
     setName("");
@@ -815,19 +631,20 @@ export default function GoalsPage() {
                 autoFocus
               />
               <div className="rounded-lg border bg-muted/30 p-4 text-sm">
-                {simulationPeriods === null ? (
+                {simulation === null || simulation.periodsToTarget === null ? (
                   <p className="text-muted-foreground">Informe um valor para ver o cenário.</p>
                 ) : (
                   <>
                     <p className="font-medium">
-                      Você atingiria o valor restante em {simulationPeriods.toString()} mês(es).
+                      Você atingiria o valor restante em {simulation.periodsToTarget.toString()}{" "}
+                      mês(es).
                     </p>
                     <p className="mt-2 text-sm text-muted-foreground">
                       Fórmula: teto de (valor restante ÷ contribuição mensal) = teto de (
                       {formatMoneyMinor(simulationGoal.remaining.minor, currency)} ÷{" "}
                       {formatMoneyMinor(simulationMinor, currency)}).
                     </p>
-                    {simulationBeyondDeadline ? (
+                    {simulation.reachesByDeadline === false ? (
                       <Alert className="mt-3">
                         <CircleAlertIcon aria-hidden="true" />
                         <AlertTitle>Esse ritmo ultrapassa o prazo</AlertTitle>
