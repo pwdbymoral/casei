@@ -76,6 +76,8 @@ describe("AUTH-001 identidade", () => {
     const { auth } = fixture();
     expect(auth.api).toHaveProperty("verifyTOTP");
     expect(auth.api).toHaveProperty("verifyBackupCode");
+    expect(auth.api).toHaveProperty("enableTwoFactor");
+    expect(auth.api).toHaveProperty("getTOTPURI");
   });
 
   it("cadastra, captura verificação, verifica e impede enumeração do token", async () => {

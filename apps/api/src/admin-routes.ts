@@ -39,6 +39,26 @@ export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesO
     return context.json(result);
   });
 
+  router.post("/admin/two-factor/enroll", async (context) => {
+    const input = await parseJsonBody(context, z.object({ password: z.string().min(1).max(256) }));
+    return context.json(
+      await service.startTwoFactorEnrollment(
+        actorOf(context),
+        input.password,
+        context.req.raw.headers,
+      ),
+    );
+  });
+
+  router.post("/admin/two-factor/verify", async (context) => {
+    const input = await parseJsonBody(
+      context,
+      z.object({ code: z.string().trim().min(6).max(128) }),
+    );
+    await service.verifyTwoFactorEnrollment(actorOf(context), input.code, context.req.raw.headers);
+    return context.body(null, 204);
+  });
+
   router.get("/admin/accounts", async (context) => {
     const result = await service.searchAccounts(
       actorOf(context),

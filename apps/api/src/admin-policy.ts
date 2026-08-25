@@ -8,7 +8,7 @@ export type PlatformAdminAction =
   | "auth:resend"
   | "platform-role:change";
 
-type AdminPolicyCode =
+export type AdminPolicyCode =
   | "permission_denied"
   | "recent_auth_required"
   | "last_platform_admin"
@@ -45,6 +45,15 @@ export function assertRecentPlatformAuthentication(
   recentAuthentication: boolean | undefined,
 ): void {
   if (!recentAuthentication) throw new AdminPolicyError("recent_auth_required");
+}
+
+export function assertPlatformTwoFactor(
+  role: PlatformRole | null | undefined,
+  twoFactorEnabled: boolean | undefined,
+): void {
+  if (role === "platform_admin" && twoFactorEnabled !== true) {
+    throw new AdminPolicyError("step_up_required");
+  }
 }
 
 export function assertLastPlatformAdminCanChange(input: {

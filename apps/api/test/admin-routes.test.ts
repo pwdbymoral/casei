@@ -19,15 +19,26 @@ const account = {
 
 function createAdminApp(
   platformRole: "platform_admin" | "platform_support" | null = "platform_admin",
+  twoFactorEnabled = true,
 ) {
   const service = {
-    searchAccounts: async () => ({ items: [account], page: { nextCursor: null, hasMore: false } }),
+    searchAccounts: async () => {
+      if (platformRole === "platform_admin" && !twoFactorEnabled)
+        throw new AdminPolicyError("step_up_required");
+      return { items: [account], page: { nextCursor: null, hasMore: false } };
+    },
     getAccount: async () => account,
     getPlatformSession: () => ({
       userId: "admin-user",
       displayName: "Admin",
       role: platformRole ?? "platform_admin",
+      twoFactorEnabled,
     }),
+    startTwoFactorEnrollment: async () => ({
+      totpURI: "otpauth://totp/Casei",
+      backupCodes: ["one"],
+    }),
+    verifyTwoFactorEnrollment: async () => undefined,
     completeStepUp: async () => ({ token: "step-up-token", expiresInSeconds: 300 }),
     suspendAccount: async () => ({ replayed: false, result: account }),
     reactivateAccount: async () => ({ replayed: false, result: account }),
@@ -50,6 +61,7 @@ function createAdminApp(
               displayName: "Admin",
               platformRole,
               recentAuthentication: true,
+              twoFactorEnabled,
             }
           : null,
     },
@@ -83,6 +95,7 @@ describe("ADMIN-002 HTTP boundary", () => {
       userId: "admin-user",
       displayName: "Admin",
       role: "platform_admin",
+      twoFactorEnabled: true,
     });
   });
 
@@ -97,6 +110,35 @@ describe("ADMIN-002 HTTP boundary", () => {
       token: "step-up-token",
       expiresInSeconds: 300,
     });
+  });
+
+  it("blocks the console until a platform admin enrolls TOTP", async () => {
+    const response = await createAdminApp("platform_admin", false).request(
+      "http://localhost/v1/admin/accounts?query=ada",
+    );
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "step_up_required" },
+    });
+  });
+
+  it("keeps enrollment endpoints available before the console gate", async () => {
+    const app = createAdminApp("platform_admin", false);
+    const enroll = await app.request("http://localhost/v1/admin/two-factor/enroll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "correct-password" }),
+    });
+    expect(enroll.status).toBe(200);
+    await expect(enroll.json()).resolves.toMatchObject({
+      totpURI: expect.stringContaining("otpauth://"),
+    });
+    const verify = await app.request("http://localhost/v1/admin/two-factor/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "123456" }),
+    });
+    expect(verify.status).toBe(204);
   });
 
   it("requires a reason and idempotency key for suspend", async () => {

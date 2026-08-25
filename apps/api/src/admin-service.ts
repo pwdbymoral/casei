@@ -10,6 +10,7 @@ import {
   AdminPolicyError,
   assertCanPerformPlatformAction,
   assertLastPlatformAdminCanChange,
+  assertPlatformTwoFactor,
   assertRecentPlatformAuthentication,
   normalizeAdminAccountSearch,
 } from "./admin-policy.js";
@@ -74,13 +75,18 @@ export interface AdminAccountStore {
 }
 
 export interface AdminAuthPort {
-  sendVerificationEmail(email: string): Promise<void>;
-  sendPasswordReset(email: string): Promise<void>;
+  sendVerificationEmail(email: string, idempotencyKey?: string): Promise<void>;
+  sendPasswordReset(email: string, idempotencyKey?: string): Promise<void>;
   verifyStepUp?(input: {
     method: "totp" | "backup_code";
     code: string;
     headers: Headers;
   }): Promise<void>;
+  startTwoFactorEnrollment?(input: {
+    password: string;
+    headers: Headers;
+  }): Promise<{ totpURI: string; backupCodes: string[] }>;
+  verifyTwoFactorEnrollment?(input: { code: string; headers: Headers }): Promise<void>;
 }
 
 type CommandResult<T> = { replayed: boolean; result: T };
@@ -96,6 +102,7 @@ export class AdminService {
     input: AdminAccountSearchQuery,
   ): Promise<AdminAccountList> {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     return this.withActor(actor, () =>
       this.store.searchAccounts({ ...input, query: normalizeAdminAccountSearch(input.query) }),
     );
@@ -103,6 +110,7 @@ export class AdminService {
 
   async getAccount(actor: AdminActor, userId: string): Promise<AdminAccountDetail> {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     return this.withActor(actor, () => this.requireAccount(userId));
   }
 
@@ -110,6 +118,7 @@ export class AdminService {
     userId: string;
     displayName: string;
     role: PlatformRole;
+    twoFactorEnabled: boolean;
   } {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
     if (!actor.platformRole) throw new AdminPolicyError("permission_denied");
@@ -117,6 +126,7 @@ export class AdminService {
       userId: actor.userId,
       displayName: actor.displayName ?? "",
       role: actor.platformRole,
+      twoFactorEnabled: actor.twoFactorEnabled === true,
     };
   }
 
@@ -128,6 +138,7 @@ export class AdminService {
     correlationId: string,
   ): Promise<CommandResult<AdminAccountDetail>> {
     assertCanPerformPlatformAction(actor.platformRole, "account:suspend");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     assertRecentPlatformAuthentication(actor.recentAuthentication);
     return this.accountStatusCommand(
       actor,
@@ -147,6 +158,7 @@ export class AdminService {
     correlationId: string,
   ): Promise<CommandResult<AdminAccountDetail>> {
     assertCanPerformPlatformAction(actor.platformRole, "account:reactivate");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     assertRecentPlatformAuthentication(actor.recentAuthentication);
     return this.accountStatusCommand(actor, userId, "active", input, idempotencyKey, correlationId);
   }
@@ -159,6 +171,7 @@ export class AdminService {
     correlationId: string,
   ): Promise<CommandResult<AdminAccountDetail>> {
     assertCanPerformPlatformAction(actor.platformRole, "platform-role:change");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     assertRecentPlatformAuthentication(actor.recentAuthentication);
     this.assertNotSelf(actor, userId);
     return this.executeCommand(
@@ -190,6 +203,7 @@ export class AdminService {
     correlationId: string,
   ): Promise<CommandResult<null>> {
     assertCanPerformPlatformAction(actor.platformRole, "session:revoke");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     assertRecentPlatformAuthentication(actor.recentAuthentication);
     return this.executeCommand(
       actor,
@@ -214,19 +228,16 @@ export class AdminService {
     correlationId: string,
   ): Promise<CommandResult<null>> {
     assertCanPerformPlatformAction(actor.platformRole, "auth:resend");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     assertRecentPlatformAuthentication(actor.recentAuthentication);
-    return this.executeCommand(
+    return this.executeEmailCommand(
       actor,
       idempotencyKey,
       correlationId,
       "auth:verification-resend",
       userId,
       input,
-      async () => {
-        const target = await this.requireAccount(userId);
-        await this.auth.sendVerificationEmail(target.email);
-        return null;
-      },
+      (email) => this.auth.sendVerificationEmail(email, idempotencyKey),
     );
   }
 
@@ -238,19 +249,16 @@ export class AdminService {
     correlationId: string,
   ): Promise<CommandResult<null>> {
     assertCanPerformPlatformAction(actor.platformRole, "auth:resend");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     assertRecentPlatformAuthentication(actor.recentAuthentication);
-    return this.executeCommand(
+    return this.executeEmailCommand(
       actor,
       idempotencyKey,
       correlationId,
       "auth:recovery-resend",
       userId,
       input,
-      async () => {
-        const target = await this.requireAccount(userId);
-        await this.auth.sendPasswordReset(target.email);
-        return null;
-      },
+      (email) => this.auth.sendPasswordReset(email, idempotencyKey),
     );
   }
 
@@ -261,6 +269,7 @@ export class AdminService {
     correlationId: string,
   ): Promise<{ token: string; expiresInSeconds: number }> {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     if (!this.auth.verifyStepUp || !this.store.issueStepUpChallenge) {
       throw new AdminPolicyError("step_up_required");
     }
@@ -271,6 +280,30 @@ export class AdminService {
       correlationId,
     });
     return { token, expiresInSeconds: 300 };
+  }
+
+  async startTwoFactorEnrollment(
+    actor: AdminActor,
+    password: string,
+    headers: Headers,
+  ): Promise<{ totpURI: string; backupCodes: string[] }> {
+    assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    if (actor.twoFactorEnabled === true || !this.auth.startTwoFactorEnrollment) {
+      throw new AdminPolicyError("permission_denied");
+    }
+    return this.auth.startTwoFactorEnrollment({ password, headers });
+  }
+
+  async verifyTwoFactorEnrollment(
+    actor: AdminActor,
+    code: string,
+    headers: Headers,
+  ): Promise<void> {
+    assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    if (actor.twoFactorEnabled === true || !this.auth.verifyTwoFactorEnrollment) {
+      throw new AdminPolicyError("permission_denied");
+    }
+    await this.auth.verifyTwoFactorEnrollment({ code, headers });
   }
 
   private async accountStatusCommand(
@@ -341,6 +374,37 @@ export class AdminService {
       actor.userId,
       actor.stepUpToken,
     );
+  }
+
+  /**
+   * Email delivery is deliberately invoked after the idempotency transaction
+   * commits. The command key is forwarded to Better Auth so its durable
+   * auth-email outbox derives the same sourceId on a retry.
+   */
+  private async executeEmailCommand(
+    actor: AdminActor,
+    idempotencyKey: string,
+    correlationId: string,
+    action: string,
+    userId: string,
+    input: unknown,
+    send: (email: string) => Promise<void>,
+  ): Promise<CommandResult<null>> {
+    const result = await this.executeCommand(
+      actor,
+      idempotencyKey,
+      correlationId,
+      action,
+      userId,
+      input,
+      async () => {
+        await this.requireAccount(userId);
+        return null;
+      },
+    );
+    const account = await this.withActor(actor, () => this.requireAccount(userId));
+    await send(account.email);
+    return result;
   }
 
   private withActor<T>(actor: AdminActor, run: () => Promise<T>): Promise<T> {

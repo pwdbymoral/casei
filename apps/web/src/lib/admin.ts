@@ -86,6 +86,20 @@ export function createAdminCommandKey(action: string): string {
 }
 
 export const authenticatedAdminAdapter = {
+  async startTwoFactorEnrollment(
+    password: string,
+  ): Promise<{ totpURI: string; backupCodes: string[] }> {
+    return adminRequest("/v1/admin/two-factor/enroll", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+  },
+  async verifyTwoFactorEnrollment(code: string): Promise<void> {
+    await adminRequest<void>("/v1/admin/two-factor/verify", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+  },
   async completeStepUp(
     method: "totp" | "backup_code",
     code: string,

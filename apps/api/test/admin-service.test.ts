@@ -13,6 +13,7 @@ const actor = (role: PlatformRole, recentAuthentication = true) => ({
   displayName: "Admin",
   platformRole: role,
   recentAuthentication,
+  twoFactorEnabled: true,
 });
 
 const account: AdminAccountDetail = {
@@ -100,13 +101,17 @@ class MemoryAdminStore implements AdminAccountStore {
 class MemoryAuthPort implements AdminAuthPort {
   verification = 0;
   recovery = 0;
-  async sendVerificationEmail(email: string): Promise<void> {
+  verificationKeys: string[] = [];
+  recoveryKeys: string[] = [];
+  async sendVerificationEmail(email: string, idempotencyKey?: string): Promise<void> {
     if (email !== account.email) throw new AdminNotFoundError();
     this.verification += 1;
+    if (idempotencyKey) this.verificationKeys.push(idempotencyKey);
   }
-  async sendPasswordReset(email: string): Promise<void> {
+  async sendPasswordReset(email: string, idempotencyKey?: string): Promise<void> {
     if (email !== account.email) throw new AdminNotFoundError();
     this.recovery += 1;
+    if (idempotencyKey) this.recoveryKeys.push(idempotencyKey);
   }
 }
 
@@ -121,6 +126,16 @@ describe("ADMIN-001/002 service", () => {
     expect(result.items[0]).toMatchObject({ userId: "target-user", email: "person@example.com" });
     expect(result.items[0]).not.toHaveProperty("password");
     expect(result.items[0]).not.toHaveProperty("transactions");
+  });
+
+  it("requires enrolled TOTP before a platform admin can use the console", async () => {
+    const service = new AdminService(new MemoryAdminStore(), new MemoryAuthPort());
+    await expect(
+      service.searchAccounts(
+        { ...actor("platform_admin"), twoFactorEnabled: false },
+        { query: "person@example.com", limit: 50 },
+      ),
+    ).rejects.toMatchObject({ code: "step_up_required" });
   });
 
   it("requires recent authentication for suspension and protects the last admin", async () => {
@@ -230,5 +245,19 @@ describe("ADMIN-001/002 service", () => {
     );
     expect(auth.verification).toBe(1);
     expect(auth.recovery).toBe(1);
+  });
+
+  it("passes the command key to email delivery after the idempotent command", async () => {
+    const store = new MemoryAdminStore();
+    const auth = new MemoryAuthPort();
+    const service = new AdminService(store, auth);
+    await service.resendVerification(
+      actor("platform_support"),
+      "target-user",
+      { reason: "requested" },
+      "verify-key-deterministic",
+      "01J00000000000000000000000",
+    );
+    expect(auth.verificationKeys).toEqual(["verify-key-deterministic"]);
   });
 });
