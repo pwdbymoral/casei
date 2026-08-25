@@ -156,6 +156,11 @@ describe("ADMIN PostgreSQL boundary", () => {
       );
       const suspender = await pool.connect();
       const signer = await pool.connect();
+      // A failed trigger query can emit a late client error while the
+      // disposable database is being dropped; consume it after the assertion
+      // so teardown cannot turn a proven rejection into an unhandled error.
+      suspender.on("error", () => undefined);
+      signer.on("error", () => undefined);
       try {
         await suspender.query("BEGIN");
         await suspender.query(`SELECT app.lock_platform_session_user($1)`, [userId]);
