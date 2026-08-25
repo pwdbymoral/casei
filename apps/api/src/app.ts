@@ -21,6 +21,8 @@ import {
 } from "./http/index.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
+import { configureImportRoutes } from "./import-routes.js";
+import type { ImportApplication } from "./import-service.js";
 import { InsightService } from "./insight-service.js";
 import { configureStockRoutes } from "./stock-routes.js";
 import { StockService } from "./stock-service.js";
@@ -32,6 +34,7 @@ export interface AppOptions {
   finance?: FinanceAppOptions;
   stock?: StockAppOptions;
   identity?: IdentityAppOptions;
+  import?: ImportAppOptions;
 }
 
 export interface IdentityAppOptions {
@@ -66,6 +69,11 @@ export interface StockAppOptions {
   pool: Pool;
   service?: StockService;
   applicationRole?: string;
+}
+
+export interface ImportAppOptions {
+  application: ImportApplication;
+  scopeMiddleware: MiddlewareHandler<ApiEnv>;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -170,6 +178,9 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
         });
       },
     });
+  }
+  if (options.import) {
+    configureImportRoutes(v1, options.import);
   }
   if (options.identity) {
     if (!identityService || !actorMiddleware || !scopeMiddleware) {

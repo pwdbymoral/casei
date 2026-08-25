@@ -248,6 +248,45 @@ export type UpdateStockProductInput = z.infer<typeof updateStockProductSchema>;
 export const stockBulkModeSchema = z.enum(["valid_only", "all_or_nothing"]);
 export type StockBulkMode = z.infer<typeof stockBulkModeSchema>;
 
+/** Import policies are explicit because a duplicate suggestion is never an implicit skip. */
+export const importModeSchema = z.enum(["valid_only", "all_or_nothing"]);
+export type ImportMode = z.infer<typeof importModeSchema>;
+
+export const importDuplicatePolicySchema = z.enum(["skip", "import", "review"]);
+export type ImportDuplicatePolicy = z.infer<typeof importDuplicatePolicySchema>;
+
+export const importJobStateSchema = z.enum([
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancel_requested",
+  "cancelled",
+  "reversing",
+  "reversed",
+]);
+export type ImportJobState = z.infer<typeof importJobStateSchema>;
+
+export const importDomainSchema = z.enum(["transactions", "products", "full"]);
+export type ImportDomain = z.infer<typeof importDomainSchema>;
+
+export const importCreateRequestSchema = z.object({
+  domain: importDomainSchema,
+  storageKey: z.string().trim().min(1).max(512),
+  sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  mappingVersion: z.string().trim().min(1).max(80),
+  previewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  mode: importModeSchema,
+  duplicatePolicy: importDuplicatePolicySchema,
+  acceptedDuplicateLines: z.array(z.number().int().min(1).max(50_000)).max(50_000).default([]),
+  totalRows: z.number().int().min(1).max(50_000),
+  validRows: z.number().int().min(0).max(50_000),
+  duplicateRows: z.number().int().min(0).max(50_000),
+  invalidRows: z.number().int().min(0).max(50_000),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type ImportCreateRequest = z.infer<typeof importCreateRequestSchema>;
+
 const stockBulkContentSchema = z
   .string()
   .min(1, "Informe pelo menos uma linha de produto.")
