@@ -181,6 +181,16 @@ function FinanceDashboard({
     type: "close" | "reopen";
     statement: Statement;
   } | null>(null);
+  const [statementAdjustmentMode, setStatementAdjustmentMode] = useState<
+    "adjustment" | "refund" | null
+  >(null);
+  const [statementAdjustmentKind, setStatementAdjustmentKind] = useState<
+    "charge" | "fee" | "interest"
+  >("fee");
+  const [statementAdjustmentAmount, setStatementAdjustmentAmount] = useState("0");
+  const [statementAdjustmentDescription, setStatementAdjustmentDescription] = useState("");
+  const [statementRefundSourceId, setStatementRefundSourceId] = useState<string | null>(null);
+  const [savingStatementAdjustment, setSavingStatementAdjustment] = useState(false);
   const [statementItemsRequest] = useState(createRequestGuard);
   const [transactionAuditRequest] = useState(createRequestGuard);
   const [transactionAuditDetailRequest] = useState(createRequestGuard);
@@ -1063,6 +1073,61 @@ function FinanceDashboard({
       );
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
+    }
+  }
+
+  async function submitStatementAdjustment(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!visibleViewingStatement || !statementAdjustmentMode || savingStatementAdjustment) return;
+    const amountMinor = statementAdjustmentAmount.replace(/\D/g, "") || "0";
+    if (BigInt(amountMinor) <= BigInt(0)) {
+      setError("Informe um valor positivo para o ajuste.");
+      return;
+    }
+    if (statementAdjustmentMode === "adjustment" && !statementAdjustmentDescription.trim()) {
+      setError("Descreva a tarifa, juros ou cobrança para manter a origem explicável.");
+      return;
+    }
+    if (statementAdjustmentMode === "refund" && !statementRefundSourceId) {
+      setError("Selecione a compra que originou o estorno.");
+      return;
+    }
+    setSavingStatementAdjustment(true);
+    setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
+    try {
+      const result =
+        statementAdjustmentMode === "adjustment"
+          ? await adapter.createStatementAdjustment(workspaceId, visibleViewingStatement, {
+              kind: statementAdjustmentKind,
+              amount: { currency, minor: amountMinor },
+              description: statementAdjustmentDescription.trim(),
+            })
+          : await adapter.createStatementRefund(workspaceId, visibleViewingStatement, {
+              sourceTransactionId: statementRefundSourceId as string,
+              amount: { currency, minor: amountMinor },
+              description: statementAdjustmentDescription.trim() || undefined,
+            });
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setStatements((current) =>
+        current.map((item) => (item.id === result.statement.id ? result.statement : item)),
+      );
+      setViewingStatement(result.statement);
+      setStatementAdjustmentMode(null);
+      setStatementRefundSourceId(null);
+      setStatementAdjustmentAmount("0");
+      setStatementAdjustmentDescription("");
+      setNotice(
+        statementAdjustmentMode === "refund"
+          ? "Estorno registrado na fatura."
+          : "Ajuste registrado na fatura.",
+      );
+      void loadStatementItems(result.statement.id, undefined, false);
+    } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      setError(cause instanceof Error ? cause.message : "Não foi possível registrar o ajuste.");
+    } finally {
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingStatementAdjustment(false);
     }
   }
 
@@ -2941,6 +3006,8 @@ function FinanceDashboard({
         onOpenChange={(open) => {
           if (!open) {
             setViewingStatement(null);
+            setStatementAdjustmentMode(null);
+            setStatementRefundSourceId(null);
             clearDeepLinkParam("statement");
           }
         }}
@@ -2949,7 +3016,8 @@ function FinanceDashboard({
           <DialogHeader>
             <DialogTitle>Composição da fatura</DialogTitle>
             <DialogDescription>
-              Compras aumentam o total. Pagamentos reduzem apenas o valor em aberto.
+              Compras e ajustes aumentam o total. Estornos reduzem a despesa e pagamentos reduzem
+              apenas o valor em aberto.
             </DialogDescription>
           </DialogHeader>
           {visibleViewingStatement ? (
@@ -2995,7 +3063,14 @@ function FinanceDashboard({
                 <ul className="max-h-72 divide-y overflow-y-auto">
                   {statementItems.map((item) => {
                     const canceled = item.state === "canceled";
-                    const kindLabel = item.type === "payment" ? "Pagamento" : "Compra";
+                    const kindLabel =
+                      item.type === "payment"
+                        ? "Pagamento"
+                        : item.type === "refund"
+                          ? "Estorno"
+                          : item.type === "adjustment"
+                            ? "Ajuste"
+                            : "Compra";
                     return (
                       <li
                         key={item.id}
@@ -3019,13 +3094,120 @@ function FinanceDashboard({
                           }
                         >
                           {statementItemAmountPrefix(item)}
-                          {formatMoneyMinor(item.amount.minor, item.amount.currency)}
+                          {formatMoneyMinor(
+                            item.type === "refund"
+                              ? BigInt(item.amount.minor) < BigInt(0)
+                                ? (-BigInt(item.amount.minor)).toString()
+                                : item.amount.minor
+                              : item.amount.minor,
+                            item.amount.currency,
+                          )}
+                          {writeAccess && item.type === "purchase" && item.state !== "canceled" ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="ml-2"
+                              onClick={() => {
+                                setStatementRefundSourceId(item.transactionId);
+                                setStatementAdjustmentAmount(item.amount.minor);
+                                setStatementAdjustmentDescription("");
+                                setStatementAdjustmentMode("refund");
+                              }}
+                            >
+                              Estornar
+                            </Button>
+                          ) : null}
                         </span>
                       </li>
                     );
                   })}
                 </ul>
               )}
+              {writeAccess ? (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setStatementAdjustmentMode("adjustment");
+                      setStatementRefundSourceId(null);
+                    }}
+                  >
+                    Adicionar tarifa/juros
+                  </Button>
+                </div>
+              ) : null}
+              {statementAdjustmentMode ? (
+                <form
+                  className="grid gap-3 rounded-lg border bg-muted/30 p-3"
+                  onSubmit={submitStatementAdjustment}
+                >
+                  <p className="font-medium">
+                    {statementAdjustmentMode === "refund"
+                      ? "Registrar estorno"
+                      : "Adicionar ajuste"}
+                  </p>
+                  {statementAdjustmentMode === "adjustment" ? (
+                    <Field>
+                      <FieldLabel htmlFor="statement-adjustment-kind">Tipo</FieldLabel>
+                      <select
+                        id="statement-adjustment-kind"
+                        className="h-9 rounded-md border bg-background px-3 text-sm"
+                        value={statementAdjustmentKind}
+                        onChange={(event) =>
+                          setStatementAdjustmentKind(
+                            event.target.value as "charge" | "fee" | "interest",
+                          )
+                        }
+                      >
+                        <option value="charge">Cobrança</option>
+                        <option value="fee">Tarifa</option>
+                        <option value="interest">Juros/multa</option>
+                      </select>
+                    </Field>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      O valor será abatido da compra original e do passivo do cartão, sem apagar o
+                      lançamento original.
+                    </p>
+                  )}
+                  <Field>
+                    <FieldLabel htmlFor="statement-adjustment-amount">Valor</FieldLabel>
+                    <MoneyInput
+                      id="statement-adjustment-amount"
+                      value={statementAdjustmentAmount}
+                      onChange={setStatementAdjustmentAmount}
+                      currency={currency}
+                    />
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="statement-adjustment-description">Descrição</FieldLabel>
+                    <Input
+                      id="statement-adjustment-description"
+                      value={statementAdjustmentDescription}
+                      onChange={(event) => setStatementAdjustmentDescription(event.target.value)}
+                      placeholder={
+                        statementAdjustmentMode === "refund" ? "Opcional" : "Ex.: tarifa do emissor"
+                      }
+                      required={statementAdjustmentMode === "adjustment"}
+                    />
+                  </Field>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => setStatementAdjustmentMode(null)}
+                    >
+                      Cancelar
+                    </Button>
+                    <Button type="submit" disabled={savingStatementAdjustment}>
+                      {savingStatementAdjustment ? "Salvando…" : "Confirmar"}
+                    </Button>
+                  </div>
+                </form>
+              ) : null}
               {statementItemsHasMore ? (
                 <Button
                   type="button"

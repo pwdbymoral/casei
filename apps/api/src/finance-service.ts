@@ -6,6 +6,8 @@ import {
   createInstallmentPlanSchema,
   createLoanSchema,
   createRecurrenceSchema,
+  createStatementAdjustmentSchema,
+  createStatementRefundSchema,
   createTransactionSchema,
   domainIdSchema,
   loanPaymentSchema,
@@ -218,11 +220,16 @@ export interface StatementItemView {
   id: string;
   transactionId: string;
   statementId: string;
-  type: "purchase" | "payment";
+  type: "purchase" | "payment" | "adjustment" | "refund";
   state: "planned" | "partially_settled" | "posted" | "canceled";
   description: string;
   occurredOn: string;
   amount: { currency: string; minor: string };
+}
+
+export interface StatementAdjustmentResultView {
+  transaction: TransactionView;
+  statement: StatementView;
 }
 
 export interface StatementItemsPage {
@@ -1316,12 +1323,17 @@ export class FinanceService {
         amount_minor: string | bigint;
         currency_code: string;
         payment_id: string | null;
+        adjustment_kind: "charge" | "fee" | "interest" | "refund" | null;
+        adjustment_amount_minor: string | bigint | null;
       }>(
         `SELECT t.id, t.statement_id, t.state, t.description, t.occurred_on,
-                t.created_at, t.amount_minor, t.currency_code, p.id AS payment_id
+                t.created_at, t.amount_minor, t.currency_code, p.id AS payment_id,
+                a.kind AS adjustment_kind, a.amount_minor AS adjustment_amount_minor
            FROM finance_transaction t
-           LEFT JOIN card_payment p
-             ON p.workspace_id = t.workspace_id AND p.transaction_id = t.id
+          LEFT JOIN card_payment p
+            ON p.workspace_id = t.workspace_id AND p.transaction_id = t.id
+          LEFT JOIN card_statement_adjustment a
+            ON a.workspace_id = t.workspace_id AND a.transaction_id = t.id
           WHERE t.workspace_id = $1 AND t.statement_id = $2
                 ${cursorClause}
           ORDER BY t.occurred_on ASC, t.created_at ASC, t.id ASC
@@ -1334,11 +1346,20 @@ export class FinanceService {
         id: row.id,
         transactionId: row.id,
         statementId: row.statement_id,
-        type: row.payment_id ? ("payment" as const) : ("purchase" as const),
+        type: row.payment_id
+          ? ("payment" as const)
+          : row.adjustment_kind === "refund"
+            ? ("refund" as const)
+            : row.adjustment_kind
+              ? ("adjustment" as const)
+              : ("purchase" as const),
         state: row.state,
         description: row.description,
         occurredOn: row.occurred_on,
-        amount: { currency: row.currency_code, minor: row.amount_minor.toString() },
+        amount: {
+          currency: row.currency_code,
+          minor: (row.adjustment_amount_minor ?? row.amount_minor).toString(),
+        },
       }));
       const last = rows.at(-1);
       const nextCursor =
@@ -1449,6 +1470,310 @@ export class FinanceService {
       }),
     );
     return result.response as unknown as StatementView;
+  }
+
+  async createStatementAdjustment(
+    scope: FinanceScope,
+    statementId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; response: StatementAdjustmentResultView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = createStatementAdjustmentSchema.parse(input);
+    const result = await this.createCardStatementAdjustment(
+      scope,
+      statementId,
+      {
+        kind: parsed.kind,
+        amountMinor: BigInt(parsed.amount.minor),
+        currency: parsed.amount.currency,
+        description: parsed.description,
+        occurredOn: parsed.occurredOn,
+        sourceTransactionId: null,
+      },
+      idempotencyKey,
+      expectedVersion,
+    );
+    return result;
+  }
+
+  async createStatementRefund(
+    scope: FinanceScope,
+    statementId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; response: StatementAdjustmentResultView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = createStatementRefundSchema.parse(input);
+    const result = await this.createCardStatementAdjustment(
+      scope,
+      statementId,
+      {
+        kind: "refund",
+        amountMinor: -BigInt(parsed.amount.minor),
+        currency: parsed.amount.currency,
+        description: parsed.description ?? "",
+        occurredOn: parsed.occurredOn,
+        sourceTransactionId: parsed.sourceTransactionId,
+      },
+      idempotencyKey,
+      expectedVersion,
+    );
+    return result;
+  }
+
+  private async createCardStatementAdjustment(
+    scope: FinanceScope,
+    statementId: string,
+    input: {
+      kind: "charge" | "fee" | "interest" | "refund";
+      amountMinor: bigint;
+      currency: string;
+      description: string;
+      occurredOn?: string;
+      sourceTransactionId: string | null;
+    },
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; response: StatementAdjustmentResultView }> {
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/statements/${statementId}/${input.kind === "refund" ? "refunds" : "adjustments"}`,
+        key: idempotencyKey,
+        request: {
+          statementId,
+          expectedVersion,
+          kind: input.kind,
+          amountMinor: input.amountMinor.toString(),
+          currency: input.currency,
+          description: input.description,
+          occurredOn: input.occurredOn ?? null,
+          sourceTransactionId: input.sourceTransactionId,
+        },
+        execute: async () => {
+          const statementResult = await client.query<{
+            id: string;
+            workspace_id: string;
+            card_id: string;
+            period_start: string;
+            closing_on: string;
+            due_on: string;
+            state: StatementView["state"];
+            total_minor: string;
+            paid_minor: string;
+            currency_code: string;
+            version: number;
+          }>(
+            `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+               FROM credit_statement s
+               JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
+              WHERE s.workspace_id = $1 AND s.id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, statementId],
+          );
+          const statement = statementResult.rows[0];
+          if (!statement) throw new FinanceNotFoundError();
+          if (statement.version !== expectedVersion) {
+            throw new VersionConflictError(statement.version);
+          }
+          if (statement.state === "canceled") {
+            throw new FinanceConflictError("Uma fatura cancelada não aceita ajustes.");
+          }
+          if (input.currency !== statement.currency_code) {
+            throw new FinanceConflictError("O ajuste deve usar a moeda da fatura.");
+          }
+          if (input.amountMinor === 0n) {
+            throw new FinanceConflictError("O ajuste não pode ter valor zero.");
+          }
+
+          let source: {
+            id: string;
+            card_id: string | null;
+            amount_minor: string;
+            settled_minor: string;
+            currency_code: string;
+            kind: string;
+            state: string;
+            description: string;
+          } | null = null;
+          if (input.kind === "refund") {
+            const sourceResult = await client.query<{
+              id: string;
+              card_id: string | null;
+              amount_minor: string;
+              settled_minor: string;
+              currency_code: string;
+              kind: string;
+              state: string;
+              description: string;
+            }>(
+              `SELECT id, card_id, amount_minor, settled_minor, currency_code, kind, state, description
+                 FROM finance_transaction
+                WHERE workspace_id = $1 AND id = $2
+                FOR SHARE`,
+              [scope.workspaceId, input.sourceTransactionId],
+            );
+            source = sourceResult.rows[0] ?? null;
+            if (!source) {
+              throw new FinanceConflictError(
+                "O estorno precisa apontar para uma compra realizada deste cartão.",
+              );
+            }
+            if (
+              source.kind !== "expense" ||
+              (source.state !== "posted" && source.state !== "partially_settled") ||
+              !source.card_id ||
+              source.card_id !== statement.card_id ||
+              source.currency_code !== statement.currency_code
+            ) {
+              throw new FinanceConflictError(
+                "O estorno precisa apontar para uma compra realizada deste cartão.",
+              );
+            }
+            const refunded = await client.query<{ amount_minor: string | null }>(
+              `SELECT COALESCE(SUM(-amount_minor), 0)::text AS amount_minor
+                 FROM card_statement_adjustment
+                WHERE workspace_id = $1 AND source_transaction_id = $2 AND kind = 'refund'`,
+              [scope.workspaceId, source.id],
+            );
+            const alreadyRefunded = BigInt(refunded.rows[0]?.amount_minor ?? "0");
+            const requested = -input.amountMinor;
+            const refundable = BigInt(source.settled_minor) - alreadyRefunded;
+            if (requested > refundable) {
+              throw new FinanceConflictError(
+                "O estorno excede o saldo ainda não estornado da compra.",
+              );
+            }
+          }
+
+          const nextTotal = BigInt(statement.total_minor) + input.amountMinor;
+          if (nextTotal < 0n) {
+            throw new FinanceConflictError("O ajuste não pode deixar o total da fatura negativo.");
+          }
+          const occurredOn =
+            input.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId));
+          if (!parseLocalDate(occurredOn).ok) {
+            throw new FinanceConflictError("A data civil do ajuste não existe.");
+          }
+          const amount = input.amountMinor < 0n ? -input.amountMinor : input.amountMinor;
+          const description =
+            input.description.trim() ||
+            (source ? `Estorno: ${source.description || "compra no cartão"}` : "Ajuste da fatura");
+          const transactionResult = await client.query<TransactionRow>(
+            `INSERT INTO finance_transaction
+              (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code,
+               occurred_on, posted_on, description, card_id, statement_id)
+             VALUES ($1, 'expense', 'posted', 'card', $2, $2, $3, $4, now(), $5, $6, $7)
+             RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                       occurred_on, due_on, posted_on, description, category_id, card_id, statement_id,
+                       recurrence_id, version`,
+            [
+              scope.workspaceId,
+              amount,
+              statement.currency_code,
+              occurredOn,
+              description,
+              statement.card_id,
+              statementId,
+            ],
+          );
+          const transaction = transactionResult.rows[0];
+          if (!transaction) throw new Error("statement adjustment transaction insert failed");
+          const liability = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "card_liability",
+            `Cartão ${statement.card_id}`,
+            statement.currency_code,
+          );
+          const expense = await this.ensureAccount(
+            client,
+            scope.workspaceId,
+            "expense",
+            "Despesas",
+            statement.currency_code,
+          );
+          await this.publishEvent(
+            client,
+            scope,
+            transaction.id,
+            `statement.${input.kind}.v1`,
+            statement.currency_code,
+            [
+              { accountId: expense, amount: input.amountMinor },
+              { accountId: liability, amount: -input.amountMinor },
+            ],
+            occurredOn,
+          );
+          await client.query(
+            `INSERT INTO card_statement_adjustment
+              (workspace_id, statement_id, transaction_id, source_transaction_id, kind,
+               amount_minor, description, occurred_on)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              scope.workspaceId,
+              statementId,
+              transaction.id,
+              input.sourceTransactionId,
+              input.kind,
+              input.amountMinor,
+              description,
+              occurredOn,
+            ],
+          );
+          const nextState = deriveStatementState(
+            statement.state,
+            nextTotal,
+            BigInt(statement.paid_minor),
+          );
+          const updatedStatementResult = await client.query(
+            `UPDATE credit_statement
+                SET total_minor = $3, state = $4, version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $5
+              RETURNING id, workspace_id, card_id, period_start, closing_on, due_on,
+                        state, total_minor, paid_minor, $6::varchar AS currency_code, version`,
+            [
+              scope.workspaceId,
+              statementId,
+              nextTotal,
+              nextState,
+              expectedVersion,
+              statement.currency_code,
+            ],
+          );
+          const updatedStatement = updatedStatementResult.rows[0];
+          if (!updatedStatement) throw new VersionConflictError(statement.version);
+          await this.recordTransactionAudit(
+            client,
+            scope,
+            transaction.id,
+            input.kind === "refund" ? "statement.refund" : "statement.adjustment",
+            null,
+            transactionAuditSnapshot(transaction),
+          );
+          await this.recordStatementAudit(
+            client,
+            scope,
+            statementId,
+            input.kind === "refund" ? "statement.refund" : "statement.adjustment",
+          );
+          return {
+            statusCode: 201,
+            response: {
+              transaction: toTransactionView(transaction),
+              statement: toStatementView(updatedStatement),
+            } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as StatementAdjustmentResultView,
+    };
   }
 
   async postTransaction(
@@ -3104,7 +3429,7 @@ export class FinanceService {
     client: PgPoolClient,
     scope: FinanceScope,
     statementId: string,
-    action: "statement.closed" | "statement.reopened",
+    action: "statement.closed" | "statement.reopened" | "statement.adjustment" | "statement.refund",
   ): Promise<void> {
     await client.query(
       `INSERT INTO audit_event
@@ -3535,6 +3860,17 @@ export function assertStatementCanReopen(input: { state: string; paidMinor: bigi
   if (input.state !== "closed") {
     throw new FinanceConflictError("Somente uma fatura fechada pode ser reaberta.");
   }
+}
+
+function deriveStatementState(
+  currentState: StatementView["state"],
+  totalMinor: bigint,
+  paidMinor: bigint,
+): StatementView["state"] {
+  if (currentState === "canceled" || currentState === "open") return currentState;
+  if (totalMinor === 0n && paidMinor === 0n) return "closed";
+  if (paidMinor >= totalMinor) return "paid";
+  return paidMinor > 0n ? "partially_paid" : "closed";
 }
 
 function decodeStatementItemsCursor(cursor: string, secret: string): StatementItemsCursorPosition {

@@ -134,6 +134,13 @@
       "when": 1787583200000,
       "tag": "0018_wallet_publish_version",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1787586800000,
+      "tag": "0020_card_statement_adjustments",
+      "breakpoints": true
     }
   ]
 }

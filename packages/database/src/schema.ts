@@ -1089,6 +1089,55 @@ export const cardPayment = pgTable(
   ],
 );
 
+export const cardStatementAdjustment = pgTable(
+  "card_statement_adjustment",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    statementId: uuid("statement_id")
+      .notNull()
+      .references(() => creditStatement.id, { onDelete: "restrict" }),
+    transactionId: uuid("transaction_id")
+      .notNull()
+      .references(() => financeTransaction.id, { onDelete: "restrict" }),
+    sourceTransactionId: uuid("source_transaction_id").references(() => financeTransaction.id, {
+      onDelete: "restrict",
+    }),
+    kind: text("kind").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    description: text("description").notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    check(
+      "card_statement_adjustment_kind_check",
+      sql`${table.kind} in ('charge', 'fee', 'interest', 'refund')`,
+    ),
+    check(
+      "card_statement_adjustment_amount_check",
+      sql`(${table.kind} = 'refund' and ${table.amountMinor} < 0) or (${table.kind} <> 'refund' and ${table.amountMinor} > 0)`,
+    ),
+    check(
+      "card_statement_adjustment_refund_source_check",
+      sql`(${table.kind} = 'refund' and ${table.sourceTransactionId} is not null) or (${table.kind} <> 'refund' and ${table.sourceTransactionId} is null)`,
+    ),
+    uniqueIndex("card_statement_adjustment_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("card_statement_adjustment_transaction_unique").on(table.transactionId),
+    index("card_statement_adjustment_statement_occurred_idx").on(
+      table.workspaceId,
+      table.statementId,
+      table.occurredOn,
+      table.id,
+    ),
+    index("card_statement_adjustment_source_idx")
+      .on(table.workspaceId, table.sourceTransactionId)
+      .where(sql`${table.sourceTransactionId} is not null`),
+  ],
+);
+
 export const schema = {
   workspace,
   workspacePreference,
@@ -1118,4 +1167,5 @@ export const schema = {
   creditCard,
   creditStatement,
   cardPayment,
+  cardStatementAdjustment,
 };

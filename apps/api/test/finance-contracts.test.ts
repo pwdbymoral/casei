@@ -1,6 +1,8 @@
 import {
   createLoanSchema,
   createRecurrenceSchema,
+  createStatementAdjustmentSchema,
+  createStatementRefundSchema,
   createTransactionSchema,
   insightWindowQuerySchema,
   loanPaymentSchema,
@@ -48,6 +50,43 @@ describe("finance contracts", () => {
       occurredOn: "2028-02-29",
       allowCredit: false,
     });
+  });
+
+  it("requires an explicit reason and positive amount for statement adjustments", () => {
+    expect(
+      createStatementAdjustmentSchema.parse({
+        kind: "fee",
+        amount: { currency: "BRL", minor: "1250" },
+        description: "Tarifa de avaliação emergencial",
+        occurredOn: "2028-02-29",
+      }),
+    ).toMatchObject({ kind: "fee", description: "Tarifa de avaliação emergencial" });
+    expect(() =>
+      createStatementAdjustmentSchema.parse({
+        kind: "interest",
+        amount: { currency: "BRL", minor: "0" },
+        description: "Juros",
+      }),
+    ).toThrow();
+    expect(() =>
+      createStatementAdjustmentSchema.parse({
+        kind: "charge",
+        amount: { currency: "BRL", minor: "100" },
+        description: "   ",
+      }),
+    ).toThrow();
+  });
+
+  it("requires the original transaction when registering a refund", () => {
+    expect(
+      createStatementRefundSchema.parse({
+        sourceTransactionId: "0190f3c8-2a10-7abc-8def-1234567890ac",
+        amount: { currency: "BRL", minor: "100" },
+      }),
+    ).toMatchObject({ sourceTransactionId: "0190f3c8-2a10-7abc-8def-1234567890ac" });
+    expect(() =>
+      createStatementRefundSchema.parse({ amount: { currency: "BRL", minor: "100" } }),
+    ).toThrow();
   });
 
   it("accepts an effective partial settlement and defaults the amount", () => {
