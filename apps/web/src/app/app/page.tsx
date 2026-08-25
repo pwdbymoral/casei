@@ -10,7 +10,7 @@ import {
   TargetIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AsyncState, StatusBadge } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
@@ -209,16 +209,20 @@ function DashboardContent({
   data,
   hidden,
   onToggleHidden,
+  onRetry,
+  loadError,
 }: {
   data: DashboardData;
   hidden: boolean;
   onToggleHidden: () => void;
+  onRetry: () => void;
+  loadError: string | null;
 }) {
   const { financial, safeToSpend, commitments, goals, shoppingItems } = data;
   const { sectionErrors } = data;
   const attentionGoals = goalsRequiringAttention(goals, financial.asOf);
   const overdueCommitments = commitments.filter((item) => item.bucket === "overdue");
-  const hasPartialData = Object.keys(sectionErrors).length > 0;
+  const hasPartialData = Object.keys(sectionErrors).length > 0 || Boolean(loadError);
 
   return (
     <div className="flex flex-col gap-6">
@@ -242,9 +246,12 @@ function DashboardContent({
           <CircleAlertIcon aria-hidden="true" />
           <AlertTitle>Algumas áreas não puderam ser atualizadas</AlertTitle>
           <AlertDescription>
-            {Object.values(sectionErrors).filter(Boolean).join(" ")} Os dados disponíveis continuam
-            visíveis; tente novamente para completar o painel.
+            {loadError ?? Object.values(sectionErrors).filter(Boolean).join(" ")} Os dados
+            disponíveis continuam visíveis; tente novamente para completar o painel.
           </AlertDescription>
+          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+            Tentar novamente
+          </Button>
         </Alert>
       ) : null}
 
@@ -525,6 +532,7 @@ export default function TodayPage() {
   const [status, setStatus] = useState<DashboardStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
+  const dataRef = useRef<DashboardData | null>(null);
   const [hidden, setHidden] = useState(false);
   const [loadRequest] = useState(createRequestGuard);
   const [workspaceRequests] = useState(() => createWorkspaceGenerationGuard(workspaceId));
@@ -548,7 +556,7 @@ export default function TodayPage() {
   const load = useCallback(async () => {
     const request = loadRequest.begin();
     const workspaceRequest = workspaceRequests.begin(workspaceId);
-    setStatus("loading");
+    setStatus(dataRef.current ? "success" : "loading");
     setError(null);
     try {
       const asOf = civilDateInTimeZone(new Date(), timeZone);
@@ -595,7 +603,7 @@ export default function TodayPage() {
       });
       const shoppingItems = readOptional(stockResult, "stock", "Estoque", []);
       if (!loadRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest)) return;
-      setData({
+      const nextData: DashboardData = {
         financial: financialResult.value,
         safeToSpend: safeToSpendResult.value,
         commitments: buildTodayCommitments({
@@ -607,13 +615,19 @@ export default function TodayPage() {
         goals: goalPage.items,
         shoppingItems,
         sectionErrors,
-      });
+      };
+      dataRef.current = nextData;
+      setData(nextData);
       setStatus("success");
     } catch (cause) {
       if (!loadRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest)) return;
-      setData(null);
       setError(errorMessage(cause));
-      setStatus(errorStatus(cause));
+      if (dataRef.current) {
+        setStatus("success");
+      } else {
+        setData(null);
+        setStatus(errorStatus(cause));
+      }
     }
   }, [
     financeAdapter,
@@ -629,6 +643,8 @@ export default function TodayPage() {
   useEffect(() => {
     workspaceRequests.switchWorkspace(workspaceId);
     loadRequest.invalidate();
+    dataRef.current = null;
+    setData(null);
     void load();
     return () => loadRequest.invalidate();
   }, [load, loadRequest, workspaceId, workspaceRequests]);
@@ -653,6 +669,8 @@ export default function TodayPage() {
           data={data}
           hidden={hidden}
           onToggleHidden={() => setHidden((current) => !current)}
+          onRetry={() => void load()}
+          loadError={error}
         />
       ) : null}
     </AsyncState>
