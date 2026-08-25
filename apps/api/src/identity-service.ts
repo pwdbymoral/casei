@@ -23,6 +23,7 @@ import {
   encryptAuthEmailPayload,
   hashAuthEmailAddress,
 } from "./auth-email.js";
+import { materializeInitialWalletBalance } from "./finance-service.js";
 
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const INVITATION_RATE_WINDOW_MS = 10 * 60 * 1_000;
@@ -596,6 +597,13 @@ export class IdentityService {
                VALUES ($1, $2, 'owner', 'active')`,
               [workspaceId, actor.userId],
             );
+            await materializeInitialWalletBalance(client, {
+              workspaceId,
+              actorId: actor.userId,
+              correlationId,
+              origin: "api",
+              now: this.now(),
+            });
             await client.query(`UPDATE "user" SET name = $2, updated_at = now() WHERE id = $1`, [
               actor.userId,
               parsed.displayName,

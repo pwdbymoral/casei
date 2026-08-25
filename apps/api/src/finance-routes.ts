@@ -27,6 +27,8 @@ import {
   updateCreditCardSchema,
   updateGoalSchema,
   updateTransactionSchema,
+  walletAdjustmentInputSchema,
+  walletAdjustmentPreviewInputSchema,
 } from "@casei/contracts";
 import { IdempotencyConflictError } from "@casei/database";
 import { DomainError } from "@casei/domain";
@@ -68,6 +70,8 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   for (const path of [
     "/workspaces/:workspaceId/transactions",
     "/workspaces/:workspaceId/transactions/*",
+    "/workspaces/:workspaceId/wallet",
+    "/workspaces/:workspaceId/wallet/*",
     "/workspaces/:workspaceId/loans",
     "/workspaces/:workspaceId/loans/*",
     "/workspaces/:workspaceId/categories",
@@ -229,6 +233,32 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     );
     context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
     return context.json(result.transaction, result.replayed ? 200 : 201);
+  });
+
+  router.get("/workspaces/:workspaceId/wallet", async (context) => {
+    const wallet = await service.getWallet(scopeOf(context));
+    setVersionHeaders(context, wallet.version);
+    return context.json(wallet);
+  });
+
+  router.post("/workspaces/:workspaceId/wallet/adjustments/preview", async (context) => {
+    const input = await parseJsonBody(context, walletAdjustmentPreviewInputSchema);
+    const preview = await service.previewWalletAdjustment(scopeOf(context), input);
+    setVersionHeaders(context, preview.wallet.version);
+    return context.json(preview);
+  });
+
+  router.post("/workspaces/:workspaceId/wallet/adjustments", async (context) => {
+    const input = await parseJsonBody(context, walletAdjustmentInputSchema);
+    const result = await service.adjustWallet(
+      scopeOf(context),
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.adjustment.wallet.version);
+    return context.json(result.adjustment, result.replayed ? 200 : 201);
   });
 
   router.post("/workspaces/:workspaceId/loans", async (context) => {

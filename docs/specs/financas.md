@@ -137,6 +137,21 @@ Principal concedido publica `wallet → loan receivable`; recebimento do reembol
 
 O usuário informa o saldo observado; o sistema mostra a diferença antes de confirmar e cria ajuste somente pela diferença. Motivo é obrigatório. Ajuste não pode ser recorrente, parcelado, categorizado como consumo ou usado para ocultar pagamento de fatura. Apenas owner e member podem ajustar.
 
+`GET /v1/workspaces/:workspaceId/wallet` retorna o saldo canônico da conta `wallet`, sua moeda e
+uma versão que avança a cada novo lançamento publicado na carteira. A preferência de saldo inicial
+do onboarding é materializada uma única vez antes da primeira resposta financeira: valor positivo
+cria um lançamento de abertura `adjustment` sem categoria, cartão, recorrência ou parcelamento;
+valor zero apenas marca a inicialização como concluída, pois o ledger não aceita lançamentos zero.
+Novos onboardings materializam a abertura na mesma unidade transacional da criação do espaço.
+
+`POST /v1/workspaces/:workspaceId/wallet/adjustments/preview` recebe o saldo observado e retorna,
+sem mutação, o saldo calculado, a diferença assinada e a versão da carteira. A confirmação usa
+`POST /v1/workspaces/:workspaceId/wallet/adjustments`, repete o saldo observado, exige motivo
+não vazio, `Idempotency-Key` e `If-Match: "v<version>"`, e recalcula a diferença sob lock. Se a
+carteira mudou desde a prévia, responde conflito de versão sem publicar nada; diferença zero é
+rejeitada como ajuste desnecessário. O evento publicado movimenta somente `wallet` contra
+`adjustment equity`, preserva o motivo na auditoria e não entra em renda ou despesa.
+
 ### Edição e cancelamento
 
 - Edição mostra consequências em saldo, projeção, fatura, meta ou empréstimo antes de salvar.

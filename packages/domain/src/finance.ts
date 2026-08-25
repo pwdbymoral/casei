@@ -15,6 +15,28 @@ export interface CanonicalPostingAccounts {
   readonly cardLiability?: string;
 }
 
+export interface WalletAdjustmentAccounts {
+  readonly wallet: string;
+  readonly adjustment: string;
+}
+
+/** Reconciles cash to an observed balance without creating income or expense. */
+export function canonicalWalletAdjustmentPostings(input: {
+  delta: Money;
+  accounts: WalletAdjustmentAccounts;
+}): readonly LedgerPosting[] {
+  if (input.delta.minor === 0n) {
+    throw new DomainError("validation_failed", "A diferença do ajuste não pode ser zero.");
+  }
+  return [
+    { accountId: input.accounts.wallet, amount: input.delta },
+    {
+      accountId: input.accounts.adjustment,
+      amount: Money.fromTrusted(-input.delta.minor, input.delta.currency),
+    },
+  ];
+}
+
 export type LoanDirection = "lent" | "borrowed";
 
 export interface LoanPostingAccounts {

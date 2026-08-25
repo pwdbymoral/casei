@@ -42,20 +42,32 @@ export const workspace = pgTable(
   ],
 );
 
-export const workspacePreference = pgTable("workspace_preference", {
-  workspaceId: uuid("workspace_id")
-    .primaryKey()
-    .references(() => workspace.id, { onDelete: "cascade" }),
-  currencyCode: varchar("currency_code", { length: 3 }).notNull(),
-  timezone: text("timezone").notNull(),
-  safetyMarginMinor: bigint("safety_margin_minor", { mode: "bigint" }).notNull().default(sql`0`),
-  initialBalanceMinor: bigint("initial_balance_minor", { mode: "bigint" })
-    .notNull()
-    .default(sql`0`),
-  onboardingCompletedAt: instant("onboarding_completed_at"),
-  createdAt: instant("created_at").defaultNow().notNull(),
-  updatedAt: instant("updated_at").defaultNow().notNull(),
-});
+export const workspacePreference = pgTable(
+  "workspace_preference",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    timezone: text("timezone").notNull(),
+    safetyMarginMinor: bigint("safety_margin_minor", { mode: "bigint" }).notNull().default(sql`0`),
+    initialBalanceMinor: bigint("initial_balance_minor", { mode: "bigint" })
+      .notNull()
+      .default(sql`0`),
+    initialBalanceMaterializedAt: instant("initial_balance_materialized_at"),
+    initialBalanceTransactionId: uuid("initial_balance_transaction_id"),
+    onboardingCompletedAt: instant("onboarding_completed_at"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "workspace_preference_initial_balance_transaction_fk",
+      columns: [table.workspaceId, table.initialBalanceTransactionId],
+      foreignColumns: [financeTransaction.workspaceId, financeTransaction.id],
+    }).onDelete("restrict"),
+  ],
+);
 
 export const userPreference = pgTable(
   "user_preference",
