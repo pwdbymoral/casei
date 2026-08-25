@@ -616,6 +616,130 @@ export const job = pgTable(
   ],
 );
 
+export const importJob = pgTable(
+  "import_job",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    // Immutable audit provenance; authorization is revalidated separately at each batch.
+    actorId: text("actor_id").notNull(),
+    jobId: uuid("job_id").references(() => job.id, { onDelete: "set null" }),
+    idempotencyKey: varchar("idempotency_key", { length: 128 }).notNull(),
+    requiredCapability: text("required_capability").notNull().default("import"),
+    domain: text("domain").notNull(),
+    storageKey: text("storage_key").notNull(),
+    sourceHash: text("source_hash").notNull(),
+    mappingVersion: text("mapping_version").notNull(),
+    previewHash: text("preview_hash").notNull(),
+    previewManifest: jsonb("preview_manifest").$type<unknown[]>().notNull(),
+    mode: text("mode").notNull(),
+    duplicatePolicy: text("duplicate_policy").notNull(),
+    acceptedDuplicateLines: jsonb("accepted_duplicate_lines")
+      .$type<number[]>()
+      .notNull()
+      .default([]),
+    totalRows: integer("total_rows").notNull(),
+    validRows: integer("valid_rows").notNull(),
+    duplicateRows: integer("duplicate_rows").notNull(),
+    invalidRows: integer("invalid_rows").notNull(),
+    appliedRows: integer("applied_rows").notNull().default(0),
+    skippedRows: integer("skipped_rows").notNull().default(0),
+    rejectedRows: integer("rejected_rows").notNull().default(0),
+    cursor: integer("cursor").notNull().default(0),
+    batchSize: integer("batch_size").notNull().default(100),
+    state: text("state").notNull().default("queued"),
+    expiresAt: instant("expires_at").notNull(),
+    version: integer("version").notNull().default(0),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    lastError: text("last_error"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("import_job_workspace_idempotency_unique").on(
+      table.workspaceId,
+      table.idempotencyKey,
+    ),
+    uniqueIndex("import_job_workspace_id_unique").on(table.workspaceId, table.id),
+    index("import_job_workspace_state_idx").on(
+      table.workspaceId,
+      table.state,
+      table.updatedAt,
+      table.id,
+    ),
+    check("import_job_domain_check", sql`${table.domain} in ('transactions', 'products', 'full')`),
+    check("import_job_capability_check", sql`${table.requiredCapability} = 'import'`),
+    check("import_job_mode_check", sql`${table.mode} in ('valid_only', 'all_or_nothing')`),
+    check(
+      "import_job_duplicate_policy_check",
+      sql`${table.duplicatePolicy} in ('skip', 'import', 'review')`,
+    ),
+    check(
+      "import_job_state_check",
+      sql`${table.state} in ('queued', 'running', 'succeeded', 'failed', 'cancel_requested', 'cancelled', 'reversing', 'reversed')`,
+    ),
+    check(
+      "import_job_counts_check",
+      sql`${table.totalRows} between 1 and 50000 and ${table.validRows} >= 0 and ${table.duplicateRows} >= 0 and ${table.invalidRows} >= 0 and ${table.totalRows} = ${table.validRows} + ${table.duplicateRows} + ${table.invalidRows} and ${table.appliedRows} >= 0 and ${table.skippedRows} >= 0 and ${table.rejectedRows} >= 0 and ${table.cursor} between 0 and ${table.totalRows}`,
+    ),
+    check("import_job_batch_size_check", sql`${table.batchSize} between 1 and 50000`),
+    check("import_job_version_check", sql`${table.version} >= 0`),
+    check(
+      "import_job_duplicate_lines_check",
+      sql`jsonb_typeof(${table.acceptedDuplicateLines}) = 'array'`,
+    ),
+    check(
+      "import_job_preview_manifest_check",
+      sql`jsonb_typeof(${table.previewManifest}) = 'array'`,
+    ),
+  ],
+);
+
+export const importJobLine = pgTable(
+  "import_job_line",
+  {
+    jobId: uuid("job_id").notNull(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    lineNumber: integer("line_number").notNull(),
+    status: text("status").notNull().default("pending"),
+    fingerprint: text("fingerprint"),
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    reversalToken: text("reversal_token"),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.jobId, table.lineNumber] }),
+    foreignKey({
+      columns: [table.workspaceId, table.jobId],
+      foreignColumns: [importJob.workspaceId, importJob.id],
+      name: "import_job_line_job_fk",
+    }).onDelete("cascade"),
+    index("import_job_line_workspace_status_idx").on(
+      table.workspaceId,
+      table.jobId,
+      table.status,
+      table.lineNumber,
+    ),
+    check("import_job_line_number_check", sql`${table.lineNumber} between 2 and 50001`),
+    check(
+      "import_job_line_status_check",
+      sql`${table.status} in ('pending', 'applied', 'skipped', 'rejected', 'reversed')`,
+    ),
+    check(
+      "import_job_line_error_check",
+      sql`(${table.status} in ('rejected', 'skipped') and ${table.errorCode} is not null) or ${table.status} in ('pending', 'applied', 'reversed')`,
+    ),
+  ],
+);
+
 export const authEmailIntent = pgTable(
   "auth_email_intent",
   {
