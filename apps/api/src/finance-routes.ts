@@ -13,6 +13,7 @@ import {
   goalReleaseSchema,
   goalSpendSchema,
   goalTransitionSchema,
+  insightReportQuerySchema,
   insightWindowQuerySchema,
   loanPaymentSchema,
   paginationQuerySchema,
@@ -93,6 +94,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   }
 
   if (insightService) {
+    router.get("/workspaces/:workspaceId/insights/reports", async (context) => {
+      const query = parseQuery(context, insightReportQuerySchema);
+      const report = await insightService.getReport(scopeOf(context), query);
+      return context.json(report);
+    });
+
     router.get("/workspaces/:workspaceId/insights/financial", async (context) => {
       const query = parseQuery(context, insightWindowQuerySchema);
       const model = await insightService.getFinancialReadModel(scopeOf(context), query);

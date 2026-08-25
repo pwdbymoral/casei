@@ -71,6 +71,59 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
   });
 
   integrationIt(
+    "reconciles monthly and category report rows with published transactions",
+    async () => {
+      const fixture = await createFixture();
+      try {
+        const report = await new InsightService(fixture.pool).getReport(fixture.scope, {
+          asOf: "2026-08-31",
+          from: "2026-08-01",
+          to: "2026-08-31",
+        });
+        expect(report.totals).toEqual({
+          income: { currency: "BRL", minor: "0" },
+          expense: { currency: "BRL", minor: "400" },
+          net: { currency: "BRL", minor: "-400" },
+          transactionCount: 1,
+        });
+        expect(report.monthly).toEqual([
+          {
+            month: "2026-08",
+            income: { currency: "BRL", minor: "0" },
+            expense: { currency: "BRL", minor: "400" },
+            net: { currency: "BRL", minor: "-400" },
+            transactionCount: 1,
+          },
+        ]);
+        expect(report.categories).toEqual([
+          {
+            categoryId: null,
+            categoryName: "Sem categoria",
+            income: { currency: "BRL", minor: "0" },
+            expense: { currency: "BRL", minor: "400" },
+            net: { currency: "BRL", minor: "-400" },
+            transactionCount: 1,
+          },
+        ]);
+        expect(report.reconciliation).toMatchObject({
+          source: "published_ledger",
+          transactionCount: 1,
+          export: {
+            domain: "transactions",
+            format: "csv",
+            from: "2026-08-01",
+            to: "2026-08-31",
+            kind: "all",
+            categoryId: null,
+          },
+        });
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  integrationIt(
     "does not present safe spending without opening or reconciliation evidence",
     async () => {
       const fixture = await createFixture({ withOpening: false });

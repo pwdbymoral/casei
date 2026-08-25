@@ -2,6 +2,8 @@ import {
   createLoanSchema,
   createRecurrenceSchema,
   createTransactionSchema,
+  insightReportQuerySchema,
+  insightReportSchema,
   insightWindowQuerySchema,
   loanPaymentSchema,
   loanPaymentViewSchema,
@@ -162,6 +164,20 @@ describe("finance contracts", () => {
     expect(() =>
       insightWindowQuerySchema.parse({ asOf: "2026-09-01", to: "2026-08-31" }),
     ).toThrow();
+  });
+
+  it("parses report filters and exposes the canonical response contract", () => {
+    expect(
+      insightReportQuerySchema.parse({ from: "2026-08-01", to: "2026-08-31", kind: "expense" }),
+    ).toEqual({
+      from: "2026-08-01",
+      to: "2026-08-31",
+      kind: "expense",
+    });
+    expect(() =>
+      insightReportQuerySchema.parse({ from: "2026-09-01", to: "2026-08-31" }),
+    ).toThrow();
+    expect(() => insightReportSchema.parse({})).toThrow();
   });
 
   it("accepts partial card configuration updates and preserves explicit clearing", () => {
