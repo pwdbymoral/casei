@@ -270,12 +270,28 @@ export type ImportJobState = z.infer<typeof importJobStateSchema>;
 export const importDomainSchema = z.enum(["transactions", "products", "full"]);
 export type ImportDomain = z.infer<typeof importDomainSchema>;
 
+/** Immutable evidence captured by the preflight and checked again by the worker. */
+export const importPreviewManifestLineSchema = z.object({
+  lineNumber: z.number().int().min(2).max(50_001),
+  status: z.enum(["valid", "duplicate", "invalid"]),
+  rowDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  fingerprint: z.string().trim().min(1).max(512).optional(),
+});
+export type ImportPreviewManifestLine = z.infer<typeof importPreviewManifestLineSchema>;
+
+export const importPreviewManifestSchema = z
+  .array(importPreviewManifestLineSchema)
+  .min(1)
+  .max(50_000);
+export type ImportPreviewManifest = z.infer<typeof importPreviewManifestSchema>;
+
 export const importCreateRequestSchema = z.object({
   domain: importDomainSchema,
   storageKey: z.string().trim().min(1).max(512),
   sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
   mappingVersion: z.string().trim().min(1).max(80),
   previewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  previewManifest: importPreviewManifestSchema,
   mode: importModeSchema,
   duplicatePolicy: importDuplicatePolicySchema,
   acceptedDuplicateLines: z.array(z.number().int().min(1).max(50_000)).max(50_000).default([]),
@@ -286,6 +302,23 @@ export const importCreateRequestSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }),
 });
 export type ImportCreateRequest = z.infer<typeof importCreateRequestSchema>;
+
+export const importLineResultSchema = z.object({
+  lineNumber: z.number().int().min(2).max(50_001),
+  status: z.enum(["applied", "skipped", "rejected", "reversed"]),
+  fingerprint: z.string().trim().min(1).max(512).optional(),
+  targetType: z.string().trim().min(1).max(100).optional(),
+  targetId: z.string().trim().min(1).max(200).optional(),
+  errorCode: z.string().trim().min(1).max(100).optional(),
+  errorMessage: z.string().trim().min(1).max(500).optional(),
+});
+export type ImportLineResultContract = z.infer<typeof importLineResultSchema>;
+
+export const importLineListQuerySchema = z.object({
+  afterLine: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export type ImportLineListQuery = z.infer<typeof importLineListQuerySchema>;
 
 const stockBulkContentSchema = z
   .string()

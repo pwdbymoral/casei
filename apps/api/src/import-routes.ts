@@ -1,7 +1,7 @@
-import { importCreateRequestSchema } from "@casei/contracts";
+import { importCreateRequestSchema, importLineListQuerySchema } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
 import { ApiHttpError, errorResponse, notFoundError } from "./http/index.js";
-import { parseJsonBody } from "./http/parsing.js";
+import { parseJsonBody, parseQuery } from "./http/parsing.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
 import {
   type ImportApplication,
@@ -44,11 +44,29 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     return context.json(job);
   });
 
+  router.get("/workspaces/:workspaceId/imports/:importId/lines", async (context) => {
+    const scope = scopeOf(context);
+    const query = parseQuery(context, importLineListQuerySchema);
+    const page = await options.application.listResults(
+      context.req.param("importId"),
+      scope.workspaceId,
+      query.afterLine,
+      query.limit,
+    );
+    return context.json({
+      items: page.items.map(({ reversalToken: _reversalToken, ...line }) => line),
+      page: { nextAfterLine: page.nextAfterLine },
+    });
+  });
+
   router.post("/workspaces/:workspaceId/imports/:importId/cancel", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     requiredIdempotencyKey(context);
-    const job = await options.application.cancel(context.req.param("importId"), scope.workspaceId);
+    const job = await options.application.cancel(context.req.param("importId"), scope.workspaceId, {
+      actorId: scope.actorId,
+      correlationId: scope.correlationId,
+    });
     return context.json(job, 202);
   });
 
@@ -56,7 +74,14 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     requiredIdempotencyKey(context);
-    const job = await options.application.reverse(context.req.param("importId"), scope.workspaceId);
+    const job = await options.application.reverse(
+      context.req.param("importId"),
+      scope.workspaceId,
+      {
+        actorId: scope.actorId,
+        correlationId: scope.correlationId,
+      },
+    );
     return context.json(job, 202);
   });
 }

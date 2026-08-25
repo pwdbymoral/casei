@@ -11,6 +11,7 @@ CREATE TABLE "import_job" (
   "source_hash" text NOT NULL,
   "mapping_version" text NOT NULL,
   "preview_hash" text NOT NULL,
+  "preview_manifest" jsonb NOT NULL,
   "mode" text NOT NULL,
   "duplicate_policy" text NOT NULL,
   "accepted_duplicate_lines" jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -32,6 +33,7 @@ CREATE TABLE "import_job" (
   "updated_at" timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT "import_job_source_hash_check" CHECK ("source_hash" ~ '^[a-f0-9]{64}$'),
   CONSTRAINT "import_job_preview_hash_check" CHECK ("preview_hash" ~ '^[a-f0-9]{64}$'),
+  CONSTRAINT "import_job_preview_manifest_check" CHECK (jsonb_typeof("preview_manifest") = 'array'),
   CONSTRAINT "import_job_idempotency_key_check" CHECK (length("idempotency_key") between 16 and 128),
   CONSTRAINT "import_job_capability_check" CHECK ("required_capability" = 'import'),
   CONSTRAINT "import_job_duplicate_lines_check" CHECK (jsonb_typeof("accepted_duplicate_lines") = 'array'),
@@ -46,7 +48,7 @@ CREATE TABLE "import_job" (
     AND "applied_rows" >= 0 AND "skipped_rows" >= 0 AND "rejected_rows" >= 0
     AND "cursor" between 0 and "total_rows"
   ),
-  CONSTRAINT "import_job_batch_size_check" CHECK ("batch_size" between 1 and 1000),
+  CONSTRAINT "import_job_batch_size_check" CHECK ("batch_size" between 1 and 50000),
   CONSTRAINT "import_job_version_check" CHECK ("version" >= 0)
 );
 --> statement-breakpoint
@@ -75,7 +77,7 @@ CREATE TABLE "import_job_line" (
   PRIMARY KEY ("job_id", "line_number"),
   CONSTRAINT "import_job_line_job_fk" FOREIGN KEY ("workspace_id", "job_id")
     REFERENCES "import_job" ("workspace_id", "id") ON DELETE CASCADE,
-  CONSTRAINT "import_job_line_number_check" CHECK ("line_number" >= 1 and "line_number" <= 50001),
+  CONSTRAINT "import_job_line_number_check" CHECK ("line_number" >= 2 and "line_number" <= 50001),
   CONSTRAINT "import_job_line_status_check" CHECK ("status" in ('pending', 'applied', 'skipped', 'rejected', 'reversed')),
   CONSTRAINT "import_job_line_error_check" CHECK (
     ("status" in ('rejected', 'skipped') AND "error_code" IS NOT NULL)

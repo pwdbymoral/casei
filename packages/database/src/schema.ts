@@ -587,6 +587,7 @@ export const importJob = pgTable(
     sourceHash: text("source_hash").notNull(),
     mappingVersion: text("mapping_version").notNull(),
     previewHash: text("preview_hash").notNull(),
+    previewManifest: jsonb("preview_manifest").$type<unknown[]>().notNull(),
     mode: text("mode").notNull(),
     duplicatePolicy: text("duplicate_policy").notNull(),
     acceptedDuplicateLines: jsonb("accepted_duplicate_lines")
@@ -637,11 +638,15 @@ export const importJob = pgTable(
       "import_job_counts_check",
       sql`${table.totalRows} between 1 and 50000 and ${table.validRows} >= 0 and ${table.duplicateRows} >= 0 and ${table.invalidRows} >= 0 and ${table.totalRows} = ${table.validRows} + ${table.duplicateRows} + ${table.invalidRows} and ${table.appliedRows} >= 0 and ${table.skippedRows} >= 0 and ${table.rejectedRows} >= 0 and ${table.cursor} between 0 and ${table.totalRows}`,
     ),
-    check("import_job_batch_size_check", sql`${table.batchSize} between 1 and 1000`),
+    check("import_job_batch_size_check", sql`${table.batchSize} between 1 and 50000`),
     check("import_job_version_check", sql`${table.version} >= 0`),
     check(
       "import_job_duplicate_lines_check",
       sql`jsonb_typeof(${table.acceptedDuplicateLines}) = 'array'`,
+    ),
+    check(
+      "import_job_preview_manifest_check",
+      sql`jsonb_typeof(${table.previewManifest}) = 'array'`,
     ),
   ],
 );
@@ -677,7 +682,7 @@ export const importJobLine = pgTable(
       table.status,
       table.lineNumber,
     ),
-    check("import_job_line_number_check", sql`${table.lineNumber} between 1 and 50001`),
+    check("import_job_line_number_check", sql`${table.lineNumber} between 2 and 50001`),
     check(
       "import_job_line_status_check",
       sql`${table.status} in ('pending', 'applied', 'skipped', 'rejected', 'reversed')`,

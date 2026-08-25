@@ -48,6 +48,7 @@ O usuário pode salvar um perfil de mapeamento nomeado, sem armazenar o arquivo 
 
 - Validação completa ocorre antes da confirmação.
 - Linhas independentes válidas podem ser importadas mesmo com erros, mas o usuário escolhe entre `Somente válidas` e `Tudo ou nada`.
+- `Tudo ou nada` é uma garantia do job inteiro: qualquer divergência da fonte ou falha em qualquer linha deixa zero efeitos confirmados, mesmo quando o limite operacional de `valid_only` seria menor. O worker usa um manifesto imutável da prévia e uma única transação de aplicação para esse modo.
 - Operações compostas de uma linha, como parcelamento, são atômicas.
 - O resultado registra versão carregada; conflito com edição posterior não sobrescreve dado atual e volta para revisão.
 - Cancelar job impede novos lotes e mantém os já confirmados, mostrando exatamente o que foi aplicado. Revogação de membership produz o mesmo bloqueio antes do lote seguinte. Reverter import cria compensações/cancelamentos auditáveis quando permitido.
@@ -87,5 +88,7 @@ proxy que revalida autorização pertencem à aplicação, não ao pacote puro.
 - [ ] Datas, centavos, encoding e separadores comuns em pt-BR são interpretados ou geram erro acionável, nunca coerção silenciosa.
 - [ ] Retry e reimportação com IDs não duplicam registros.
 - [ ] Resultado parcial identifica cada linha aplicada, ignorada ou rejeitada.
+- [ ] Execução rejeita fonte, digest de linha, fingerprint ou hash de manifesto divergente da prévia confirmada.
+- [ ] Consulta de resultados por linha respeita espaço, autenticação e paginação; cancelamento e reversão auditam o solicitante efetivo.
 - [ ] Exportação filtrada e completa respeitam permissão e produzem arquivos reimportáveis.
 - [ ] Formula injection, macro, arquivo excessivo, revogação durante job/download e acesso após expiração possuem testes de segurança.

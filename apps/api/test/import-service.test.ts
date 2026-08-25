@@ -12,16 +12,31 @@ import type {
   ImportSourceRow,
   ImportStore,
 } from "../src/import-service.js";
-import { ImportApplication, ImportAuthorizationError } from "../src/import-service.js";
+import {
+  createImportPreviewHash,
+  ImportApplication,
+  ImportAuthorizationError,
+} from "../src/import-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const actorId = "user-1";
+const previewManifest = [
+  { lineNumber: 2, status: "valid" as const, rowDigest: "2".repeat(64) },
+  {
+    lineNumber: 3,
+    status: "duplicate" as const,
+    rowDigest: "3".repeat(64),
+    fingerprint: "f".repeat(64),
+  },
+  { lineNumber: 4, status: "valid" as const, rowDigest: "4".repeat(64) },
+];
 const baseRequest: ImportCreateRequest = {
   domain: "products",
   storageKey: "dev/workspace/job/input.csv",
   sourceHash: "a".repeat(64),
   mappingVersion: "products-v1",
-  previewHash: "b".repeat(64),
+  previewHash: createImportPreviewHash(previewManifest),
+  previewManifest,
   mode: "valid_only",
   duplicatePolicy: "skip",
   acceptedDuplicateLines: [],
@@ -60,6 +75,7 @@ class MemoryStore implements ImportStore {
       sourceHash: input.request.sourceHash,
       mappingVersion: input.request.mappingVersion,
       previewHash: input.request.previewHash,
+      previewManifest: input.request.previewManifest,
       mode: input.request.mode,
       duplicatePolicy: input.request.duplicatePolicy,
       acceptedDuplicateLines: input.request.acceptedDuplicateLines,
@@ -133,6 +149,7 @@ class MemoryStore implements ImportStore {
     jobId: string,
     scope: string,
     callback: (context: ImportReverseBatchContext) => Promise<T>,
+    _requester?: Parameters<ImportStore["runReverseBatch"]>[3],
   ): Promise<T> {
     const job = await this.getJob(jobId, scope);
     if (!job) throw new Error("not found");
@@ -142,6 +159,7 @@ class MemoryStore implements ImportStore {
     const context: ImportReverseBatchContext = {
       job,
       rows: results.slice(0, job.batchSize),
+      requester: _requester,
       assertAuthorized: async () => {
         if (!this.authorized) throw new ImportAuthorizationError();
       },
@@ -160,6 +178,20 @@ class MemoryStore implements ImportStore {
       job.state === "queued" || job.state === "running" ? "cancel_requested" : job.state;
     this.update(id, { state, version: job.version + 1 });
     return this.jobs.get(id) as ImportJobRecord;
+  }
+
+  async listLineResults(id: string, scope: string, afterLine: number | undefined, limit: number) {
+    const job = await this.getJob(id, scope);
+    if (!job) throw new Error("not found");
+    const all = [...(this.results.get(id)?.values() ?? [])].sort(
+      (left, right) => left.lineNumber - right.lineNumber,
+    );
+    const filtered = all.filter((line) => afterLine === undefined || line.lineNumber > afterLine);
+    const items = filtered.slice(0, limit);
+    return {
+      items,
+      nextAfterLine: filtered.length > limit ? (items.at(-1)?.lineNumber ?? null) : null,
+    };
   }
 
   async markCancelled(id: string, scope: string): Promise<ImportJobRecord> {
@@ -219,9 +251,15 @@ class MemoryCommands implements ImportCommandPort {
 
 function rows(): readonly ImportSourceRow[] {
   return [
-    { lineNumber: 2, status: "valid", values: { name: "Arroz" } },
-    { lineNumber: 3, status: "duplicate", values: { name: "Feijão" }, fingerprint: "fp-1" },
-    { lineNumber: 4, status: "valid", values: { name: "Café" } },
+    { lineNumber: 2, status: "valid", rowDigest: "2".repeat(64), values: { name: "Arroz" } },
+    {
+      lineNumber: 3,
+      status: "duplicate",
+      rowDigest: "3".repeat(64),
+      values: { name: "Feijão" },
+      fingerprint: "f".repeat(64),
+    },
+    { lineNumber: 4, status: "valid", rowDigest: "4".repeat(64), values: { name: "Café" } },
   ];
 }
 
@@ -320,6 +358,45 @@ describe("DATA-004 aplicação de importação", () => {
     expect(commands.applied).toEqual([]);
   });
 
+  it("persiste todo o job no mesmo lote quando tudo-ou-nada é selecionado", async () => {
+    const store = new MemoryStore();
+    const app = new ImportApplication(store, source(rows()), new MemoryCommands(), {
+      batchSize: 1,
+    });
+    const job = await app.create({
+      workspaceId,
+      actorId,
+      correlationId: "corr-atomic-job",
+      request: {
+        ...baseRequest,
+        mode: "all_or_nothing",
+        duplicatePolicy: "import",
+      },
+    });
+
+    expect(job.batchSize).toBe(baseRequest.totalRows);
+  });
+
+  it("recusa uma fonte que diverge do digest confirmado na prévia", async () => {
+    const store = new MemoryStore();
+    const firstRow = rows()[0];
+    if (!firstRow) throw new Error("fixture row missing");
+    const app = new ImportApplication(
+      store,
+      source([{ ...firstRow, rowDigest: "d".repeat(64) }]),
+      new MemoryCommands(),
+    );
+    const job = await app.create({
+      workspaceId,
+      actorId,
+      correlationId: "corr-manifest",
+      request: baseRequest,
+    });
+
+    await expect(app.run(job.id, workspaceId)).rejects.toThrow("manifesto confirmado");
+    expect((await store.getJob(job.id, workspaceId))?.state).toBe("failed");
+  });
+
   it("faz retry idempotente sem reaplicar linha registrada", async () => {
     const store = new MemoryStore();
     const commands = new MemoryCommands();
@@ -365,13 +442,43 @@ describe("DATA-004 aplicação de importação", () => {
       request: baseRequest,
     });
     await app.run(job.id, workspaceId);
-    const reversed = await app.reverse(job.id, workspaceId);
+    const reversed = await app.reverse(job.id, workspaceId, {
+      actorId: "requester-2",
+      correlationId: "corr-reverse-request",
+    });
 
     expect(reversed.state).toBe("reversed");
     expect(commands.reversed.map((row) => row.idempotencyKey)).toEqual([
       `import-reverse:${job.id}:2`,
       `import-reverse:${job.id}:4`,
     ]);
+    expect(commands.reversed.every((row) => row.actorId === "requester-2")).toBe(true);
     expect(store.resultsFor(job.id).filter((row) => row.status === "reversed")).toHaveLength(2);
+  });
+
+  it("consulta resultados de linhas com cursor estável", async () => {
+    const store = new MemoryStore();
+    const app = new ImportApplication(store, source(rows()), new MemoryCommands(), {
+      batchSize: 3,
+    });
+    const job = await app.create({
+      workspaceId,
+      actorId,
+      correlationId: "corr-results",
+      request: baseRequest,
+    });
+    await app.run(job.id, workspaceId);
+
+    const firstPage = await app.listResults(job.id, workspaceId, undefined, 1);
+    expect(firstPage.items[0]?.lineNumber).toBe(2);
+    expect(firstPage.nextAfterLine).toBe(2);
+    const secondPage = await app.listResults(
+      job.id,
+      workspaceId,
+      firstPage.nextAfterLine ?? undefined,
+      2,
+    );
+    expect(secondPage.items.map((line) => line.lineNumber)).toEqual([3, 4]);
+    expect(secondPage.nextAfterLine).toBeNull();
   });
 });

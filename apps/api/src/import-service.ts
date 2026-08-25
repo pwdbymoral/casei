@@ -4,14 +4,22 @@ import type {
   ImportDuplicatePolicy,
   ImportJobState,
   ImportMode,
+  ImportPreviewManifestLine,
 } from "@casei/contracts";
 import type { Pool, PoolClient } from "@casei/database";
-import { PostgresJobWorker, validateIdempotencyKey, withUnitOfWork } from "@casei/database";
+import {
+  hashRequest,
+  PostgresJobWorker,
+  validateIdempotencyKey,
+  withUnitOfWork,
+} from "@casei/database";
 
 /** A row produced by DATA-003. Values are already normalized and safe to pass to a domain command. */
 export interface ImportSourceRow {
   readonly lineNumber: number;
   readonly status: "valid" | "duplicate" | "invalid";
+  /** Digest of the normalized source row captured by the preflight manifest. */
+  readonly rowDigest: string;
   readonly values?: Readonly<Record<string, unknown>>;
   readonly fingerprint?: string;
   readonly errors?: readonly { readonly code: string; readonly message: string }[];
@@ -28,6 +36,7 @@ export interface ImportJobRecord {
   readonly sourceHash: string;
   readonly mappingVersion: string;
   readonly previewHash: string;
+  readonly previewManifest: readonly ImportPreviewManifestLine[];
   readonly mode: ImportMode;
   readonly duplicatePolicy: ImportDuplicatePolicy;
   readonly acceptedDuplicateLines: readonly number[];
@@ -126,10 +135,21 @@ export interface ImportCountDelta {
 export interface ImportReverseBatchContext {
   readonly job: ImportJobRecord;
   readonly rows: readonly ImportLineResult[];
+  readonly requester?: ImportRequester;
   readonly transaction?: unknown;
   assertAuthorized(): Promise<void>;
   recordLine(result: ImportLineResult): Promise<void>;
   complete(): Promise<void>;
+}
+
+export interface ImportRequester {
+  readonly actorId: string;
+  readonly correlationId: string;
+}
+
+export interface ImportLineResultsPage {
+  readonly items: readonly ImportLineResult[];
+  readonly nextAfterLine: number | null;
 }
 
 export interface ImportStore {
@@ -152,9 +172,24 @@ export interface ImportStore {
     jobId: string,
     workspaceId: string,
     callback: (context: ImportReverseBatchContext) => Promise<T>,
+    requester?: ImportRequester,
   ): Promise<T>;
-  requestCancel(jobId: string, workspaceId: string): Promise<ImportJobRecord>;
-  markCancelled(jobId: string, workspaceId: string): Promise<ImportJobRecord>;
+  listLineResults(
+    jobId: string,
+    workspaceId: string,
+    afterLine: number | undefined,
+    limit: number,
+  ): Promise<ImportLineResultsPage>;
+  requestCancel(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord>;
+  markCancelled(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord>;
   fail(jobId: string, workspaceId: string, error: ImportFailure): Promise<void>;
 }
 
@@ -192,6 +227,10 @@ export interface ImportApplicationOptions {
   readonly batchSize?: number;
 }
 
+export function createImportPreviewHash(manifest: readonly ImportPreviewManifestLine[]): string {
+  return hashRequest(manifest);
+}
+
 /** Orchestrates preflight rows into durable, idempotent domain commands. */
 export class ImportApplication {
   private readonly batchSize: number;
@@ -203,8 +242,8 @@ export class ImportApplication {
     options: ImportApplicationOptions = {},
   ) {
     const batchSize = options.batchSize ?? 100;
-    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1_000) {
-      throw new RangeError("O lote de importação deve ter entre 1 e 1000 linhas.");
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 50_000) {
+      throw new RangeError("O lote de importação deve ter entre 1 e 50000 linhas.");
     }
     this.batchSize = batchSize;
   }
@@ -229,10 +268,48 @@ export class ImportApplication {
     ) {
       throw new ImportConflictError("As contagens da prévia não conferem.");
     }
+    if (input.request.previewManifest.length !== input.request.totalRows) {
+      throw new ImportConflictError("O manifesto da prévia não cobre todas as linhas.");
+    }
+    if (createImportPreviewHash(input.request.previewManifest) !== input.request.previewHash) {
+      throw new ImportConflictError("O manifesto da prévia não corresponde ao hash confirmado.");
+    }
+    const manifestLines = new Set<number>();
+    let manifestValidRows = 0;
+    let manifestDuplicateRows = 0;
+    let manifestInvalidRows = 0;
+    for (const line of input.request.previewManifest) {
+      if (
+        manifestLines.has(line.lineNumber) ||
+        line.lineNumber < 2 ||
+        line.lineNumber > input.request.totalRows + 1
+      ) {
+        throw new ImportConflictError("As linhas do manifesto da prévia são inválidas.");
+      }
+      manifestLines.add(line.lineNumber);
+      if (line.status === "valid") manifestValidRows += 1;
+      if (line.status === "duplicate") manifestDuplicateRows += 1;
+      if (line.status === "invalid") manifestInvalidRows += 1;
+    }
+    if (
+      manifestValidRows !== input.request.validRows ||
+      manifestDuplicateRows !== input.request.duplicateRows ||
+      manifestInvalidRows !== input.request.invalidRows
+    ) {
+      throw new ImportConflictError("As contagens do manifesto da prévia não conferem.");
+    }
     const duplicateLines = input.request.acceptedDuplicateLines;
+    const duplicateManifestLines = new Set(
+      input.request.previewManifest
+        .filter((line) => line.status === "duplicate")
+        .map((line) => line.lineNumber),
+    );
     if (
       new Set(duplicateLines).size !== duplicateLines.length ||
-      duplicateLines.some((line) => line < 2 || line > input.request.totalRows + 1)
+      duplicateLines.some(
+        (line) =>
+          line < 2 || line > input.request.totalRows + 1 || !duplicateManifestLines.has(line),
+      )
     ) {
       throw new ImportConflictError("As linhas de duplicata confirmadas são inválidas.");
     }
@@ -256,7 +333,12 @@ export class ImportApplication {
     return this.store.createJob({
       ...input,
       idempotencyKey,
-      batchSize: this.batchSize,
+      // all_or_nothing is a job-wide guarantee. One durable transaction must
+      // contain every row, so the persisted batch cannot split this mode.
+      batchSize:
+        input.request.mode === "all_or_nothing"
+          ? Math.max(this.batchSize, input.request.totalRows)
+          : this.batchSize,
     });
   }
 
@@ -272,6 +354,9 @@ export class ImportApplication {
         const sourceRows = await this.source.readBatch({
           storageKey: job.storageKey,
           sourceHash: job.sourceHash,
+          mappingVersion: job.mappingVersion,
+          previewHash: job.previewHash,
+          previewManifest: job.previewManifest,
           cursor: job.cursor,
           limit: job.batchSize,
           expiresAt: job.expiresAt,
@@ -295,6 +380,15 @@ export class ImportApplication {
             batch.job.cursor + batch.rows.length > batch.job.totalRows
           ) {
             throw new ImportFailure("A fonte da importação excede a prévia confirmada.");
+          }
+          assertPreviewRows(batch.job, batch.rows, batch.job.cursor);
+          if (
+            batch.job.mode === "all_or_nothing" &&
+            (batch.job.cursor !== 0 || batch.rows.length !== batch.job.totalRows)
+          ) {
+            throw new ImportFailure(
+              "A fonte não entregou o job completo em uma única transação tudo ou nada.",
+            );
           }
 
           let appliedRows = 0;
@@ -412,11 +506,19 @@ export class ImportApplication {
     }
   }
 
-  async cancel(jobId: string, workspaceId: string): Promise<ImportJobRecord> {
-    return this.store.requestCancel(jobId, workspaceId);
+  async cancel(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
+    return this.store.requestCancel(jobId, workspaceId, requester);
   }
 
-  async reverse(jobId: string, workspaceId: string): Promise<ImportJobRecord> {
+  async reverse(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
     let job = await this.store.getJob(jobId, workspaceId);
     if (!job) throw new ImportConflictError("Importação não encontrada.");
     if (job.state === "reversed") return job;
@@ -426,28 +528,33 @@ export class ImportApplication {
     try {
       while (true) {
         let complete = false;
-        await this.store.runReverseBatch(jobId, workspaceId, async (batch) => {
-          await batch.assertAuthorized();
-          if (batch.rows.length === 0) {
-            await batch.complete();
-            complete = true;
-            return;
-          }
-          for (const applied of batch.rows) {
-            if (applied.status !== "applied") continue;
-            await this.commands.reverse({
-              jobId: batch.job.id,
-              workspaceId: batch.job.workspaceId,
-              actorId: batch.job.actorId,
-              domain: batch.job.domain,
-              lineNumber: applied.lineNumber,
-              idempotencyKey: reverseLineIdempotencyKey(batch.job.id, applied.lineNumber),
-              applied,
-              transaction: batch.transaction,
-            });
-            await batch.recordLine({ ...applied, status: "reversed" });
-          }
-        });
+        await this.store.runReverseBatch(
+          jobId,
+          workspaceId,
+          async (batch) => {
+            await batch.assertAuthorized();
+            if (batch.rows.length === 0) {
+              await batch.complete();
+              complete = true;
+              return;
+            }
+            for (const applied of batch.rows) {
+              if (applied.status !== "applied") continue;
+              await this.commands.reverse({
+                jobId: batch.job.id,
+                workspaceId: batch.job.workspaceId,
+                actorId: batch.requester?.actorId ?? batch.job.actorId,
+                domain: batch.job.domain,
+                lineNumber: applied.lineNumber,
+                idempotencyKey: reverseLineIdempotencyKey(batch.job.id, applied.lineNumber),
+                applied,
+                transaction: batch.transaction,
+              });
+              await batch.recordLine({ ...applied, status: "reversed" });
+            }
+          },
+          requester,
+        );
         job = (await this.store.getJob(jobId, workspaceId)) ?? job;
         if (complete) return job;
       }
@@ -456,12 +563,24 @@ export class ImportApplication {
       throw error;
     }
   }
+
+  listResults(
+    jobId: string,
+    workspaceId: string,
+    afterLine: number | undefined,
+    limit: number,
+  ): Promise<ImportLineResultsPage> {
+    return this.store.listLineResults(jobId, workspaceId, afterLine, limit);
+  }
 }
 
 export interface ImportSource {
   readBatch(input: {
     readonly storageKey: string;
     readonly sourceHash: string;
+    readonly mappingVersion: string;
+    readonly previewHash: string;
+    readonly previewManifest: readonly ImportPreviewManifestLine[];
     readonly cursor: number;
     readonly limit: number;
     readonly expiresAt: string;
@@ -490,16 +609,20 @@ export class PostgresImportStore implements ImportStore {
            FOR UPDATE`,
           [input.workspaceId, input.idempotencyKey],
         );
-        if (existing.rows[0]) return mapImportJob(existing.rows[0]);
+        if (existing.rows[0]) {
+          const existingJob = mapImportJob(existing.rows[0]);
+          assertImportRequestMatches(existingJob, input.request);
+          return existingJob;
+        }
 
         const created = await client.query<{ id: string }>(
           `INSERT INTO "import_job"
              (workspace_id, actor_id, required_capability, domain, storage_key, source_hash,
               idempotency_key,
-              mapping_version, preview_hash, mode, duplicate_policy, accepted_duplicate_lines,
+              mapping_version, preview_hash, preview_manifest, mode, duplicate_policy, accepted_duplicate_lines,
               total_rows, valid_rows, duplicate_rows, invalid_rows, batch_size, expires_at, correlation_id)
-           VALUES ($1, $2, 'import', $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
-                   $12, $13, $14, $15, $16, $17, $18)
+           VALUES ($1, $2, 'import', $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb,
+                   $13, $14, $15, $16, $17, $18, $19)
            ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
            RETURNING id`,
           [
@@ -511,6 +634,7 @@ export class PostgresImportStore implements ImportStore {
             input.idempotencyKey,
             input.request.mappingVersion,
             input.request.previewHash,
+            JSON.stringify(input.request.previewManifest),
             input.request.mode,
             input.request.duplicatePolicy,
             JSON.stringify(input.request.acceptedDuplicateLines),
@@ -529,7 +653,11 @@ export class PostgresImportStore implements ImportStore {
              WHERE workspace_id = $1 AND idempotency_key = $2`,
             [input.workspaceId, input.idempotencyKey],
           );
-          if (concurrent.rows[0]) return mapImportJob(concurrent.rows[0]);
+          if (concurrent.rows[0]) {
+            const concurrentJob = mapImportJob(concurrent.rows[0]);
+            assertImportRequestMatches(concurrentJob, input.request);
+            return concurrentJob;
+          }
         }
         const importJobId = created.rows[0]?.id;
         if (!importJobId) throw new Error("Import job was not created.");
@@ -627,8 +755,8 @@ export class PostgresImportStore implements ImportStore {
             const line = await client.query<ImportLineRow>(
               `SELECT line_number, status, fingerprint, target_type, target_id, reversal_token,
                       error_code, error_message
-                 FROM "import_job_line" WHERE job_id = $1 AND line_number = $2`,
-              [job.id, lineNumber],
+                 FROM "import_job_line" WHERE workspace_id = $1 AND job_id = $2 AND line_number = $3`,
+              [job.workspaceId, job.id, lineNumber],
             );
             return line.rows[0] ? mapImportLine(line.rows[0]) : null;
           },
@@ -687,7 +815,7 @@ export class PostgresImportStore implements ImportStore {
               `INSERT INTO audit_event
                  (category, action, actor_id, workspace_id, target_type, target_id, origin,
                   correlation_id, result)
-               VALUES ('data', 'import.reversed', $1, $2, 'import_job', $3, 'worker', $4, 'success')`,
+               VALUES ('data', 'import.completed', $1, $2, 'import_job', $3, 'worker', $4, 'success')`,
               [job.actorId, job.workspaceId, job.id, job.correlationId],
             );
           },
@@ -701,6 +829,7 @@ export class PostgresImportStore implements ImportStore {
     jobId: string,
     workspaceId: string,
     callback: (context: ImportReverseBatchContext) => Promise<T>,
+    requester?: ImportRequester,
   ): Promise<T> {
     return withUnitOfWork(
       this.pool,
@@ -713,11 +842,27 @@ export class PostgresImportStore implements ImportStore {
         const row = result.rows[0];
         if (!row) throw new ImportConflictError("Importação não encontrada.");
         const job = mapImportJob(row);
+        const firstReversalBatch = job.state !== "reversing";
         await client.query(
           `UPDATE "import_job" SET state = 'reversing', version = version + 1, updated_at = now()
             WHERE id = $1 AND state IN ('succeeded', 'cancelled', 'failed', 'reversing')`,
           [job.id],
         );
+        if (firstReversalBatch) {
+          await client.query(
+            `INSERT INTO audit_event
+               (category, action, actor_id, workspace_id, target_type, target_id, origin,
+                correlation_id, result)
+             VALUES ('data', 'import.reversal_requested', $1, $2, 'import_job', $3, $4, $5, 'success')`,
+            [
+              requester?.actorId ?? job.actorId,
+              job.workspaceId,
+              job.id,
+              requester ? "api" : "worker",
+              requester?.correlationId ?? job.correlationId,
+            ],
+          );
+        }
         const lines = await client.query<ImportLineRow>(
           `SELECT line_number, status, fingerprint, target_type, target_id, reversal_token,
                   error_code, error_message
@@ -729,8 +874,10 @@ export class PostgresImportStore implements ImportStore {
         const context: ImportReverseBatchContext = {
           job: { ...job, state: "reversing" },
           rows: lines.rows.map(mapImportLine),
+          requester,
           transaction: client,
-          assertAuthorized: () => assertImportAuthorization(client, job),
+          assertAuthorized: () =>
+            assertImportAuthorization(client, job, requester?.actorId ?? job.actorId),
           recordLine: async (line) => {
             await client.query(
               `UPDATE "import_job_line" SET status = $3, updated_at = now()
@@ -744,6 +891,19 @@ export class PostgresImportStore implements ImportStore {
                 WHERE id = $1 AND workspace_id = $2`,
               [job.id, job.workspaceId],
             );
+            await client.query(
+              `INSERT INTO audit_event
+                 (category, action, actor_id, workspace_id, target_type, target_id, origin,
+                  correlation_id, result)
+               VALUES ('data', 'import.reversal_completed', $1, $2, 'import_job', $3, $4, $5, 'success')`,
+              [
+                requester?.actorId ?? job.actorId,
+                job.workspaceId,
+                job.id,
+                requester ? "api" : "worker",
+                requester?.correlationId ?? job.correlationId,
+              ],
+            );
           },
         };
         return callback(context);
@@ -751,12 +911,66 @@ export class PostgresImportStore implements ImportStore {
     );
   }
 
-  async requestCancel(jobId: string, workspaceId: string): Promise<ImportJobRecord> {
-    return this.transition(jobId, workspaceId, "cancel_requested", ["queued", "running"]);
+  async listLineResults(
+    jobId: string,
+    workspaceId: string,
+    afterLine: number | undefined,
+    limit: number,
+  ): Promise<ImportLineResultsPage> {
+    return withUnitOfWork(
+      this.pool,
+      { workspaceId, applicationRole: this.applicationRole },
+      async ({ client }) => {
+        const job = await client.query<{ id: string }>(
+          `SELECT id FROM "import_job" WHERE id = $1 AND workspace_id = $2`,
+          [jobId, workspaceId],
+        );
+        if (!job.rows[0]) throw new ImportConflictError("Importação não encontrada.");
+        const lines = await client.query<ImportLineRow>(
+          `SELECT line_number, status, fingerprint, target_type, target_id, reversal_token,
+                  error_code, error_message
+             FROM "import_job_line"
+            WHERE workspace_id = $1 AND job_id = $2 AND ($3::integer IS NULL OR line_number > $3)
+            ORDER BY line_number ASC
+            LIMIT $4`,
+          [workspaceId, jobId, afterLine ?? null, limit + 1],
+        );
+        const hasNext = lines.rows.length > limit;
+        const items = (hasNext ? lines.rows.slice(0, limit) : lines.rows).map(mapImportLine);
+        return {
+          items,
+          nextAfterLine: hasNext ? (items.at(-1)?.lineNumber ?? null) : null,
+        };
+      },
+    );
   }
 
-  async markCancelled(jobId: string, workspaceId: string): Promise<ImportJobRecord> {
-    return this.transition(jobId, workspaceId, "cancelled", ["cancel_requested", "cancelled"]);
+  async requestCancel(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
+    return this.transition(
+      jobId,
+      workspaceId,
+      "cancel_requested",
+      ["queued", "running"],
+      requester,
+    );
+  }
+
+  async markCancelled(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
+    return this.transition(
+      jobId,
+      workspaceId,
+      "cancelled",
+      ["cancel_requested", "cancelled"],
+      requester,
+    );
   }
 
   async fail(jobId: string, workspaceId: string, error: ImportFailure): Promise<void> {
@@ -778,6 +992,7 @@ export class PostgresImportStore implements ImportStore {
     workspaceId: string,
     state: ImportJobState,
     from: readonly ImportJobState[],
+    requester?: ImportRequester,
   ): Promise<ImportJobRecord> {
     return withUnitOfWork(
       this.pool,
@@ -804,10 +1019,10 @@ export class PostgresImportStore implements ImportStore {
            VALUES ('data', $1, $2, $3, 'import_job', $4, 'api', $5, 'success')`,
           [
             state === "cancel_requested" ? "import.cancel_requested" : "import.cancelled",
-            result.rows[0].actor_id,
+            requester?.actorId ?? result.rows[0].actor_id,
             result.rows[0].workspace_id,
             result.rows[0].id,
-            result.rows[0].correlation_id,
+            requester?.correlationId ?? result.rows[0].correlation_id,
           ],
         );
         return mapImportJob(result.rows[0]);
@@ -879,6 +1094,7 @@ interface ImportJobRow {
   source_hash: string;
   mapping_version: string;
   preview_hash: string;
+  preview_manifest: unknown;
   mode: ImportMode;
   duplicate_policy: ImportDuplicatePolicy;
   accepted_duplicate_lines: unknown;
@@ -923,6 +1139,9 @@ function mapImportJob(row: ImportJobRow): ImportJobRecord {
     sourceHash: row.source_hash,
     mappingVersion: row.mapping_version,
     previewHash: row.preview_hash,
+    previewManifest: Array.isArray(row.preview_manifest)
+      ? row.preview_manifest.filter(isPreviewManifestLine)
+      : [],
     mode: row.mode,
     duplicatePolicy: row.duplicate_policy,
     acceptedDuplicateLines: accepted,
@@ -945,6 +1164,19 @@ function mapImportJob(row: ImportJobRow): ImportJobRecord {
   };
 }
 
+function isPreviewManifestLine(value: unknown): value is ImportPreviewManifestLine {
+  if (typeof value !== "object" || value === null) return false;
+  const line = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(line.lineNumber) &&
+    typeof line.status === "string" &&
+    (line.status === "valid" || line.status === "duplicate" || line.status === "invalid") &&
+    typeof line.rowDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(line.rowDigest) &&
+    (line.fingerprint === undefined || typeof line.fingerprint === "string")
+  );
+}
+
 function mapImportLine(row: ImportLineRow): ImportLineResult {
   return {
     lineNumber: row.line_number,
@@ -958,7 +1190,11 @@ function mapImportLine(row: ImportLineRow): ImportLineResult {
   };
 }
 
-async function assertImportAuthorization(client: PoolClient, job: ImportJobRecord): Promise<void> {
+async function assertImportAuthorization(
+  client: PoolClient,
+  job: ImportJobRecord,
+  actorId = job.actorId,
+): Promise<void> {
   const workspace = await client.query<{ status: string }>(
     `SELECT status FROM "workspace" WHERE id = $1 FOR UPDATE`,
     [job.workspaceId],
@@ -966,7 +1202,7 @@ async function assertImportAuthorization(client: PoolClient, job: ImportJobRecor
   if (workspace.rows[0]?.status !== "active") throw new ImportAuthorizationError();
   const membership = await client.query<{ status: string; role: string }>(
     `SELECT status, role FROM "membership" WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
-    [job.workspaceId, job.actorId],
+    [job.workspaceId, actorId],
   );
   if (
     membership.rows[0]?.status !== "active" ||
@@ -983,6 +1219,82 @@ function lineIdempotencyKey(jobId: string, lineNumber: number): string {
 
 function reverseLineIdempotencyKey(jobId: string, lineNumber: number): string {
   return `import-reverse:${jobId}:${lineNumber}`;
+}
+
+function assertPreviewRows(
+  job: ImportJobRecord,
+  rows: readonly ImportSourceRow[],
+  cursor: number,
+): void {
+  const manifest = new Map(job.previewManifest.map((line) => [line.lineNumber, line]));
+  const expectedLineNumbers = new Set(
+    job.previewManifest
+      .filter(
+        (line) => line.lineNumber >= cursor + 2 && line.lineNumber <= cursor + rows.length + 1,
+      )
+      .map((line) => line.lineNumber),
+  );
+  const seenLineNumbers = new Set<number>();
+  for (const row of rows) {
+    if (!/^[a-f0-9]{64}$/.test(row.rowDigest)) {
+      throw new ImportFailure("A fonte entregou uma linha sem digest válido.");
+    }
+    const expected = manifest.get(row.lineNumber);
+    if (
+      seenLineNumbers.has(row.lineNumber) ||
+      !expected ||
+      !expectedLineNumbers.has(row.lineNumber) ||
+      expected.status !== row.status ||
+      expected.rowDigest !== row.rowDigest ||
+      (expected.fingerprint ?? null) !== (row.fingerprint ?? null)
+    ) {
+      throw new ImportFailure("A fonte divergiu do manifesto confirmado na prévia.");
+    }
+    seenLineNumbers.add(row.lineNumber);
+  }
+  if (seenLineNumbers.size !== expectedLineNumbers.size) {
+    throw new ImportFailure("A fonte divergiu do manifesto confirmado na prévia.");
+  }
+}
+
+function assertImportRequestMatches(existing: ImportJobRecord, request: ImportCreateRequest): void {
+  const existingFingerprint = hashRequest({
+    domain: existing.domain,
+    storageKey: existing.storageKey,
+    sourceHash: existing.sourceHash,
+    mappingVersion: existing.mappingVersion,
+    previewHash: existing.previewHash,
+    previewManifest: existing.previewManifest,
+    mode: existing.mode,
+    duplicatePolicy: existing.duplicatePolicy,
+    acceptedDuplicateLines: existing.acceptedDuplicateLines,
+    totalRows: existing.totalRows,
+    validRows: existing.validRows,
+    duplicateRows: existing.duplicateRows,
+    invalidRows: existing.invalidRows,
+    expiresAt: new Date(existing.expiresAt).toISOString(),
+  });
+  const requestedFingerprint = hashRequest({
+    domain: request.domain,
+    storageKey: request.storageKey,
+    sourceHash: request.sourceHash,
+    mappingVersion: request.mappingVersion,
+    previewHash: request.previewHash,
+    previewManifest: request.previewManifest,
+    mode: request.mode,
+    duplicatePolicy: request.duplicatePolicy,
+    acceptedDuplicateLines: request.acceptedDuplicateLines,
+    totalRows: request.totalRows,
+    validRows: request.validRows,
+    duplicateRows: request.duplicateRows,
+    invalidRows: request.invalidRows,
+    expiresAt: new Date(request.expiresAt).toISOString(),
+  });
+  if (existingFingerprint !== requestedFingerprint) {
+    throw new ImportConflictError(
+      "A chave de idempotência já foi usada com uma prévia ou solicitação diferente.",
+    );
+  }
 }
 
 function safeFailureMessage(error: unknown): string {

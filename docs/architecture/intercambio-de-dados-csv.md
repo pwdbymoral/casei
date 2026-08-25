@@ -128,16 +128,23 @@ O job `data.import:1` usa o worker durável existente; cada lote trava o job,
 revalida workspace ativo, membership owner/member, capacidade `import`, ator e
 expiração, e só então avança o cursor. `valid_only` usa atomicidade por linha;
 falha de comando vira resultado rejeitado e permite as demais linhas. Em
-`all_or_nothing`, qualquer falha aborta a transação do lote e o job fica
-reexecutável sem efeitos parciais. Cancelamento marca `cancel_requested` e
-impede o lote seguinte; revogação produz o mesmo bloqueio. Retry consulta o
-resultado da linha antes de chamar o adapter, e reversão percorre somente linhas
-aplicadas, gravando `reversed` após a compensação.
+`all_or_nothing`, o lote persistido cobre todas as linhas do job e qualquer
+falha aborta a única transação da aplicação, deixando zero efeitos parciais.
+O manifesto imutável registra status, digest da linha e fingerprint de cada
+linha; o worker confere esses valores e entrega `sourceHash`, `mappingVersion`
+e `previewHash` ao adapter de storage antes de aplicar. Cancelamento marca
+`cancel_requested` e impede o lote seguinte; revogação produz o mesmo bloqueio.
+Retry consulta o resultado da linha antes de chamar o adapter, e reversão
+percorre somente linhas aplicadas, gravando `reversed` após a compensação. O
+endpoint de resultados lista as linhas paginadas sem expor o arquivo original;
+ações de cancelamento/reversão registram o ator e a correlação da solicitação.
 
-O `ImportSource` recebe `storageKey`, `sourceHash`, cursor, lote e expiração;
-seu adapter de DATA-001 deve verificar o hash do objeto antes de entregar a
-primeira linha e nunca devolver conteúdo após a expiração. A aplicação rejeita
-jobs com retenção maior que 24 horas.
+O `ImportSource` recebe `storageKey`, `sourceHash`, `mappingVersion`,
+`previewHash`, manifesto, cursor, lote e expiração; seu adapter de DATA-001
+deve verificar esses fingerprints e o hash do objeto antes de entregar a
+primeira linha e nunca devolver conteúdo após a expiração. A aplicação também
+confere o digest, status e fingerprint de cada linha contra o manifesto e
+rejeita jobs com retenção maior que 24 horas.
 
 A API registra/consulta/cancela/reverte jobs somente quando recebe uma
 `ImportApplication` configurada; essa injeção explícita evita publicar um

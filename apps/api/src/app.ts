@@ -73,7 +73,6 @@ export interface StockAppOptions {
 
 export interface ImportAppOptions {
   application: ImportApplication;
-  scopeMiddleware: MiddlewareHandler<ApiEnv>;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -180,7 +179,16 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
     });
   }
   if (options.import) {
-    configureImportRoutes(v1, options.import);
+    configureImportRoutes(v1, {
+      application: options.import.application,
+      scopeMiddleware: async (context, next) => {
+        if (!actorMiddleware || !scopeMiddleware)
+          throw new Error("Import auth boundary is unavailable");
+        await actorMiddleware(context, async () => {
+          await scopeMiddleware(context, next);
+        });
+      },
+    });
   }
   if (options.identity) {
     if (!identityService || !actorMiddleware || !scopeMiddleware) {

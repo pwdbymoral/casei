@@ -10,6 +10,9 @@ test("declares durable import job authorization and line-result guards", async (
   );
   assert.match(sql, /CREATE TABLE "import_job"/);
   assert.match(sql, /CREATE TABLE "import_job_line"/);
+  assert.match(sql, /"preview_manifest" jsonb NOT NULL/);
+  assert.match(sql, /import_job_preview_manifest_check/);
+  assert.match(sql, /import_job_batch_size_check.*50000/s);
   assert.match(sql, /FORCE ROW LEVEL SECURITY/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE/);
   assert.match(sql, /import_job_line_error_check/);
