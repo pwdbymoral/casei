@@ -113,9 +113,22 @@ function downloadBlob(blob: Blob, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-function downloadErrorReport(job: ImportJob) {
+function downloadErrorReport(job: ImportJob, results: readonly ImportLineResult[] = []) {
+  const errors = [
+    ...job.errors,
+    ...results
+      .filter((result) => result.errorMessage)
+      .map((result) => ({ rowNumber: result.lineNumber, message: result.errorMessage ?? "" })),
+  ];
+  const seen = new Set<string>();
+  const uniqueErrors = errors.filter((error) => {
+    const key = `${error.rowNumber}\u001f${error.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   downloadBlob(
-    new Blob([serializeImportErrorReport(job.errors)], { type: "text/csv;charset=utf-8" }),
+    new Blob([serializeImportErrorReport(uniqueErrors)], { type: "text/csv;charset=utf-8" }),
     `casei-erros-${job.id}.csv`,
   );
 }
@@ -1147,11 +1160,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       {retryPending ? "Tentando novamente…" : "Tentar novamente"}
                     </Button>
                   ) : null}
-                  {importJob.errors.length > 0 ? (
+                  {importJob.errors.length > 0 ||
+                  importResults.some((result) => Boolean(result.errorMessage)) ? (
                     <Button
                       type="button"
                       variant="outline"
-                      onClick={() => downloadErrorReport(importJob)}
+                      onClick={() => downloadErrorReport(importJob, importResults)}
                     >
                       <DownloadIcon data-icon="inline-start" aria-hidden="true" /> Baixar relatório
                       de erros
