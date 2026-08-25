@@ -195,6 +195,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [importResults, setImportResults] = useState<readonly ImportLineResult[]>([]);
   const [importResultsStatus, setImportResultsStatus] = useState<SurfaceStatus>("idle");
   const [importResultsError, setImportResultsError] = useState<string | null>(null);
+  const [importResultsNextAfterLine, setImportResultsNextAfterLine] = useState<number | null>(null);
+  const [importResultsMorePending, setImportResultsMorePending] = useState(false);
+  const [importResultsMoreError, setImportResultsMoreError] = useState<string | null>(null);
   const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
@@ -273,23 +276,30 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       setImportResults([]);
       setImportResultsStatus("idle");
       setImportResultsError(null);
+      setImportResultsNextAfterLine(null);
+      setImportResultsMorePending(false);
+      setImportResultsMoreError(null);
       return;
     }
 
     let active = true;
     setImportResultsStatus("loading");
     setImportResultsError(null);
+    setImportResultsNextAfterLine(null);
+    setImportResultsMoreError(null);
     void adapter
       .listImportResults(workspaceId, importJob.id)
       .then((page) => {
         if (!active) return;
         setImportResults(page.items);
+        setImportResultsNextAfterLine(page.nextAfterLine);
         setImportResultsStatus("success");
       })
       .catch((error: unknown) => {
         if (!active) return;
         setImportResultsStatus(errorStatus(error));
         setImportResultsError(errorMessage(error));
+        setImportResultsNextAfterLine(null);
       });
 
     return () => {
@@ -332,6 +342,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportResults([]);
     setImportResultsStatus("idle");
     setImportResultsError(null);
+    setImportResultsNextAfterLine(null);
+    setImportResultsMorePending(false);
+    setImportResultsMoreError(null);
     importOperation.current.key = null;
     cancelOperation.current.key = null;
     retryOperation.current.key = null;
@@ -381,6 +394,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportResults([]);
     setImportResultsStatus("idle");
     setImportResultsError(null);
+    setImportResultsNextAfterLine(null);
+    setImportResultsMorePending(false);
+    setImportResultsMoreError(null);
     cancelOperation.current.key = null;
     try {
       setImportJob(await operation.promise);
@@ -427,11 +443,33 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       setImportResults([]);
       setImportResultsStatus("idle");
       setImportResultsError(null);
+      setImportResultsNextAfterLine(null);
+      setImportResultsMorePending(false);
+      setImportResultsMoreError(null);
       setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
     } finally {
       setRetryPending(false);
+    }
+  }
+
+  async function loadMoreImportResults() {
+    if (!importJob || importResultsNextAfterLine === null || importResultsMorePending) return;
+    setImportResultsMorePending(true);
+    setImportResultsMoreError(null);
+    try {
+      const page = await adapter.listImportResults(
+        workspaceId,
+        importJob.id,
+        importResultsNextAfterLine,
+      );
+      setImportResults((current) => [...current, ...page.items]);
+      setImportResultsNextAfterLine(page.nextAfterLine);
+    } catch (error) {
+      setImportResultsMoreError(errorMessage(error));
+    } finally {
+      setImportResultsMorePending(false);
     }
   }
 
@@ -590,7 +628,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   id="import-domain"
                   className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                   value={domain}
-                  disabled={!importAllowed || importPending || importJob?.status === "processing"}
+                  disabled={
+                    !importAllowed ||
+                    importPending ||
+                    importResultsMorePending ||
+                    importJob?.status === "processing"
+                  }
                   onChange={(event) => {
                     setDomain(event.target.value as typeof domain);
                     setPreview(null);
@@ -608,7 +651,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   type="file"
                   accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="min-h-11 cursor-pointer py-2"
-                  disabled={!importAllowed || importPending || importJob?.status === "processing"}
+                  disabled={
+                    !importAllowed ||
+                    importPending ||
+                    importResultsMorePending ||
+                    importJob?.status === "processing"
+                  }
                   onChange={chooseFile}
                 />
                 <FieldDescription>
@@ -626,6 +674,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     type="button"
                     variant="ghost"
                     size="sm"
+                    disabled={importResultsMorePending}
                     onClick={() => {
                       setFile(null);
                       setPreview(null);
@@ -634,6 +683,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       setImportResults([]);
                       setImportResultsStatus("idle");
                       setImportResultsError(null);
+                      setImportResultsNextAfterLine(null);
+                      setImportResultsMorePending(false);
+                      setImportResultsMoreError(null);
                       importOperation.current.key = null;
                       cancelOperation.current.key = null;
                       retryOperation.current.key = null;
@@ -978,7 +1030,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     <Button
                       type="button"
                       variant="outline"
-                      disabled={!online || retryPending}
+                      disabled={!online || retryPending || importResultsMorePending}
                       onClick={() => void retryImport()}
                     >
                       {retryPending ? (
@@ -1081,6 +1133,29 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                         Nenhum resultado detalhado foi retornado por esta aplicação.
                       </p>
                     )}
+                    {importResultsNextAfterLine !== null ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={importResultsMorePending}
+                          onClick={() => void loadMoreImportResults()}
+                        >
+                          {importResultsMorePending ? (
+                            <LoaderCircleIcon
+                              data-icon="inline-start"
+                              className="animate-spin"
+                              aria-hidden="true"
+                            />
+                          ) : null}
+                          {importResultsMorePending ? "Carregando…" : "Carregar mais linhas"}
+                        </Button>
+                        {importResultsMoreError ? (
+                          <span className="text-sm text-destructive">{importResultsMoreError}</span>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </section>
                 ) : null}
               </section>
