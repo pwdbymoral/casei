@@ -1,6 +1,6 @@
 # Plano: LOAN-001/002 IOU simples
 
-- Status: concluído
+- Status: em andamento — histórico persistente LOAN-003
 - Spec associada: [finanças](../../specs/financas.md)
 - Plano macro: [MVP Casei](mvp-casei.md)
 
@@ -53,5 +53,45 @@ RLS e ausência de contas income/expense nos eventos.
 - API cobre criação, listagem, detalhe e pagamento com idempotência/versão.
 - PostgreSQL cobre migration `0013_loans`, FKs compostas, RLS, ledger,
   auditoria, retry, excedente e concorrência.
-- UI fica deliberadamente em LOAN-003, sem inventar uma jornada visual antes
-  do contrato estabilizar.
+- A jornada visual foi adicionada em LOAN-003 depois da estabilização do
+  contrato; o histórico detalhado é carregado pela leitura persistente
+  paginada do contrato.
+
+## LOAN-003 — incremento web
+
+O incremento web foi implementado na rota `/app/loans` com:
+
+- adapter HTTP/fixture tipado para listar contratos, criar empréstimo com
+  idempotência e registrar pagamento com `If-Match`/versão;
+- resumo separado de valores a receber, a pagar e contratos em aberto;
+- cadastro curto de contraparte, principal, data e vencimento opcional;
+- confirmação de pagamento parcial ou total, atualização de saldo/status e
+  tratamento de conflito, erro, offline, permissão e espaço vazio;
+- cronograma baseado somente no vencimento informado e previsão explícita sem
+  presumir parcelas, juros ou tarifas;
+- histórico visual do contrato e dos pagamentos carregado pela leitura
+  persistente do contrato; o fixture implementa o mesmo contrato para o
+  desenvolvimento local.
+
+### Histórico persistente de pagamentos
+
+- `GET /v1/workspaces/:workspaceId/loans/:loanId/payments` retorna os pagamentos
+  persistidos em páginas com cursor opaco e assinado, ordenados por data civil e
+  ID decrescentes.
+- Serviço, rota e adapter validam contrato e workspace antes da leitura; um ID
+  pertencente a outro espaço se comporta como não encontrado.
+- A UI carrega todas as páginas do histórico real ao abrir o espaço e mantém o
+  novo pagamento na ordem civil canônica, sem duplicá-lo sob retry.
+- Testes cobrem paginação, cursor inválido, isolamento entre espaços, contrato
+  inexistente e mapeamento HTTP/fixture.
+
+Validação local desta extensão: o ciclo Red confirmou ausência de schema,
+serviço e rota; depois do Green, as suítes da API (129 testes) e web (103
+testes), typecheck de API/web/contracts e builds de API/web passaram. A rota
+`/app/loans` foi validada no navegador com fixtures após recarregamento, em
+390 px e 1440 px, sem overflow horizontal nem erro de console. Os testes
+PostgreSQL de paginação e isolamento ficam condicionados a `DATABASE_URL_TEST`
+e foram coletados, mas pulados no ambiente local sem esse serviço. A
+revalidação browser desta correção ficou indisponível porque a sessão
+Playwright compartilhada estava em uso; a ordenação retroativa foi coberta
+pela suíte unitária do adapter.

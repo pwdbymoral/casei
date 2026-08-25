@@ -4,6 +4,7 @@ import {
   createTransactionSchema,
   insightWindowQuerySchema,
   loanPaymentSchema,
+  loanPaymentViewSchema,
   payStatementSchema,
   recurrenceTransitionSchema,
   safeToSpendQuerySchema,
@@ -84,6 +85,14 @@ describe("finance contracts", () => {
     expect(loanPaymentSchema.parse({ amount: { currency: "BRL", minor: "250" } })).toEqual({
       amount: { currency: "BRL", minor: "250" },
     });
+    expect(
+      loanPaymentViewSchema.parse({
+        id: "0190f3c8-2a10-7abc-8def-1234567890ac",
+        loanId: "0190f3c8-2a10-7abc-8def-1234567890ad",
+        amount: { currency: "BRL", minor: "250" },
+        occurredOn: "2028-03-01",
+      }),
+    ).toMatchObject({ amount: { minor: "250" }, occurredOn: "2028-03-01" });
     expect(() =>
       createLoanSchema.parse({
         direction: "borrowed",

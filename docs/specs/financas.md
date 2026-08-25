@@ -131,6 +131,12 @@ Pagamentos de principal podem ser parciais ou totais. Saldo do contrato nunca fi
 
 Na API, `POST /v1/workspaces/:workspaceId/loans` cria o contrato com `Idempotency-Key`. `POST /v1/workspaces/:workspaceId/loans/:loanId/payments` exige `Idempotency-Key` e `If-Match: "v<version>"`, aceita valor positivo e data civil opcional (hoje no fuso do espaço quando omitida), e retorna o saldo/status atualizados. Cada pagamento publica somente o principal efetivamente pago. Retry reproduz a resposta sem outro evento ou movimento; concorrência usa a versão do contrato e não permite saldo negativo.
 
+`GET /v1/workspaces/:workspaceId/loans/:loanId/payments` lista o histórico persistente de
+pagamentos do contrato, ordenado por data civil decrescente e ID decrescente, com paginação por
+cursor opaco e assinado. Cada item expõe somente ID do pagamento, ID do contrato, valor/moeda e
+data civil. A leitura exige associação ativa ao espaço, valida contrato e pagamentos pelo mesmo
+`workspaceId` e nunca permite consultar um contrato ou pagamento de outro espaço.
+
 Principal concedido publica `wallet → loan receivable`; recebimento do reembolso publica `loan receivable → wallet`. Principal recebido publica `loan payable → wallet`; seu pagamento publica `wallet → loan payable`. Essas contas não são `income` nem `expense`, e portanto empréstimos não entram no resultado econômico.
 
 ### Ajuste de saldo
@@ -197,6 +203,8 @@ Todos os totais são calculados no servidor a partir de lançamentos canônicos.
 - [ ] Recorrência fixa e variável respeita janela, escopo de edição, meses curtos, pausa e idempotência.
 - [ ] Parcelas somam exatamente o total e histórico realizado não muda ao editar futuras.
 - [ ] Empréstimos alteram carteira e recebível/obrigação sem contaminar renda/despesa.
+- [ ] O histórico de pagamentos de empréstimo persiste após recarregar, pagina com cursor seguro e
+  permanece isolado por espaço.
 - [ ] Ajuste cria somente a diferença mostrada e exige motivo.
 - [ ] Testes baseados em propriedades cobrem soma de parcelas e conservação dos lançamentos.
 - [ ] Histórico de cada transação lista eventos auditáveis com cursor seguro e detalhe de

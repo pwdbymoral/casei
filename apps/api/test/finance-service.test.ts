@@ -6,9 +6,104 @@ import {
   FinanceConflictError,
   FinanceService,
 } from "../src/finance-service.js";
-import { decodeCursor } from "../src/http/cursor.js";
+import { decodeCursor, InvalidCursorError } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
+  it("paginates loan payments with a signed cursor inside the workspace", async () => {
+    const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
+    const loanId = "0190f3c8-2a10-7abc-8def-1234567890ac";
+    const client = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes("SELECT id FROM loan_contract")) {
+          expect(values?.[1]).toBeTruthy();
+          return { rows: [{ id: values?.[1] as string }] };
+        }
+        if (sql.includes("FROM loan_payment")) {
+          expect(sql).toContain("workspace_id = $1 AND loan_id = $2");
+          expect(sql).toContain("ORDER BY occurred_on DESC, id DESC");
+          expect(values).toEqual([workspaceId, loanId, 3]);
+          return {
+            rows: [
+              {
+                id: "0190f3c8-2a10-7abc-8def-1234567890b3",
+                loan_id: loanId,
+                amount_minor: "300",
+                currency_code: "BRL",
+                occurred_on: "2026-08-23",
+              },
+              {
+                id: "0190f3c8-2a10-7abc-8def-1234567890b2",
+                loan_id: loanId,
+                amount_minor: "200",
+                currency_code: "BRL",
+                occurred_on: "2026-08-22",
+              },
+              {
+                id: "0190f3c8-2a10-7abc-8def-1234567890b1",
+                loan_id: loanId,
+                amount_minor: "100",
+                currency_code: "BRL",
+                occurred_on: "2026-08-21",
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never, {
+      cursorSecret: "loan-payment-test-secret",
+    });
+
+    const page = await service.listLoanPayments(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "viewer",
+      },
+      loanId,
+      { limit: 2 },
+    );
+
+    expect(page.items.map((payment) => payment.amount.minor)).toEqual(["300", "200"]);
+    expect(page.hasMore).toBe(true);
+    const nextCursor = page.nextCursor;
+    expect(nextCursor).toBeTruthy();
+    if (!nextCursor) throw new Error("expected a next cursor");
+    expect(decodeCursor(nextCursor, "loan-payment-test-secret")).toEqual({
+      ordering: "occurred_on,id:desc",
+      position: [workspaceId, loanId, "2026-08-22", "0190f3c8-2a10-7abc-8def-1234567890b2"],
+    });
+    await expect(
+      service.listLoanPayments(
+        {
+          workspaceId,
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "viewer",
+        },
+        "0190f3c8-2a10-7abc-8def-1234567890ad",
+        { cursor: nextCursor, limit: 2 },
+      ),
+    ).rejects.toBeInstanceOf(InvalidCursorError);
+    await expect(
+      service.listLoanPayments(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ae",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "viewer",
+        },
+        loanId,
+        { cursor: nextCursor, limit: 2 },
+      ),
+    ).rejects.toBeInstanceOf(InvalidCursorError);
+  });
+
   it("turns a concurrent active category name collision into a recoverable conflict", async () => {
     const client = {
       query: vi.fn(async (sql: string) => {

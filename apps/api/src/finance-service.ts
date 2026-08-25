@@ -9,6 +9,7 @@ import {
   createTransactionSchema,
   domainIdSchema,
   loanPaymentSchema,
+  type PaginationQuery,
   recurrenceTransitionSchema,
   settleTransactionSchema,
   type TransactionListQuery,
@@ -123,6 +124,12 @@ export interface LoanPaymentView {
 export interface LoanPaymentResponse {
   loan: LoanView;
   payment: LoanPaymentView;
+}
+
+export interface LoanPaymentsPage {
+  items: LoanPaymentView[];
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
 export interface CategoryView {
@@ -317,6 +324,8 @@ type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: str
 const transactionCursorOrdering = "occurred_on,created_at,id:desc";
 type FinanceAuditCursorPosition = [occurredAt: string, id: string];
 const financeAuditCursorOrdering = "occurred_at,id:desc";
+type LoanPaymentCursorPosition = [occurredOn: string, id: string];
+const loanPaymentCursorOrdering = "occurred_on,id:desc";
 
 interface TransactionRow {
   id: string;
@@ -352,6 +361,14 @@ interface LoanRow {
   principal_event_id: string;
   status: "open" | "settled";
   version: number;
+}
+
+interface LoanPaymentRow {
+  id: string;
+  loan_id: string;
+  amount_minor: string | bigint;
+  currency_code: string;
+  occurred_on: string;
 }
 
 interface FinanceAuditRow {
@@ -651,6 +668,57 @@ export class FinanceService {
         [scope.workspaceId, boundedLimit],
       );
       return result.rows.map(toLoanView);
+    });
+  }
+
+  async listLoanPayments(
+    scope: FinanceScope,
+    loanId: string,
+    options: PaginationQuery = { limit: 50 },
+  ): Promise<LoanPaymentsPage> {
+    return this.withScopedClient(scope, async (client) => {
+      const loan = await client.query<{ id: string }>(
+        `SELECT id FROM loan_contract WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, loanId],
+      );
+      if (!loan.rows[0]) throw new FinanceNotFoundError();
+
+      const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+      const cursor = options.cursor
+        ? decodeLoanPaymentCursor(options.cursor, this.cursorSecret, scope.workspaceId, loanId)
+        : null;
+      const values: unknown[] = [scope.workspaceId, loanId];
+      const conditions = ["workspace_id = $1", "loan_id = $2"];
+      if (cursor) {
+        values.push(cursor[0], cursor[1]);
+        conditions.push(`(occurred_on < $3::date OR (occurred_on = $3::date AND id < $4::uuid))`);
+      }
+      values.push(limit + 1);
+      const result = await client.query<LoanPaymentRow>(
+        `SELECT id, loan_id, amount_minor, currency_code, occurred_on::text AS occurred_on
+           FROM loan_payment
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY occurred_on DESC, id DESC
+          LIMIT $${values.length}`,
+        values,
+      );
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+      const last = rows.at(-1);
+      return {
+        items: rows.map(toLoanPaymentView),
+        nextCursor:
+          hasMore && last
+            ? encodeCursor(
+                {
+                  ordering: loanPaymentCursorOrdering,
+                  position: [scope.workspaceId, loanId, last.occurred_on, last.id],
+                },
+                this.cursorSecret,
+              )
+            : null,
+        hasMore,
+      };
     });
   }
 
@@ -3525,6 +3593,37 @@ function decodeFinanceAuditCursor(cursor: string, secret: string): FinanceAuditC
   return [occurredAt, id];
 }
 
+function decodeLoanPaymentCursor(
+  cursor: string,
+  secret: string,
+  workspaceId: string,
+  loanId: string,
+): LoanPaymentCursorPosition {
+  const payload = decodeCursor(cursor, secret);
+  const position = payload.position;
+  if (
+    payload.ordering !== loanPaymentCursorOrdering ||
+    !Array.isArray(position) ||
+    position.length !== 4 ||
+    position.some((value) => typeof value !== "string")
+  ) {
+    throw new InvalidCursorError();
+  }
+  const [cursorWorkspaceId, cursorLoanId, occurredOn, id] = position as [
+    string,
+    string,
+    string,
+    string,
+  ];
+  if (!parseLocalDate(occurredOn).ok || !domainIdSchema.safeParse(id).success) {
+    throw new InvalidCursorError();
+  }
+  if (cursorWorkspaceId !== workspaceId || cursorLoanId !== loanId) {
+    throw new InvalidCursorError();
+  }
+  return [occurredOn, id];
+}
+
 async function setFinanceScope(client: PgPoolClient, scope: FinanceScope, applicationRole: string) {
   // Read-only helpers do not use withUnitOfWork, so they must apply the same
   // least-privilege role before setting the transaction-local RLS context.
@@ -3572,6 +3671,15 @@ function toLoanView(row: LoanRow): LoanView {
     dueOn: row.due_on,
     status: row.status,
     version: row.version,
+  };
+}
+
+function toLoanPaymentView(row: LoanPaymentRow): LoanPaymentView {
+  return {
+    id: row.id,
+    loanId: row.loan_id,
+    amount: { currency: row.currency_code, minor: row.amount_minor.toString() },
+    occurredOn: row.occurred_on,
   };
 }
 
