@@ -79,6 +79,7 @@ const quickActions = [
 type DashboardStatus = "loading" | "success" | "error" | "offline" | "permission";
 
 type DashboardData = {
+  workspaceId: string;
   financial: FinancialReadModel;
   safeToSpend: SafeToSpendView;
   commitments: TodayCommitment[];
@@ -604,6 +605,7 @@ export default function TodayPage() {
       const shoppingItems = readOptional(stockResult, "stock", "Estoque", []);
       if (!loadRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest)) return;
       const nextData: DashboardData = {
+        workspaceId,
         financial: financialResult.value,
         safeToSpend: safeToSpendResult.value,
         commitments: buildTodayCommitments({
@@ -649,24 +651,27 @@ export default function TodayPage() {
     return () => loadRequest.invalidate();
   }, [load, loadRequest, workspaceId, workspaceRequests]);
 
+  const visibleData = data?.workspaceId === workspaceId ? data : null;
+  const visibleStatus = visibleData ? status : "loading";
+
   return (
     <AsyncState
-      status={status}
-      title={status === "permission" ? "Este espaço não está disponível" : undefined}
+      status={visibleStatus}
+      title={visibleStatus === "permission" ? "Este espaço não está disponível" : undefined}
       description={
-        status === "permission"
+        visibleStatus === "permission"
           ? "Sua permissão mudou. Escolha outro espaço para continuar."
           : (error ?? undefined)
       }
       action={
-        status === "error" || status === "offline"
+        visibleStatus === "error" || visibleStatus === "offline"
           ? { label: "Tentar novamente", onClick: () => void load() }
           : undefined
       }
     >
-      {data ? (
+      {visibleData ? (
         <DashboardContent
-          data={data}
+          data={visibleData}
           hidden={hidden}
           onToggleHidden={() => setHidden((current) => !current)}
           onRetry={() => void load()}
