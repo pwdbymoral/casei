@@ -555,7 +555,7 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       input,
       requiredIdempotencyKey(context),
     );
-    return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+    return context.json(result.response, result.replayed ? 200 : 201);
   });
 
   router.get("/workspaces/:workspaceId/installments/:planId", async (context) => {

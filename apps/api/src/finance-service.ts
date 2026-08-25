@@ -2274,10 +2274,14 @@ export class FinanceService {
     });
   }
 
-  async createInstallmentPlan(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+  async createInstallmentPlan(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; response: InstallmentPlanView }> {
     assertFinanceCapability(scope, "finance.write");
     const parsed = createInstallmentPlanSchema.parse(input);
-    return this.withUnitOfWork(scope, async ({ client }) =>
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/installments`,
         key: idempotencyKey,
@@ -2368,6 +2372,10 @@ export class FinanceService {
         },
       }),
     );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as InstallmentPlanView,
+    };
   }
 
   async getInstallmentPlan(
