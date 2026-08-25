@@ -18,6 +18,19 @@ Downloads de dados domésticos usam streaming/proxy autorizado no MVP: cada requ
 
 Arquivos temporários expiram logicamente em até 24 horas e o bucket possui lifecycle de defesa em profundidade. Job de limpeza trata falhas/órfãos. Criptografia em trânsito é obrigatória em ambiente publicado; criptografia em repouso é exigida do adapter/deploy.
 
+A implementação compartilhada fica em `@casei/storage`: `ObjectStoragePort` não
+expõe URLs e `S3ObjectStorage` usa `PutObject`/`GetObject`/`HeadObject`/
+`DeleteObject` com stream, `Content-Length`, SHA-256, metadata de formato e
+expiração, `Cache-Control: no-store` e `ServerSideEncryption: AES256`. O
+adapter rejeita chaves com traversal/controle, aplica o limite padrão de 10 MB
+e o TTL máximo de 24 horas, e remove um upload parcial quando a fonte, o hash
+ou a varredura falha. `FormatFileScanPort` valida MIME, assinatura ZIP do XLSX,
+bytes NUL e tamanho; `FileScanPort` é uma injeção explícita para scanner de
+malware do deploy e o scanner de formato nunca declara um antivírus limpo.
+O pacote aceita `CASEI_OBJECT_STORAGE_*` por ambiente, credenciais são
+opcionais para permitir a cadeia padrão do SDK/IAM e um par parcial de chaves é
+rejeitado.
+
 ## Consequências
 
 - API e worker compartilham arquivos sem afinidade de instância.
