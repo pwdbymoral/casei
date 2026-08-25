@@ -1,3 +1,30 @@
+-- The import worker must discover workspaces before it has a workspace RLS
+-- context. Keep that discovery behind a narrow, read-only SECURITY DEFINER
+-- function; the worker never receives job payloads or bypasses RLS for its
+-- subsequent claim and execution transactions.
+CREATE OR REPLACE FUNCTION "app"."list_data_import_workspaces"(eligible_at timestamptz)
+RETURNS TABLE ("workspace_id" uuid)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, app
+AS $$
+  SELECT DISTINCT j.workspace_id
+    FROM public.job AS j
+   WHERE j.job_type = 'data.import'
+     AND j.job_version = 1
+     AND j.required_capability = 'import'
+     AND j.workspace_id IS NOT NULL
+     AND (
+       (j.state IN ('pending', 'failed') AND j.available_at <= eligible_at)
+       OR (j.state = 'running' AND j.lease_until <= eligible_at)
+     )
+   ORDER BY j.workspace_id;
+$$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "app"."list_data_import_workspaces"(timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION "app"."list_data_import_workspaces"(timestamptz) TO casei_app;
+--> statement-breakpoint
 CREATE TABLE "import_job" (
   "id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
   "workspace_id" uuid NOT NULL REFERENCES "workspace"("id") ON DELETE CASCADE,

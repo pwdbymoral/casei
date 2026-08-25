@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { Pool } from "@casei/database";
+import { type Pool, withUnitOfWork } from "@casei/database";
 
 import { createImportWorker, type ImportCommandPort, type ImportSource } from "./import-service.js";
 
@@ -28,17 +28,18 @@ export async function runImportWorkerOnce(
   bootstrap: ImportWorkerBootstrap,
   at = new Date(),
 ): Promise<number> {
-  const worker = createImportWorker(bootstrap);
-  const workspaces = await bootstrap.pool.query<{ workspace_id: string }>(
-    `SELECT DISTINCT workspace_id
-       FROM "job"
-      WHERE job_type = 'data.import' AND job_version = 1
-        AND (
-          (state IN ('pending', 'failed') AND available_at <= clock_timestamp())
-          OR (state = 'running' AND lease_until <= clock_timestamp())
-        )
-        AND workspace_id IS NOT NULL
-      ORDER BY workspace_id`,
+  const applicationRole = bootstrap.applicationRole ?? process.env.DATABASE_ROLE ?? "casei_app";
+  const worker = createImportWorker({ ...bootstrap, applicationRole });
+  const workspaces = await withUnitOfWork(
+    bootstrap.pool,
+    { applicationRole },
+    ({ client }) =>
+      client.query<{ workspace_id: string }>(
+        `SELECT workspace_id
+           FROM app.list_data_import_workspaces($1::timestamptz)`,
+        [at],
+      ),
+    { readOnly: true },
   );
   let processed = 0;
   for (const row of workspaces.rows) {

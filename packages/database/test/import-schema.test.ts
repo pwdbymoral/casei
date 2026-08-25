@@ -14,6 +14,9 @@ test("declares durable import job authorization and line-result guards", async (
   assert.match(sql, /import_job_preview_manifest_check/);
   assert.match(sql, /import_job_batch_size_check.*50000/s);
   assert.match(sql, /FORCE ROW LEVEL SECURITY/);
+  assert.match(sql, /list_data_import_workspaces/);
+  assert.match(sql, /SECURITY DEFINER/);
+  assert.match(sql, /REVOKE ALL ON FUNCTION/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE/);
   assert.match(sql, /import_job_line_error_check/);
 });

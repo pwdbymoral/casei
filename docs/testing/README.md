@@ -62,7 +62,7 @@ O teste `apps/api/test/identity-service.integration.test.ts` usa a mesma variáv
 
 O motor PLAN-002 usa o processo `pnpm --filter @casei/api worker:recurrence`, também separado da API. Ele agenda uma chave por espaço e data civil e executa jobs `recurrence.expand:1`; o teste `apps/api/test/recurrence.integration.test.ts` valida a janela móvel, retry, RLS, meses curtos, pausa e cancelamento auditável quando `DATABASE_URL_TEST` está disponível.
 
-O processo DATA-004 usa `pnpm --filter @casei/api worker:import`, também separado da API. O deploy deve configurar `CASEI_IMPORT_WORKER_BOOTSTRAP` apontando para um módulo que exporte `createImportWorkerBootstrap()` e injete `pool`, `source` e `commands`; o aplicativo não inventa adapters de storage/domínio. Para desenvolvimento, use `pnpm --filter @casei/api worker:import:dev` com o mesmo bootstrap.
+O processo DATA-004 usa `pnpm --filter @casei/api worker:import`, também separado da API. O deploy deve configurar `CASEI_IMPORT_WORKER_BOOTSTRAP` apontando para um módulo que exporte `createImportWorkerBootstrap()` e injete `pool`, `source` e `commands`; o aplicativo não inventa adapters de storage/domínio. A descoberta de workspaces chama `app.list_data_import_workspaces(timestamptz)` sob o role de aplicação, que retorna somente IDs elegíveis por uma função `SECURITY DEFINER` read-only; claims e lotes continuam sob RLS normal. Para desenvolvimento, use `pnpm --filter @casei/api worker:import:dev` com o mesmo bootstrap.
 
 ### Restore e retenção do espaço
 

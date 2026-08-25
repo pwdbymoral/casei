@@ -14,7 +14,9 @@ describe("DATA-004 worker entrypoint", () => {
 
     expect(source).toContain("CASEI_IMPORT_WORKER_BOOTSTRAP");
     expect(source).toContain("createImportWorkerBootstrap");
-    expect(source).toContain("job_type = 'data.import'");
+    expect(source).toContain("withUnitOfWork");
+    expect(source).toContain("list_data_import_workspaces");
+    expect(source).not.toContain('FROM "job"');
     expect(packageJson.scripts?.["worker:import"]).toBe("node dist/import-worker.js");
     expect(packageJson.scripts?.["worker:import:dev"]).toBe("tsx src/import-worker.ts");
     expect(packageJson.scripts?.build).toContain("src/import-worker.ts");
