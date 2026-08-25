@@ -185,6 +185,7 @@ export default function ReportsPage() {
   }, [load]);
 
   function updateFilters(next: Partial<ReportFilters>) {
+    if (applying) return;
     const updated = { ...filters, ...next };
     if (updated.from > updated.to) return;
     setFilters(updated);
@@ -313,6 +314,7 @@ export default function ReportsPage() {
                 id="report-from"
                 type="date"
                 value={filters.from}
+                disabled={applying}
                 onChange={(event) => updateFilters({ from: event.target.value })}
               />
             </Field>
@@ -322,6 +324,7 @@ export default function ReportsPage() {
                 id="report-to"
                 type="date"
                 value={filters.to}
+                disabled={applying}
                 onChange={(event) => updateFilters({ to: event.target.value })}
               />
             </Field>
@@ -331,6 +334,7 @@ export default function ReportsPage() {
                 id="report-kind"
                 className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 value={filters.kind}
+                disabled={applying}
                 onChange={(event) =>
                   updateFilters({ kind: event.target.value as ReportFilters["kind"] })
                 }
@@ -346,6 +350,7 @@ export default function ReportsPage() {
                 id="report-category"
                 className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 value={filters.categoryId ?? ""}
+                disabled={applying}
                 onChange={(event) => updateFilters({ categoryId: event.target.value || null })}
               >
                 <option value="">Todas</option>
