@@ -62,6 +62,7 @@ import {
   transactionKindLabel,
   transactionQueryFromSearchParams,
   type UpdateCreditCardInput,
+  walletTotalMinor,
 } from "@/lib/finance";
 import { formatMoneyMinor } from "@/lib/money";
 import type { WorkspaceRole } from "@/lib/workspaces";
@@ -222,6 +223,9 @@ function FinanceDashboard({
   const transactionCommandKey = useRef<string | null>(null);
   const transactionReverseCommandKey = useRef<string | null>(null);
   const settlementCommandKey = useRef<string | null>(null);
+  const statementPaymentCommandKey = useRef<string | null>(null);
+  const recurrenceCommandKey = useRef<string | null>(null);
+  const installmentCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
   const today = todayCivilDate();
@@ -308,6 +312,9 @@ function FinanceDashboard({
     setLoadingMoreStatementItems(false);
     transactionCommandKey.current = null;
     transactionReverseCommandKey.current = null;
+    statementPaymentCommandKey.current = null;
+    recurrenceCommandKey.current = null;
+    installmentCommandKey.current = null;
     setSaving(false);
     setUndoing(false);
     setSavingCard(false);
@@ -444,15 +451,8 @@ function FinanceDashboard({
   }, [load, timelineQuery.cursor]);
 
   const walletTotal = useMemo(
-    () =>
-      visibleTransactions.reduce((total, transaction) => {
-        if (transaction.state !== "posted" || transaction.cardId) return total;
-        const value = BigInt(transaction.amount.minor);
-        if (transaction.kind === "income") return total + value;
-        if (transaction.kind === "expense") return total - value;
-        return total;
-      }, BigInt(0)),
-    [visibleTransactions],
+    () => walletTotalMinor([...visibleTransactions, ...commitmentTransactions]),
+    [commitmentTransactions, visibleTransactions],
   );
 
   async function handleTransactionSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -599,23 +599,30 @@ function FinanceDashboard({
     setSavingRecurrence(true);
     setError(null);
     const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey = recurrenceCommandKey.current ?? `web-recurrence-${crypto.randomUUID()}`;
+    recurrenceCommandKey.current = commandKey;
     try {
-      const result = await adapter.createRecurrence(workspaceId, {
-        kind: recurrenceKind,
-        amount: { currency, minor: recurrenceAmount },
-        frequency: recurrenceFrequency,
-        interval: Number(recurrenceInterval),
-        startOn: recurrenceStartOn || today,
-        endOn: recurrenceEndOn || null,
-        maxOccurrences: null,
-        variable: recurrenceVariable,
-        estimatedAmount:
-          recurrenceVariable && estimatedAmountMinor > BigInt(0)
-            ? { currency, minor: recurrenceEstimatedAmount }
-            : null,
-        description: recurrenceDescription.trim(),
-      });
+      const result = await adapter.createRecurrence(
+        workspaceId,
+        {
+          kind: recurrenceKind,
+          amount: { currency, minor: recurrenceAmount },
+          frequency: recurrenceFrequency,
+          interval: Number(recurrenceInterval),
+          startOn: recurrenceStartOn || today,
+          endOn: recurrenceEndOn || null,
+          maxOccurrences: null,
+          variable: recurrenceVariable,
+          estimatedAmount:
+            recurrenceVariable && estimatedAmountMinor > BigInt(0)
+              ? { currency, minor: recurrenceEstimatedAmount }
+              : null,
+          description: recurrenceDescription.trim(),
+        },
+        commandKey,
+      );
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      recurrenceCommandKey.current = null;
       setShowRecurrenceForm(false);
       setNotice(`Recorrência criada com ${result.occurrences.length} ocorrência(s) inicial(is).`);
       setRecurrenceAmount("0");
@@ -623,8 +630,10 @@ function FinanceDashboard({
       setRecurrenceDescription("");
       await load();
     } catch (cause) {
-      if (workspaceRequests.isCurrent(workspaceRequest))
+      if (workspaceRequests.isCurrent(workspaceRequest)) {
+        if (!shouldRetryIdempotentCommand(cause)) recurrenceCommandKey.current = null;
         setError(cause instanceof Error ? cause.message : "Não foi possível criar a recorrência.");
+      }
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingRecurrence(false);
     }
@@ -641,22 +650,31 @@ function FinanceDashboard({
     setSavingInstallment(true);
     setError(null);
     const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey = installmentCommandKey.current ?? `web-installment-${crypto.randomUUID()}`;
+    installmentCommandKey.current = commandKey;
     try {
-      const result = await adapter.createInstallmentPlan(workspaceId, {
-        total: { currency, minor: installmentTotal },
-        count,
-        firstDueOn: installmentFirstDueOn || today,
-        description: installmentDescription.trim(),
-      });
+      const result = await adapter.createInstallmentPlan(
+        workspaceId,
+        {
+          total: { currency, minor: installmentTotal },
+          count,
+          firstDueOn: installmentFirstDueOn || today,
+          description: installmentDescription.trim(),
+        },
+        commandKey,
+      );
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      installmentCommandKey.current = null;
       setShowInstallmentForm(false);
       setNotice(`Parcelamento criado com ${result.installments.length} parcela(s).`);
       setInstallmentTotal("0");
       setInstallmentDescription("");
       await load();
     } catch (cause) {
-      if (workspaceRequests.isCurrent(workspaceRequest))
+      if (workspaceRequests.isCurrent(workspaceRequest)) {
+        if (!shouldRetryIdempotentCommand(cause)) installmentCommandKey.current = null;
         setError(cause instanceof Error ? cause.message : "Não foi possível criar o parcelamento.");
+      }
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingInstallment(false);
     }
@@ -1160,18 +1178,28 @@ function FinanceDashboard({
     setBusyStatementId(statement.id);
     setError(null);
     const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey =
+      statementPaymentCommandKey.current ?? `web-statement-payment-${crypto.randomUUID()}`;
+    statementPaymentCommandKey.current = commandKey;
     try {
-      await adapter.payStatement(workspaceId, statement, {
-        currency: statement.openAmount.currency,
-        minor: parsedAmount.toString(),
-      });
+      await adapter.payStatement(
+        workspaceId,
+        statement,
+        {
+          currency: statement.openAmount.currency,
+          minor: parsedAmount.toString(),
+        },
+        commandKey,
+      );
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      statementPaymentCommandKey.current = null;
       await load();
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setNotice("Pagamento registrado na carteira.");
       setPendingStatementPayment(null);
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      if (!shouldRetryIdempotentCommand(cause)) statementPaymentCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível pagar a fatura.");
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setBusyStatementId(null);
@@ -1244,7 +1272,7 @@ function FinanceDashboard({
               Saldo dos lançamentos carregados
             </CardDescription>
             <CardTitle className="text-3xl font-semibold tracking-tight">
-              {formatMoneyMinor(walletTotal.toString(), currency)}
+              {formatMoneyMinor(walletTotal, currency)}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-primary-foreground/80">
@@ -2065,7 +2093,13 @@ function FinanceDashboard({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showRecurrenceForm} onOpenChange={setShowRecurrenceForm}>
+      <Dialog
+        open={showRecurrenceForm}
+        onOpenChange={(open) => {
+          setShowRecurrenceForm(open);
+          if (!open && !savingRecurrence) recurrenceCommandKey.current = null;
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Nova recorrência</DialogTitle>
@@ -2192,7 +2226,13 @@ function FinanceDashboard({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showInstallmentForm} onOpenChange={setShowInstallmentForm}>
+      <Dialog
+        open={showInstallmentForm}
+        onOpenChange={(open) => {
+          setShowInstallmentForm(open);
+          if (!open && !savingInstallment) installmentCommandKey.current = null;
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Novo parcelamento</DialogTitle>
@@ -2277,8 +2317,10 @@ function FinanceDashboard({
       <Dialog
         open={pendingStatementPayment !== null}
         onOpenChange={(open) => {
-          if (!open && !payingStatement && busyStatementId === null)
+          if (!open && !payingStatement && busyStatementId === null) {
             setPendingStatementPayment(null);
+            statementPaymentCommandKey.current = null;
+          }
         }}
       >
         <DialogContent>

@@ -23,6 +23,8 @@ import {
   transactionKindLabel,
   transactionQueryFromSearchParams,
   unauthenticatedFinanceAdapter,
+  walletDeltaMinor,
+  walletTotalMinor,
 } from "./finance";
 
 afterEach(() => {
@@ -744,6 +746,102 @@ describe("finance adapter", () => {
     expect(previewInstallmentMinor("1000", 1)).toEqual([]);
   });
 
+  it("derives wallet deltas from settled amounts, including partials and invoice transfers", () => {
+    const base = {
+      currency: "BRL",
+      amount: { currency: "BRL", minor: "1000" },
+      occurredOn: "2026-08-24",
+      dueOn: null,
+      postedOn: "2026-08-24T12:00:00.000Z",
+      description: "",
+      categoryId: null,
+      version: 1,
+    } as const;
+    expect(
+      walletDeltaMinor({
+        ...base,
+        kind: "expense",
+        state: "partially_settled",
+        settledAmount: { currency: "BRL", minor: "250" },
+        cardId: null,
+        statementId: null,
+      }),
+    ).toBe("-250");
+    expect(
+      walletDeltaMinor({
+        ...base,
+        kind: "transfer",
+        state: "posted",
+        settledAmount: { currency: "BRL", minor: "400" },
+        cardId: null,
+        statementId: "statement-1",
+      }),
+    ).toBe("-400");
+    expect(
+      walletDeltaMinor({
+        ...base,
+        kind: "expense",
+        state: "posted",
+        settledAmount: { currency: "BRL", minor: "900" },
+        cardId: "card-1",
+        statementId: null,
+      }),
+    ).toBe("0");
+    expect(
+      walletDeltaMinor({
+        ...base,
+        kind: "expense",
+        state: "planned",
+        settledAmount: { currency: "BRL", minor: "0" },
+        cardId: null,
+        statementId: null,
+      }),
+    ).toBe("0");
+  });
+
+  it("sums the wallet from settled deltas without double-counting refreshed snapshots", () => {
+    const transaction = {
+      id: "expense-1",
+      kind: "expense" as const,
+      state: "partially_settled" as const,
+      cardId: null,
+      statementId: null,
+      settledAmount: { currency: "BRL", minor: "250" },
+    };
+    expect(
+      walletTotalMinor([
+        {
+          id: "income-1",
+          kind: "income",
+          state: "posted",
+          cardId: null,
+          statementId: null,
+          settledAmount: { currency: "BRL", minor: "1000" },
+        },
+        transaction,
+        {
+          id: "invoice-payment-1",
+          kind: "transfer",
+          state: "posted",
+          cardId: null,
+          statementId: "statement-1",
+          settledAmount: { currency: "BRL", minor: "400" },
+        },
+        // A page refresh may append the same transaction with its latest
+        // settled amount; Map semantics keep only that snapshot.
+        { ...transaction, settledAmount: { currency: "BRL", minor: "500" } },
+        {
+          id: "card-purchase-1",
+          kind: "expense",
+          state: "posted",
+          cardId: "card-1",
+          statementId: "statement-1",
+          settledAmount: { currency: "BRL", minor: "900" },
+        },
+      ]),
+    ).toBe("100");
+  });
+
   it("posts a commitment with the current version and effective settlement", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       expect(input).toBe("/v1/workspaces/workspace/transactions/transaction-1/post");
@@ -810,6 +908,77 @@ describe("finance adapter", () => {
     expect(total.settledAmount.minor).toBe("5000");
   });
 
+  it("persists fixture invoice payments and replays them by idempotency key", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const cardId = "019b5d9e-3c12-7a10-8d47-7b5b5dd7a210";
+    await adapter.createTransaction(workspaceId, {
+      kind: "expense",
+      amount: { currency: "BRL", minor: "3000" },
+      cardId,
+      description: "Compra no cartão",
+    });
+    const statement = (await adapter.listStatements(workspaceId))[0];
+    expect(statement?.openAmount.minor).toBe("3000");
+    const first = await adapter.payStatement(
+      workspaceId,
+      statement as NonNullable<typeof statement>,
+      { currency: "BRL", minor: "1200" },
+      "fixture-payment-001",
+    );
+    const replay = await adapter.payStatement(
+      workspaceId,
+      statement as NonNullable<typeof statement>,
+      { currency: "BRL", minor: "1200" },
+      "fixture-payment-001",
+    );
+    expect(replay).toEqual(first);
+    const transactions = await adapter.listTransactions(workspaceId, { limit: 100 });
+    const payment = transactions.items.find(
+      (transaction) => transaction.id === first.transactionId,
+    );
+    expect(payment).toMatchObject({ kind: "transfer", statementId: statement?.id });
+    expect(payment && walletDeltaMinor(payment)).toBe("-1200");
+    expect(
+      transactions.items.filter((transaction) => transaction.statementId === statement?.id),
+    ).toHaveLength(2);
+  });
+
+  it("persists fixture recurrence and installment plans for idempotent retries", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const recurrenceInput = {
+      kind: "expense" as const,
+      amount: { currency: "BRL", minor: "1000" },
+      frequency: "monthly" as const,
+      interval: 1,
+      startOn: "2026-08-24",
+      variable: false,
+    };
+    const recurrence = await adapter.createRecurrence(
+      "fixture-plans",
+      recurrenceInput,
+      "fixture-recurrence-001",
+    );
+    await expect(
+      adapter.createRecurrence("fixture-plans", recurrenceInput, "fixture-recurrence-001"),
+    ).resolves.toEqual(recurrence);
+    const installmentInput = {
+      total: { currency: "BRL", minor: "1001" },
+      count: 3,
+      firstDueOn: "2026-08-24",
+    };
+    const plan = await adapter.createInstallmentPlan(
+      "fixture-plans",
+      installmentInput,
+      "fixture-installment-001",
+    );
+    await expect(
+      adapter.createInstallmentPlan("fixture-plans", installmentInput, "fixture-installment-001"),
+    ).resolves.toEqual(plan);
+    expect(plan.installments.map((item) => item.amount.minor)).toEqual(["334", "334", "333"]);
+    expect(plan.installments).toHaveLength(3);
+  });
+
   it("sends the requested partial invoice payment without reclassifying it", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       expect(input).toBe("/v1/workspaces/workspace/statements/statement-1/payments");
@@ -841,7 +1010,111 @@ describe("finance adapter", () => {
           version: 1,
         },
         { currency: "BRL", minor: "1200" },
+        "statement-payment-001",
       ),
     ).resolves.toMatchObject({ amount: { minor: "1200" } });
+  });
+
+  it("reuses invoice payment keys across retryable failures", async () => {
+    let attempts = 0;
+    const keys: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempts += 1;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (attempts === 1) throw new TypeError("network interrupted");
+      return Response.json({
+        statementId: "statement-1",
+        transactionId: "payment-1",
+        amount: { currency: "BRL", minor: "1200" },
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const statement = {
+      id: "statement-1",
+      workspaceId: "workspace",
+      cardId: "card-1",
+      periodStart: "2026-08-01",
+      closingOn: "2026-08-10",
+      dueOn: "2026-08-17",
+      state: "closed" as const,
+      total: { currency: "BRL", minor: "3000" },
+      paid: { currency: "BRL", minor: "0" },
+      openAmount: { currency: "BRL", minor: "3000" },
+      version: 1,
+    };
+    await expect(
+      adapter.payStatement(
+        "workspace",
+        statement,
+        { currency: "BRL", minor: "1200" },
+        "statement-payment-retry",
+      ),
+    ).rejects.toThrow("network interrupted");
+    await expect(
+      adapter.payStatement(
+        "workspace",
+        statement,
+        { currency: "BRL", minor: "1200" },
+        "statement-payment-retry",
+      ),
+    ).resolves.toMatchObject({ transactionId: "payment-1" });
+    expect(keys).toEqual(["statement-payment-retry", "statement-payment-retry"]);
+  });
+
+  it("reuses recurrence and installment keys across retryable failures", async () => {
+    const keysByPath = new Map<string, string[]>();
+    const attemptsByPath = new Map<string, number>();
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const path = String(input);
+      const attempts = (attemptsByPath.get(path) ?? 0) + 1;
+      attemptsByPath.set(path, attempts);
+      const keys = keysByPath.get(path) ?? [];
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      keysByPath.set(path, keys);
+      if (attempts === 1)
+        return Response.json({ error: { message: "temporarily unavailable" } }, { status: 503 });
+      if (path.endsWith("/recurrences"))
+        return Response.json({ id: "recurrence-1", occurrences: [] });
+      return Response.json({
+        id: "installment-1",
+        total: { currency: "BRL", minor: "1000" },
+        count: 2,
+        installments: [],
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const recurrence = {
+      kind: "expense" as const,
+      amount: { currency: "BRL", minor: "1000" },
+      frequency: "monthly" as const,
+      interval: 1,
+      startOn: "2026-08-24",
+      variable: false,
+    };
+    const installment = {
+      total: { currency: "BRL", minor: "1000" },
+      count: 2,
+      firstDueOn: "2026-08-24",
+    };
+    await expect(
+      adapter.createRecurrence("workspace", recurrence, "recurrence-retry"),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      adapter.createRecurrence("workspace", recurrence, "recurrence-retry"),
+    ).resolves.toMatchObject({ id: "recurrence-1" });
+    await expect(
+      adapter.createInstallmentPlan("workspace", installment, "installment-retry"),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      adapter.createInstallmentPlan("workspace", installment, "installment-retry"),
+    ).resolves.toMatchObject({ id: "installment-1" });
+    expect(keysByPath.get("/v1/workspaces/workspace/recurrences")).toEqual([
+      "recurrence-retry",
+      "recurrence-retry",
+    ]);
+    expect(keysByPath.get("/v1/workspaces/workspace/installments")).toEqual([
+      "installment-retry",
+      "installment-retry",
+    ]);
   });
 });
