@@ -180,6 +180,103 @@ describe("finance adapter", () => {
     expect(fetch).toHaveBeenCalledWith("/v1/workspaces/workspace/transactions", expect.any(Object));
   });
 
+  it("previews and confirms a wallet adjustment with the previewed version", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      if (String(input).endsWith("/preview")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          observedBalance: { currency: "BRL", minor: "750" },
+        });
+        return Response.json({
+          wallet: {
+            workspaceId: "workspace",
+            balance: { currency: "BRL", minor: "1000" },
+            version: 3,
+          },
+          observedBalance: { currency: "BRL", minor: "750" },
+          difference: { currency: "BRL", minor: "-250" },
+        });
+      }
+      expect(input).toBe("/v1/workspaces/workspace/wallet/adjustments");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v3"');
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("wallet-command-001");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        observedBalance: { currency: "BRL", minor: "750" },
+        reason: "Dinheiro contado",
+      });
+      return Response.json({
+        wallet: {
+          workspaceId: "workspace",
+          balance: { currency: "BRL", minor: "750" },
+          version: 4,
+        },
+        observedBalance: { currency: "BRL", minor: "750" },
+        difference: { currency: "BRL", minor: "-250" },
+        transaction: { id: "adjustment-1", kind: "adjustment" },
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const preview = await adapter.previewWalletAdjustment("workspace", {
+      currency: "BRL",
+      minor: "750",
+    });
+    expect(preview.difference.minor).toBe("-250");
+    await expect(
+      adapter.adjustWallet(
+        "workspace",
+        preview.wallet,
+        {
+          observedBalance: preview.observedBalance,
+          reason: "Dinheiro contado",
+        },
+        "wallet-command-001",
+      ),
+    ).resolves.toMatchObject({ wallet: { balance: { minor: "750" }, version: 4 } });
+  });
+
+  it("keeps fixture wallet adjustments isolated and idempotent", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "wallet-fixture-workspace";
+    const preview = await adapter.previewWalletAdjustment(workspaceId, {
+      currency: "BRL",
+      minor: "-250",
+    });
+    expect(preview).toMatchObject({
+      wallet: { balance: { minor: "0" }, version: 0 },
+      difference: { minor: "-250" },
+    });
+    const input = {
+      observedBalance: preview.observedBalance,
+      reason: "Conferência inicial",
+    };
+    const adjusted = await adapter.adjustWallet(
+      workspaceId,
+      preview.wallet,
+      input,
+      "fixture-wallet-command",
+    );
+    const replay = await adapter.adjustWallet(
+      workspaceId,
+      preview.wallet,
+      input,
+      "fixture-wallet-command",
+    );
+    expect(replay).toEqual(adjusted);
+    await expect(adapter.getWallet(workspaceId)).resolves.toEqual({
+      workspaceId,
+      balance: { currency: "BRL", minor: "-250" },
+      version: 1,
+    });
+    await expect(
+      adapter.adjustWallet(workspaceId, preview.wallet, input, "fixture-wallet-command-stale"),
+    ).rejects.toMatchObject({ status: 412, currentVersion: 1 });
+    await expect(adapter.getWallet("another-wallet-fixture-workspace")).resolves.toMatchObject({
+      balance: { minor: "0" },
+      version: 0,
+    });
+  });
+
   it("uses If-Match and explicit confirmation for category maintenance", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       if (String(input).endsWith("/categories/category-1")) {

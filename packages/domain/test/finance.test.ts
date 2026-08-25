@@ -7,6 +7,7 @@ import {
   canonicalLoanPaymentPostings,
   canonicalLoanPrincipalPostings,
   canonicalTransactionPostings,
+  canonicalWalletAdjustmentPostings,
   distributeInstallments,
   generateRecurrenceDates,
   generateRecurrenceDatesUntil,
@@ -122,6 +123,36 @@ describe("financial domain", () => {
     expect(payment.some((entry) => entry.accountId === "expense")).toBe(false);
     assertBalancedLedgerEvent(purchase);
     assertBalancedLedgerEvent(payment);
+  });
+
+  it("reconciles a wallet with a signed delta without income or expense", () => {
+    const positive = canonicalWalletAdjustmentPostings({
+      delta: brl(350n),
+      accounts: { wallet: "wallet", adjustment: "adjustment" },
+    });
+    const negative = canonicalWalletAdjustmentPostings({
+      delta: brl(-125n),
+      accounts: { wallet: "wallet", adjustment: "adjustment" },
+    });
+
+    expect(positive.map((entry) => [entry.accountId, entry.amount.minor])).toEqual([
+      ["wallet", 350n],
+      ["adjustment", -350n],
+    ]);
+    expect(negative.map((entry) => [entry.accountId, entry.amount.minor])).toEqual([
+      ["wallet", -125n],
+      ["adjustment", 125n],
+    ]);
+    expect([...positive, ...negative].some((entry) => entry.accountId === "income")).toBe(false);
+    expect([...positive, ...negative].some((entry) => entry.accountId === "expense")).toBe(false);
+    assertBalancedLedgerEvent(positive);
+    assertBalancedLedgerEvent(negative);
+    expect(() =>
+      canonicalWalletAdjustmentPostings({
+        delta: brl(0n),
+        accounts: { wallet: "wallet", adjustment: "adjustment" },
+      }),
+    ).toThrow(/diferença/);
   });
 
   it("distributes installments exactly, with deterministic cents", () => {

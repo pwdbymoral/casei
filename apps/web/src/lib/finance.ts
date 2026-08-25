@@ -2,6 +2,19 @@ import { configuredApiOrigin } from "./api-origin";
 import type { WorkspaceRole } from "./workspaces";
 
 export type Money = { currency: string; minor: string };
+export type Wallet = {
+  workspaceId: string;
+  balance: Money;
+  version: number;
+};
+export type WalletAdjustmentPreview = {
+  wallet: Wallet;
+  observedBalance: Money;
+  difference: Money;
+};
+export type WalletAdjustmentResult = WalletAdjustmentPreview & {
+  transaction: Transaction;
+};
 export type Transaction = {
   id: string;
   workspaceId: string;
@@ -360,6 +373,17 @@ export type SettlementInput = {
 export type UpdateCategoryInput = { name?: string; kind?: Category["kind"] };
 
 export type FinanceAdapter = {
+  getWallet(workspaceId: string): Promise<Wallet>;
+  previewWalletAdjustment(
+    workspaceId: string,
+    observedBalance: Money,
+  ): Promise<WalletAdjustmentPreview>;
+  adjustWallet(
+    workspaceId: string,
+    wallet: Wallet,
+    input: { observedBalance: Money; reason: string },
+    idempotencyKey?: string,
+  ): Promise<WalletAdjustmentResult>;
   listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
   getTransaction(workspaceId: string, transactionId: string): Promise<Transaction>;
   listTransactionAudit(
@@ -462,11 +486,9 @@ export type FinanceAdapter = {
 };
 
 /**
- * Reads every page for an unfiltered client-side read model. The UI uses this
- * only for wallet/commitment facts until the API exposes an aggregate balance
- * endpoint; keeping the cursor loop here prevents timeline filters from
- * changing the wallet total and ensures commitments beyond the first page are
- * not silently omitted.
+ * Reads every page for an unfiltered client-side commitment model. The wallet
+ * has its own canonical aggregate endpoint; this cursor loop ensures planned
+ * commitments beyond the first timeline page are not silently omitted.
  */
 export async function listAllTransactions(
   adapter: FinanceAdapter,
@@ -512,6 +534,9 @@ const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> 
 
 /** Safe default for environments without an explicit authenticated API origin. */
 export const unauthenticatedFinanceAdapter: FinanceAdapter = {
+  getWallet: unavailableFinanceOperation,
+  previewWalletAdjustment: unavailableFinanceOperation,
+  adjustWallet: unavailableFinanceOperation,
   listTransactions: unavailableFinanceOperation,
   getTransaction: unavailableFinanceOperation,
   listTransactionAudit: unavailableFinanceOperation,
@@ -582,6 +607,28 @@ export function createHttpFinanceAdapter(
   const list = async <T>(path: string) => (await listPage<T>(path)).items;
 
   return {
+    getWallet: (workspaceId) =>
+      call<Wallet>(`/workspaces/${encodeURIComponent(workspaceId)}/wallet`),
+    previewWalletAdjustment: (workspaceId, observedBalance) =>
+      call<WalletAdjustmentPreview>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/wallet/adjustments/preview`,
+        {
+          method: "POST",
+          body: JSON.stringify({ observedBalance }),
+        },
+      ),
+    adjustWallet: (workspaceId, wallet, input, commandKey) =>
+      call<WalletAdjustmentResult>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/wallet/adjustments`,
+        {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${wallet.version}"`,
+          },
+          body: JSON.stringify(input),
+        },
+      ),
     listTransactions: (workspaceId, query = {}) => {
       const params = new URLSearchParams();
       if (query.cursor) params.set("cursor", query.cursor);
@@ -782,6 +829,9 @@ function fixtureId(seed: number): string {
 export function createFixtureFinanceAdapter(): FinanceAdapter {
   type FixtureWorkspaceState = {
     currency: string | null;
+    walletVersion: number;
+    walletAdjustmentDeltas: Map<string, bigint>;
+    walletAdjustmentCommands: Map<string, { fingerprint: string; result: WalletAdjustmentResult }>;
     transactions: Transaction[];
     categories: Category[];
     cards: CreditCard[];
@@ -883,6 +933,9 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       : [];
     return {
       currency,
+      walletVersion: 0,
+      walletAdjustmentDeltas: new Map(),
+      walletAdjustmentCommands: new Map(),
       transactions: [],
       categories: [],
       cards,
@@ -912,7 +965,122 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     workspaceStates.set(workspaceId, created);
     return created;
   };
+  const fixtureWallet = (workspaceId: string): Wallet => {
+    const state = stateFor(workspaceId);
+    const transactionBalance = BigInt(walletTotalMinor(state.transactions));
+    const adjustmentBalance = [...state.walletAdjustmentDeltas.values()].reduce(
+      (total, delta) => total + delta,
+      BigInt(0),
+    );
+    return {
+      workspaceId,
+      balance: {
+        currency: state.currency ?? "BRL",
+        minor: (transactionBalance + adjustmentBalance).toString(),
+      },
+      version: state.walletVersion,
+    };
+  };
   return {
+    getWallet: async (workspaceId) => fixtureWallet(workspaceId),
+    previewWalletAdjustment: async (workspaceId, observedBalance) => {
+      const wallet = fixtureWallet(workspaceId);
+      if (observedBalance.currency !== wallet.balance.currency) {
+        throw new FinanceAdapterError("A moeda do saldo observado difere da carteira.", 409);
+      }
+      return {
+        wallet,
+        observedBalance,
+        difference: {
+          currency: wallet.balance.currency,
+          minor: (BigInt(observedBalance.minor) - BigInt(wallet.balance.minor)).toString(),
+        },
+      };
+    },
+    adjustWallet: async (workspaceId, expectedWallet, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const fingerprint = JSON.stringify({ expectedWallet, input });
+      if (commandKey) {
+        const previous = state.walletAdjustmentCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro ajuste.", 409);
+          }
+          return previous.result;
+        }
+      }
+      const wallet = fixtureWallet(workspaceId);
+      if (wallet.version !== expectedWallet.version) {
+        throw new FinanceAdapterError(
+          "A carteira foi alterada. Confira o saldo novamente.",
+          412,
+          wallet.version,
+        );
+      }
+      if (input.observedBalance.currency !== wallet.balance.currency) {
+        throw new FinanceAdapterError("A moeda do saldo observado difere da carteira.", 409);
+      }
+      if (!input.reason.trim()) {
+        throw new FinanceAdapterError("Informe o motivo do ajuste.", 422);
+      }
+      const difference = BigInt(input.observedBalance.minor) - BigInt(wallet.balance.minor);
+      if (difference === BigInt(0)) {
+        throw new FinanceAdapterError("O saldo observado já confere com a carteira.", 409);
+      }
+      const amount = difference < BigInt(0) ? -difference : difference;
+      const transaction: Transaction = {
+        id: fixtureId(state.transactions.length + 1),
+        workspaceId,
+        kind: "adjustment",
+        state: "posted",
+        amount: { currency: wallet.balance.currency, minor: amount.toString() },
+        settledAmount: { currency: wallet.balance.currency, minor: amount.toString() },
+        occurredOn: new Date().toISOString().slice(0, 10),
+        dueOn: null,
+        postedOn: new Date().toISOString(),
+        description: "Ajuste de saldo",
+        categoryId: null,
+        cardId: null,
+        statementId: null,
+        version: 0,
+      };
+      state.transactions.unshift(transaction);
+      state.walletAdjustmentDeltas.set(transaction.id, difference);
+      state.walletVersion += 1;
+      const result: WalletAdjustmentResult = {
+        wallet: fixtureWallet(workspaceId),
+        observedBalance: input.observedBalance,
+        difference: { currency: wallet.balance.currency, minor: difference.toString() },
+        transaction,
+      };
+      const event: FinanceAuditEvent = {
+        id: fixtureId(80 + state.transactionAudit.size),
+        transactionId: transaction.id,
+        category: "finance",
+        action: "wallet.adjusted",
+        actorId: "fixture-user",
+        occurredAt: new Date().toISOString(),
+        origin: "fixture",
+        correlationId: "fixture-correlation",
+        result: "success",
+        reason: input.reason.trim(),
+        before: {
+          kind: "adjustment",
+          state: "posted",
+          version: transaction.version,
+          walletVersion: expectedWallet.version,
+        },
+        after: {
+          kind: "adjustment",
+          state: "posted",
+          version: transaction.version,
+          walletVersion: state.walletVersion,
+        },
+      };
+      state.transactionAudit.set(transaction.id, [event]);
+      if (commandKey) state.walletAdjustmentCommands.set(commandKey, { fingerprint, result });
+      return result;
+    },
     listTransactions: async (workspaceId, query = {}) => {
       const state = stateFor(workspaceId);
       const filtered = state.transactions.filter((transaction) => {

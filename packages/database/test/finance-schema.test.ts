@@ -54,6 +54,22 @@ if (!adminUrl) {
            RETURNING id`,
           [workspaceId],
         );
+        const draftEvent = await client.query<{ id: string }>(
+          `INSERT INTO ledger_event (workspace_id, event_type, currency_code, status, occurred_on)
+           VALUES ($1, 'test.draft.v1', 'BRL', 'draft', '2026-08-23') RETURNING id`,
+          [workspaceId],
+        );
+        assert.ok(draftEvent.rows[0]?.id);
+        await client.query(
+          `INSERT INTO ledger_entry (workspace_id, event_id, account_id, currency_code, amount_minor)
+           VALUES ($1, $2, $3, 'BRL', 50), ($1, $2, $4, 'BRL', -50)`,
+          [workspaceId, draftEvent.rows[0]?.id, accounts.rows[0]?.id, accounts.rows[1]?.id],
+        );
+        const afterDraft = await client.query<{ version: number }>(
+          `SELECT version FROM financial_account WHERE workspace_id = $1 AND kind = 'wallet'`,
+          [workspaceId],
+        );
+        assert.equal(afterDraft.rows[0]?.version, 0);
         const event = await client.query<{ id: string }>(
           `INSERT INTO ledger_event (workspace_id, event_type, currency_code, status, occurred_on, published_at)
            VALUES ($1, 'test.published.v1', 'BRL', 'published', '2026-08-23', now()) RETURNING id`,
@@ -65,6 +81,11 @@ if (!adminUrl) {
            VALUES ($1, $2, $3, 'BRL', 100), ($1, $2, $4, 'BRL', -100)`,
           [workspaceId, event.rows[0]?.id, accounts.rows[0]?.id, accounts.rows[1]?.id],
         );
+        const afterPublished = await client.query<{ version: number }>(
+          `SELECT version FROM financial_account WHERE workspace_id = $1 AND kind = 'wallet'`,
+          [workspaceId],
+        );
+        assert.equal(afterPublished.rows[0]?.version, 1);
         await client.query("COMMIT");
         // The first context was transaction-local. Re-establish the scope for
         // the post-commit negative checks so RLS does not turn the UPDATE into

@@ -10,9 +10,11 @@ export function formatMoneyMinor(minor: string, currency = "BRL", locale = "pt-B
 }
 
 /** Converts localized typed/pasted money into the canonical minor-unit string. */
-export function parseMoneyInput(input: string): string {
+export function parseMoneyInput(input: string, allowNegative = false): string {
+  const negative = allowNegative && /[-−]/.test(input);
   const digits = input.replace(/\D/g, "").slice(0, MAX_MINOR_DIGITS);
-  return digits.replace(/^0+(?=\d)/, "") || "0";
+  const canonical = digits.replace(/^0+(?=\d)/, "") || "0";
+  return negative && canonical !== "0" ? `-${canonical}` : canonical;
 }
 
 /** Finds the visual caret location after reformatting while preserving digit intent. */

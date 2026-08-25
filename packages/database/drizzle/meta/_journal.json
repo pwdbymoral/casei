@@ -120,6 +120,13 @@
       "when": 1787576000000,
       "tag": "0016_loan_reference_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787579600000,
+      "tag": "0017_wallet_adjustment",
+      "breakpoints": true
     }
   ]
 }

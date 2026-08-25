@@ -12,6 +12,8 @@ import {
   transactionListQuerySchema,
   updateCreditCardSchema,
   updateTransactionSchema,
+  walletAdjustmentInputSchema,
+  walletAdjustmentPreviewInputSchema,
 } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 
@@ -173,5 +175,33 @@ describe("finance contracts", () => {
     expect(() => updateCreditCardSchema.parse({ limit: { currency: "BRL", minor: "-1" } })).toThrow(
       "greater than or equal to zero",
     );
+  });
+
+  it("accepts a signed observed wallet balance and requires an adjustment reason", () => {
+    expect(
+      walletAdjustmentPreviewInputSchema.parse({
+        observedBalance: { currency: "BRL", minor: "-250" },
+      }),
+    ).toEqual({ observedBalance: { currency: "BRL", minor: "-250" } });
+    expect(() =>
+      walletAdjustmentPreviewInputSchema.parse({
+        observedBalance: { currency: "BRL", minor: "-1000000000000000" },
+      }),
+    ).toThrow("minor is outside the supported range");
+    expect(() =>
+      walletAdjustmentInputSchema.parse({
+        observedBalance: { currency: "BRL", minor: "1000" },
+        reason: "   ",
+      }),
+    ).toThrow();
+    expect(
+      walletAdjustmentInputSchema.parse({
+        observedBalance: { currency: "BRL", minor: "1000" },
+        reason: "Conferência do dinheiro disponível",
+      }),
+    ).toEqual({
+      observedBalance: { currency: "BRL", minor: "1000" },
+      reason: "Conferência do dinheiro disponível",
+    });
   });
 });

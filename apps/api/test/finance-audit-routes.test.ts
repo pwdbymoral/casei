@@ -33,13 +33,22 @@ describe("finance audit routes", () => {
   it("authenticates and returns list/detail envelopes", async () => {
     const service = {
       listTransactionAudit: async () => ({
-        items: [{ id: auditId, transactionId }],
+        items: [
+          {
+            id: auditId,
+            transactionId,
+            before: { kind: "adjustment", version: 0, walletVersion: 3 },
+            after: { kind: "adjustment", version: 0, walletVersion: 4 },
+          },
+        ],
         nextCursor: "signed-cursor",
         hasMore: true,
       }),
       getTransactionAudit: async () => ({
         id: auditId,
         transactionId,
+        before: { kind: "adjustment", version: 0, walletVersion: 3 },
+        after: { kind: "adjustment", version: 0, walletVersion: 4 },
         consequences: { ledgerEvents: [] },
       }),
     } as unknown as FinanceService;
@@ -50,7 +59,14 @@ describe("finance audit routes", () => {
     );
     expect(listResponse.status).toBe(200);
     await expect(listResponse.json()).resolves.toEqual({
-      items: [{ id: auditId, transactionId }],
+      items: [
+        {
+          id: auditId,
+          transactionId,
+          before: { kind: "adjustment", version: 0, walletVersion: 3 },
+          after: { kind: "adjustment", version: 0, walletVersion: 4 },
+        },
+      ],
       page: { nextCursor: "signed-cursor", hasMore: true },
     });
 
@@ -61,6 +77,8 @@ describe("finance audit routes", () => {
     await expect(detailResponse.json()).resolves.toEqual({
       id: auditId,
       transactionId,
+      before: { kind: "adjustment", version: 0, walletVersion: 3 },
+      after: { kind: "adjustment", version: 0, walletVersion: 4 },
       consequences: { ledgerEvents: [] },
     });
   });

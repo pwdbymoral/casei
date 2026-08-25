@@ -16,6 +16,8 @@ import {
   updateCategorySchema,
   updateCreditCardSchema,
   updateTransactionSchema,
+  walletAdjustmentInputSchema,
+  walletAdjustmentPreviewInputSchema,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
 import {
@@ -35,6 +37,7 @@ import {
   canonicalLoanPaymentPostings,
   canonicalLoanPrincipalPostings,
   canonicalTransactionPostings,
+  canonicalWalletAdjustmentPostings,
   distributeInstallments,
   fixedClock,
   generateRecurrenceDates,
@@ -79,6 +82,22 @@ export interface TransactionView {
   cardId: string | null;
   statementId: string | null;
   version: number;
+}
+
+export interface WalletView {
+  workspaceId: string;
+  balance: { currency: string; minor: string };
+  version: number;
+}
+
+export interface WalletAdjustmentPreviewView {
+  wallet: WalletView;
+  observedBalance: { currency: string; minor: string };
+  difference: { currency: string; minor: string };
+}
+
+export interface WalletAdjustmentResultView extends WalletAdjustmentPreviewView {
+  transaction: TransactionView;
 }
 
 export interface LoanView {
@@ -294,6 +313,11 @@ export function calculateSettlement({
     state: nextSettledMinor === plannedMinor ? "posted" : "partially_settled",
   };
 }
+
+/** Canonical signed delta from the ledger balance to what the user observed. */
+export function calculateWalletAdjustment(calculatedMinor: bigint, observedMinor: bigint): bigint {
+  return observedMinor - calculatedMinor;
+}
 type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const statementItemsCursorOrdering = "occurred_on,created_at,id";
 type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: string];
@@ -379,6 +403,165 @@ export class FinanceService {
     }
     this.cursorSecret = cursorSecret ?? "development-only-cursor-secret";
     this.clock = options.clock ?? systemClock;
+  }
+
+  async getWallet(scope: FinanceScope): Promise<WalletView> {
+    return this.withUnitOfWork(scope, async ({ client }) => {
+      await materializeInitialWalletBalance(client, {
+        workspaceId: scope.workspaceId,
+        actorId: null,
+        correlationId: scope.correlationId,
+        origin: "system",
+        now: this.clock.now(),
+      });
+      return this.readWallet(client, scope.workspaceId, "share");
+    });
+  }
+
+  async previewWalletAdjustment(
+    scope: FinanceScope,
+    input: unknown,
+  ): Promise<WalletAdjustmentPreviewView> {
+    const parsed = walletAdjustmentPreviewInputSchema.parse(input);
+    return this.withUnitOfWork(scope, async ({ client }) => {
+      await materializeInitialWalletBalance(client, {
+        workspaceId: scope.workspaceId,
+        actorId: null,
+        correlationId: scope.correlationId,
+        origin: "system",
+        now: this.clock.now(),
+      });
+      const wallet = await this.readWallet(client, scope.workspaceId, "share");
+      if (parsed.observedBalance.currency !== wallet.balance.currency) {
+        throw new FinanceConflictError("A moeda do saldo observado difere da carteira.");
+      }
+      const difference = calculateWalletAdjustment(
+        BigInt(wallet.balance.minor),
+        BigInt(parsed.observedBalance.minor),
+      );
+      return {
+        wallet,
+        observedBalance: parsed.observedBalance,
+        difference: { currency: wallet.balance.currency, minor: difference.toString() },
+      };
+    });
+  }
+
+  async adjustWallet(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; adjustment: WalletAdjustmentResultView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = walletAdjustmentInputSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/wallet/adjustments`,
+        key: idempotencyKey,
+        request: { expectedVersion, ...parsed },
+        execute: async () => {
+          await materializeInitialWalletBalance(client, {
+            workspaceId: scope.workspaceId,
+            actorId: null,
+            correlationId: scope.correlationId,
+            origin: "system",
+            now: this.clock.now(),
+          });
+          const wallet = await this.readWallet(client, scope.workspaceId, "update");
+          if (wallet.version !== expectedVersion) throw new VersionConflictError(wallet.version);
+          if (parsed.observedBalance.currency !== wallet.balance.currency) {
+            throw new FinanceConflictError("A moeda do saldo observado difere da carteira.");
+          }
+          const differenceMinor = calculateWalletAdjustment(
+            BigInt(wallet.balance.minor),
+            BigInt(parsed.observedBalance.minor),
+          );
+          if (differenceMinor === 0n) {
+            throw new FinanceConflictError("O saldo observado já confere com a carteira.");
+          }
+          const occurredOn = await this.workspaceToday(client, scope.workspaceId);
+          const amountMinor = differenceMinor < 0n ? -differenceMinor : differenceMinor;
+          const inserted = await client.query<TransactionRow>(
+            `INSERT INTO finance_transaction
+              (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code,
+               occurred_on, due_on, posted_on, cash_settled_on, description, category_id, card_id,
+               recurrence_id, installment_plan_id)
+             VALUES ($1, 'adjustment', 'posted', 'wallet', $2, $2, $3, $4, NULL, now(), now(),
+                     'Ajuste de saldo', NULL, NULL, NULL, NULL)
+             RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                       occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
+                       description, category_id, card_id,
+                       statement_id, recurrence_id, installment_plan_id, version`,
+            [scope.workspaceId, amountMinor, wallet.balance.currency, occurredOn],
+          );
+          const transactionRow = inserted.rows[0];
+          if (!transactionRow) throw new Error("wallet adjustment transaction insert failed");
+          const accounts = await this.walletAdjustmentAccounts(
+            client,
+            scope.workspaceId,
+            wallet.balance.currency,
+          );
+          const postings = canonicalWalletAdjustmentPostings({
+            delta: Money.fromTrusted(differenceMinor, wallet.balance.currency as never),
+            accounts,
+          });
+          await this.publishEvent(
+            client,
+            scope,
+            transactionRow.id,
+            "wallet.adjusted.v1",
+            wallet.balance.currency,
+            postings.map((posting) => ({
+              accountId: posting.accountId,
+              amount: posting.amount.minor,
+            })),
+            occurredOn,
+          );
+          const nextWallet = await this.readWallet(client, scope.workspaceId, "update");
+          await client.query(
+            `INSERT INTO audit_event
+              (category, action, actor_id, workspace_id, target_type, target_id, origin,
+               correlation_id, result, reason, before_redacted, after_redacted)
+             VALUES ('finance', 'wallet.adjusted', $1, $2, 'finance_transaction', $3, 'api', $4,
+                     'success', $5, $6::jsonb, $7::jsonb)`,
+            [
+              scope.actorId,
+              scope.workspaceId,
+              transactionRow.id,
+              scope.correlationId,
+              parsed.reason,
+              JSON.stringify({
+                kind: "adjustment",
+                state: "posted",
+                version: transactionRow.version,
+                walletVersion: wallet.version,
+              }),
+              JSON.stringify({
+                kind: "adjustment",
+                state: "posted",
+                version: transactionRow.version,
+                walletVersion: nextWallet.version,
+              }),
+            ],
+          );
+          const adjustment: WalletAdjustmentResultView = {
+            wallet: nextWallet,
+            observedBalance: parsed.observedBalance,
+            difference: {
+              currency: wallet.balance.currency,
+              minor: differenceMinor.toString(),
+            },
+            transaction: toTransactionView(transactionRow),
+          };
+          return { statusCode: 201, response: adjustment as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      adjustment: result.response as unknown as WalletAdjustmentResultView,
+    };
   }
 
   async createLoan(
@@ -2794,13 +2977,54 @@ export class FinanceService {
     name: string,
     currency: string,
   ): Promise<string> {
-    const result = await client.query<{ id: string }>(
-      `INSERT INTO financial_account (workspace_id, kind, name, currency_code) VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, kind, name) DO UPDATE SET updated_at = now() RETURNING id`,
-      [workspaceId, kind, name, currency],
+    return ensureFinancialAccount(client, workspaceId, kind, name, currency);
+  }
+
+  private async walletAdjustmentAccounts(
+    client: PgPoolClient,
+    workspaceId: string,
+    currency: string,
+  ): Promise<{ wallet: string; adjustment: string }> {
+    return {
+      wallet: await this.ensureAccount(client, workspaceId, "wallet", "Carteira", currency),
+      adjustment: await this.ensureAccount(client, workspaceId, "adjustment", "Ajustes", currency),
+    };
+  }
+
+  private async readWallet(
+    client: PgPoolClient,
+    workspaceId: string,
+    lock: "share" | "update",
+  ): Promise<WalletView> {
+    const account = await client.query<{ id: string; currency_code: string; version: number }>(
+      `SELECT id, currency_code, version
+         FROM financial_account
+        WHERE workspace_id = $1 AND kind = 'wallet' AND name = 'Carteira'
+        FOR ${lock === "update" ? "UPDATE" : "SHARE"}`,
+      [workspaceId],
     );
-    const id = result.rows[0]?.id;
-    if (!id) throw new Error("account insert failed");
-    return id;
+    const row = account.rows[0];
+    if (!row) throw new FinanceNotFoundError();
+    const today = await this.workspaceToday(client, workspaceId);
+    const balance = await client.query<{ balance_minor: string | bigint }>(
+      `SELECT coalesce(sum(entry.amount_minor), 0)::bigint AS balance_minor
+         FROM ledger_entry entry
+         JOIN ledger_event event
+           ON event.workspace_id = entry.workspace_id AND event.id = entry.event_id
+        WHERE entry.workspace_id = $1
+          AND entry.account_id = $2
+          AND event.status = 'published'
+          AND event.occurred_on <= $3::date`,
+      [workspaceId, row.id, today],
+    );
+    return {
+      workspaceId,
+      balance: {
+        currency: row.currency_code,
+        minor: (balance.rows[0]?.balance_minor ?? 0n).toString(),
+      },
+      version: row.version,
+    };
   }
 
   private async getLoanRow(
@@ -3037,6 +3261,159 @@ export class FinanceService {
   private databaseScope(scope: FinanceScope) {
     return { ...scope, applicationRole: this.applicationRole };
   }
+}
+
+export interface InitialWalletMaterializationInput {
+  workspaceId: string;
+  actorId: string | null;
+  correlationId: string;
+  origin: "api" | "system";
+  now: Date;
+}
+
+/**
+ * Converts the onboarding preference into an immutable opening event once.
+ * The preference row lock is the natural idempotency boundary for legacy and
+ * concurrent first reads; onboarding calls the same helper inside its UoW.
+ */
+export async function materializeInitialWalletBalance(
+  client: PgPoolClient,
+  input: InitialWalletMaterializationInput,
+): Promise<string | null> {
+  const preference = await client.query<{
+    initial_balance_minor: string | bigint;
+    initial_balance_materialized_at: Date | string | null;
+    initial_balance_transaction_id: string | null;
+    currency_code: string;
+    timezone: string;
+  }>(
+    `SELECT initial_balance_minor, initial_balance_materialized_at,
+            initial_balance_transaction_id, currency_code, timezone
+       FROM workspace_preference
+      WHERE workspace_id = $1
+      FOR UPDATE`,
+    [input.workspaceId],
+  );
+  const row = preference.rows[0];
+  if (!row) throw new FinanceNotFoundError();
+  if (row.initial_balance_materialized_at) return row.initial_balance_transaction_id;
+  const initialMinor = BigInt(row.initial_balance_minor);
+  if (initialMinor < 0n) {
+    throw new FinanceConflictError("O saldo inicial pendente é inválido.");
+  }
+  const wallet = await ensureFinancialAccount(
+    client,
+    input.workspaceId,
+    "wallet",
+    "Carteira",
+    row.currency_code,
+  );
+  if (initialMinor === 0n) {
+    await client.query(
+      `UPDATE workspace_preference
+          SET initial_balance_materialized_at = now(), updated_at = now()
+        WHERE workspace_id = $1 AND initial_balance_materialized_at IS NULL`,
+      [input.workspaceId],
+    );
+    return null;
+  }
+  const occurredOn = civilToday(input.now, row.timezone);
+  const transaction = await client.query<TransactionRow>(
+    `INSERT INTO finance_transaction
+      (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code,
+       occurred_on, due_on, posted_on, cash_settled_on, description, category_id, card_id,
+       recurrence_id, installment_plan_id)
+     VALUES ($1, 'adjustment', 'posted', 'wallet', $2, $2, $3, $4, NULL, now(), now(),
+             'Saldo inicial', NULL, NULL, NULL, NULL)
+     RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+               occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
+               description, category_id, card_id, statement_id,
+               recurrence_id, installment_plan_id, version`,
+    [input.workspaceId, initialMinor, row.currency_code, occurredOn],
+  );
+  const transactionRow = transaction.rows[0];
+  if (!transactionRow) throw new Error("initial balance transaction insert failed");
+  const adjustment = await ensureFinancialAccount(
+    client,
+    input.workspaceId,
+    "adjustment",
+    "Ajustes",
+    row.currency_code,
+  );
+  const postings = canonicalWalletAdjustmentPostings({
+    delta: Money.fromTrusted(initialMinor, row.currency_code as never),
+    accounts: { wallet, adjustment },
+  });
+  assertBalancedLedgerEvent(postings);
+  const event = await client.query<{ id: string }>(
+    `INSERT INTO ledger_event
+      (workspace_id, transaction_id, event_type, currency_code, status, occurred_on, published_at)
+     VALUES ($1, $2, 'wallet.opening_balance.v1', $3, 'published', $4, now())
+     RETURNING id`,
+    [input.workspaceId, transactionRow.id, row.currency_code, occurredOn],
+  );
+  const eventId = event.rows[0]?.id;
+  if (!eventId) throw new Error("initial balance ledger event insert failed");
+  for (const posting of postings) {
+    await client.query(
+      `INSERT INTO ledger_entry
+        (workspace_id, event_id, account_id, currency_code, amount_minor)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [input.workspaceId, eventId, posting.accountId, row.currency_code, posting.amount.minor],
+    );
+  }
+  await client.query(
+    `INSERT INTO audit_event
+      (category, action, actor_id, workspace_id, target_type, target_id, origin,
+       correlation_id, result, reason, after_redacted)
+     VALUES ('finance', 'wallet.initial_balance_materialized', $1, $2,
+             'finance_transaction', $3, $4, $5, 'success',
+             'Saldo inicial informado no onboarding', $6::jsonb)`,
+    [
+      input.actorId,
+      input.workspaceId,
+      transactionRow.id,
+      input.origin,
+      input.correlationId,
+      JSON.stringify({ kind: "adjustment", state: "posted", version: 0 }),
+    ],
+  );
+  await client.query(
+    `UPDATE workspace_preference
+        SET initial_balance_materialized_at = now(),
+            initial_balance_transaction_id = $2,
+            updated_at = now()
+      WHERE workspace_id = $1 AND initial_balance_materialized_at IS NULL`,
+    [input.workspaceId, transactionRow.id],
+  );
+  return transactionRow.id;
+}
+
+async function ensureFinancialAccount(
+  client: PgPoolClient,
+  workspaceId: string,
+  kind: string,
+  name: string,
+  currency: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `INSERT INTO financial_account (workspace_id, kind, name, currency_code)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (workspace_id, kind, name) DO UPDATE SET updated_at = now()
+     RETURNING id`,
+    [workspaceId, kind, name, currency],
+  );
+  const id = result.rows[0]?.id;
+  if (!id) throw new Error("account insert failed");
+  return id;
+}
+
+function civilToday(now: Date, timeZone: string): string {
+  const parsedTimeZone = parseTimeZone(timeZone);
+  if (!parsedTimeZone.ok) throw new FinanceConflictError("O fuso horário do espaço é inválido.");
+  const date = todayInTimeZone(fixedClock(now), parsedTimeZone.value);
+  if (!date.ok) throw new FinanceConflictError("O fuso horário do espaço é inválido.");
+  return date.value;
 }
 
 async function assertCategoryNameAvailable(
@@ -3349,8 +3726,10 @@ export function redactFinanceAuditSnapshot(value: unknown): Record<string, unkno
     if (source[key] === null || typeof source[key] === "string")
       snapshot[key] = source[key] ?? null;
   }
-  if (typeof source.version === "number" && Number.isInteger(source.version)) {
-    snapshot.version = source.version;
+  for (const key of ["version", "walletVersion"] as const) {
+    if (typeof source[key] === "number" && Number.isInteger(source[key])) {
+      snapshot[key] = source[key];
+    }
   }
   return snapshot;
 }

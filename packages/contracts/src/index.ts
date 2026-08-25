@@ -418,7 +418,8 @@ const minorAmountSchema = z
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
   .refine((value) => {
     try {
-      return (value.startsWith("-") ? -BigInt(value.slice(1)) : BigInt(value)) <= 999999999999999n;
+      const minor = BigInt(value);
+      return minor >= -999999999999999n && minor <= 999999999999999n;
     } catch {
       return false;
     }
@@ -468,6 +469,35 @@ export const transactionSchema = z.object({
 });
 
 export type TransactionContract = z.infer<typeof transactionSchema>;
+
+export const walletSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  balance: moneySchema,
+  version: versionSchema,
+});
+export type WalletContract = z.infer<typeof walletSchema>;
+
+export const walletAdjustmentPreviewInputSchema = z.object({
+  observedBalance: moneySchema,
+});
+export type WalletAdjustmentPreviewInput = z.infer<typeof walletAdjustmentPreviewInputSchema>;
+
+export const walletAdjustmentInputSchema = walletAdjustmentPreviewInputSchema.extend({
+  reason: z.string().trim().min(1, "Informe o motivo do ajuste.").max(500),
+});
+export type WalletAdjustmentInput = z.infer<typeof walletAdjustmentInputSchema>;
+
+export const walletAdjustmentPreviewSchema = z.object({
+  wallet: walletSchema,
+  observedBalance: moneySchema,
+  difference: moneySchema,
+});
+export type WalletAdjustmentPreviewContract = z.infer<typeof walletAdjustmentPreviewSchema>;
+
+export const walletAdjustmentResultSchema = walletAdjustmentPreviewSchema.extend({
+  transaction: transactionSchema,
+});
+export type WalletAdjustmentResultContract = z.infer<typeof walletAdjustmentResultSchema>;
 
 export const createTransactionSchema = z.object({
   kind: transactionKindSchema,
