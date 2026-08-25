@@ -2,7 +2,7 @@
 
 import { SearchIcon, ShieldAlertIcon, UserCheckIcon, UserRoundIcon, XIcon } from "lucide-react";
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { AsyncState } from "@/components/primitives";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +22,7 @@ import {
   type AdminAccountSummary,
   AdminAdapterError,
   authenticatedAdminAdapter,
+  createAdminCommandKey,
 } from "@/lib/admin";
 
 type ListState = "idle" | "loading" | "success" | "empty" | "error" | "offline" | "permission";
@@ -66,6 +67,11 @@ export default function AdminAccountsPage() {
   );
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const actionCommandKey = useRef<string | null>(null);
+  const [stepUpToken, setStepUpToken] = useState<string | null>(null);
+  const [stepUpExpiresAt, setStepUpExpiresAt] = useState<number | null>(null);
+  const [stepUpCode, setStepUpCode] = useState("");
+  const [stepUpMethod, setStepUpMethod] = useState<"totp" | "backup_code">("totp");
 
   async function search(event?: FormEvent) {
     event?.preventDefault();
@@ -117,6 +123,10 @@ export default function AdminAccountsPage() {
     setSessionId(nextSessionId);
     setReason("");
     setActionError(null);
+    actionCommandKey.current = createAdminCommandKey(nextAction);
+    setStepUpToken(null);
+    setStepUpExpiresAt(null);
+    setStepUpCode("");
     if (nextAction === "role") setRole(selected?.role ?? "platform_support");
   }
 
@@ -129,8 +139,31 @@ export default function AdminAccountsPage() {
     setActionBusy(true);
     setActionError(null);
     try {
+      let commandStepUpToken =
+        stepUpToken && stepUpExpiresAt && stepUpExpiresAt > Date.now() ? stepUpToken : null;
+      if (!commandStepUpToken) {
+        if (!stepUpCode.trim()) {
+          setActionError("Informe o código do autenticador para continuar.");
+          return;
+        }
+        const stepUp = await authenticatedAdminAdapter.completeStepUp(
+          stepUpMethod,
+          stepUpCode.trim(),
+        );
+        commandStepUpToken = stepUp.token;
+        setStepUpToken(stepUp.token);
+        setStepUpExpiresAt(Date.now() + stepUp.expiresInSeconds * 1_000);
+        setStepUpCode("");
+      }
       if (action === "session" && sessionId) {
-        await authenticatedAdminAdapter.revokeSession(selected.userId, sessionId, reason);
+        await authenticatedAdminAdapter.revokeSession(
+          selected.userId,
+          sessionId,
+          reason,
+          actionCommandKey.current ?? undefined,
+          commandStepUpToken,
+        );
+        actionCommandKey.current = null;
         setAction(null);
         setSessionId(null);
         await selectAccount(selected.userId);
@@ -138,26 +171,55 @@ export default function AdminAccountsPage() {
       }
       let updated = selected;
       if (action === "suspend")
-        updated = await authenticatedAdminAdapter.suspend(selected.userId, reason);
+        updated = await authenticatedAdminAdapter.suspend(
+          selected.userId,
+          reason,
+          actionCommandKey.current ?? undefined,
+          commandStepUpToken,
+        );
       if (action === "reactivate")
-        updated = await authenticatedAdminAdapter.reactivate(selected.userId, reason);
+        updated = await authenticatedAdminAdapter.reactivate(
+          selected.userId,
+          reason,
+          actionCommandKey.current ?? undefined,
+          commandStepUpToken,
+        );
       if (action === "role") {
         updated = await authenticatedAdminAdapter.changeRole(
           selected.userId,
           role === "none" ? null : role,
           reason,
+          actionCommandKey.current ?? undefined,
+          commandStepUpToken,
         );
       }
       if (action === "verification")
-        await authenticatedAdminAdapter.resendVerification(selected.userId, reason);
+        await authenticatedAdminAdapter.resendVerification(
+          selected.userId,
+          reason,
+          actionCommandKey.current ?? undefined,
+          commandStepUpToken,
+        );
       if (action === "recovery")
-        await authenticatedAdminAdapter.resendRecovery(selected.userId, reason);
+        await authenticatedAdminAdapter.resendRecovery(
+          selected.userId,
+          reason,
+          actionCommandKey.current ?? undefined,
+          commandStepUpToken,
+        );
+      actionCommandKey.current = null;
+      setStepUpToken(null);
+      setStepUpExpiresAt(null);
       setSelected(updated);
       setAccounts((current) =>
         current.map((item) => (item.userId === updated.userId ? updated : item)),
       );
       setAction(null);
     } catch (caught) {
+      if (caught instanceof AdminAdapterError && caught.code === "step_up_required") {
+        setStepUpToken(null);
+        setStepUpExpiresAt(null);
+      }
       setActionError(
         caught instanceof AdminAdapterError ? caught.message : "Não foi possível concluir a ação.",
       );
@@ -338,21 +400,46 @@ export default function AdminAccountsPage() {
               ) : null}
               <div className="flex flex-wrap gap-2">
                 {selected.status === "suspended" ? (
-                  <Button type="button" variant="outline" onClick={() => openAction("reactivate")}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={actionBusy}
+                    onClick={() => openAction("reactivate")}
+                  >
                     <UserCheckIcon data-icon="inline-start" aria-hidden="true" /> Reativar login
                   </Button>
                 ) : (
-                  <Button type="button" variant="destructive" onClick={() => openAction("suspend")}>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={actionBusy}
+                    onClick={() => openAction("suspend")}
+                  >
                     <ShieldAlertIcon data-icon="inline-start" aria-hidden="true" /> Suspender login
                   </Button>
                 )}
-                <Button type="button" variant="outline" onClick={() => openAction("role")}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={actionBusy}
+                  onClick={() => openAction("role")}
+                >
                   <UserRoundIcon data-icon="inline-start" aria-hidden="true" /> Alterar papel
                 </Button>
-                <Button type="button" variant="outline" onClick={() => openAction("verification")}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={actionBusy}
+                  onClick={() => openAction("verification")}
+                >
                   Reenviar verificação
                 </Button>
-                <Button type="button" variant="outline" onClick={() => openAction("recovery")}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={actionBusy}
+                  onClick={() => openAction("recovery")}
+                >
                   Reenviar recuperação
                 </Button>
               </div>
@@ -381,6 +468,7 @@ export default function AdminAccountsPage() {
                           type="button"
                           variant="outline"
                           className="min-h-11 sm:min-h-8"
+                          disabled={actionBusy}
                           onClick={() => openAction("session", session.id)}
                         >
                           <XIcon data-icon="inline-start" aria-hidden="true" /> Revogar
@@ -437,6 +525,42 @@ export default function AdminAccountsPage() {
                 maxLength={500}
               />
             </Field>
+            {!stepUpToken || !stepUpExpiresAt || stepUpExpiresAt <= Date.now() ? (
+              <Field>
+                <FieldLabel htmlFor="admin-step-up-method">Confirmação de segurança</FieldLabel>
+                <FieldDescription>
+                  Confirme o segundo fator para autorizar esta alteração sensível. O código não é
+                  armazenado.
+                </FieldDescription>
+                <select
+                  id="admin-step-up-method"
+                  value={stepUpMethod}
+                  onChange={(event) =>
+                    setStepUpMethod(event.target.value as "totp" | "backup_code")
+                  }
+                  className="h-9 rounded-lg border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                >
+                  <option value="totp">Código do autenticador</option>
+                  <option value="backup_code">Código de recuperação</option>
+                </select>
+                <Input
+                  id="admin-step-up-code"
+                  value={stepUpCode}
+                  onChange={(event) => setStepUpCode(event.target.value)}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  required
+                  minLength={6}
+                  maxLength={128}
+                  placeholder="000000"
+                  aria-label="Código do segundo fator"
+                />
+              </Field>
+            ) : (
+              <p className="text-sm text-muted-foreground" role="status">
+                Segundo fator confirmado para esta ação. Ele expira em poucos minutos.
+              </p>
+            )}
             {actionError ? (
               <p role="alert" className="text-sm text-destructive">
                 {actionError}

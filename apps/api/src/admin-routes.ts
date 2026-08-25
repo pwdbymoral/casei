@@ -4,6 +4,7 @@ import {
   adminPlatformRoleUpdateSchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
+import { z } from "zod";
 import type { AdminService } from "./admin-service.js";
 import type { ApiContext, ApiEnv, RequestActor } from "./http/index.js";
 import { ApiHttpError, parseJsonBody, parseQuery } from "./http/index.js";
@@ -16,6 +17,27 @@ export interface AdminRoutesOptions {
 export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesOptions): void {
   const { service } = options;
   router.use("/admin/*", options.actorMiddleware);
+
+  router.get("/admin/session", (context) =>
+    context.json(service.getPlatformSession(actorOf(context))),
+  );
+
+  router.post("/admin/step-up", async (context) => {
+    const input = await parseJsonBody(
+      context,
+      z.object({
+        method: z.enum(["totp", "backup_code"]),
+        code: z.string().trim().min(6).max(128),
+      }),
+    );
+    const result = await service.completeStepUp(
+      actorOf(context),
+      input,
+      context.req.raw.headers,
+      context.get("correlationId"),
+    );
+    return context.json(result);
+  });
 
   router.get("/admin/accounts", async (context) => {
     const result = await service.searchAccounts(

@@ -23,6 +23,12 @@ function createAdminApp(
   const service = {
     searchAccounts: async () => ({ items: [account], page: { nextCursor: null, hasMore: false } }),
     getAccount: async () => account,
+    getPlatformSession: () => ({
+      userId: "admin-user",
+      displayName: "Admin",
+      role: platformRole ?? "platform_admin",
+    }),
+    completeStepUp: async () => ({ token: "step-up-token", expiresInSeconds: 300 }),
     suspendAccount: async () => ({ replayed: false, result: account }),
     reactivateAccount: async () => ({ replayed: false, result: account }),
     changePlatformRole: async () => {
@@ -67,6 +73,29 @@ describe("ADMIN-002 HTTP boundary", () => {
     await expect(response.json()).resolves.toEqual({
       items: [account],
       page: { nextCursor: null, hasMore: false },
+    });
+  });
+
+  it("exposes only the server-resolved platform session", async () => {
+    const response = await createAdminApp().request("http://localhost/v1/admin/session");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      userId: "admin-user",
+      displayName: "Admin",
+      role: "platform_admin",
+    });
+  });
+
+  it("keeps step-up proof inside the administrative boundary", async () => {
+    const response = await createAdminApp().request("http://localhost/v1/admin/step-up", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ method: "totp", code: "123456" }),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      token: "step-up-token",
+      expiresInSeconds: 300,
     });
   });
 

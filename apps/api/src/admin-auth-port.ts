@@ -22,6 +22,28 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
     });
   }
 
+  async verifyStepUp(input: {
+    method: "totp" | "backup_code";
+    code: string;
+    headers: Headers;
+  }): Promise<void> {
+    const path =
+      input.method === "totp"
+        ? "/api/auth/two-factor/verify-totp"
+        : "/api/auth/two-factor/verify-backup-code";
+    const headers = new Headers(input.headers);
+    headers.set("content-type", "application/json");
+    headers.set("origin", this.webOrigin);
+    const response = await this.handler(
+      new Request(`${this.apiOrigin}${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ code: input.code, trustDevice: false }),
+      }),
+    );
+    if (!response.ok) throw new Error("Better Auth step-up verification failed");
+  }
+
   private async send(path: string, body: Record<string, string>): Promise<void> {
     const response = await this.handler(
       new Request(`${this.apiOrigin}${path}`, {

@@ -55,6 +55,9 @@ export interface IdentityAppOptions {
     displayName?: string;
     recentAuthentication?: boolean;
     platformRole?: "platform_admin" | "platform_support" | null;
+    stepUpToken?: string;
+    ipAddress?: string | null;
+    endpoint?: string | null;
   } | null>;
 }
 
@@ -112,7 +115,13 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
     "/v1/*",
     cors({
       origin: (origin) => (isAllowedAuthOrigin(origin, authOrigins) ? origin : undefined),
-      allowHeaders: ["Content-Type", "X-Correlation-ID", "Idempotency-Key", "If-Match"],
+      allowHeaders: [
+        "Content-Type",
+        "X-Correlation-ID",
+        "Idempotency-Key",
+        "If-Match",
+        "X-Admin-Step-Up",
+      ],
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       credentials: true,
     }),
@@ -271,6 +280,9 @@ async function defaultActorResolver(
     userId: session.user.id,
     email: session.user.email,
     displayName: session.user.name,
+    stepUpToken: context.req.header("X-Admin-Step-Up") ?? undefined,
+    ipAddress: session.session.ipAddress ?? null,
+    endpoint: new URL(context.req.url).pathname,
     recentAuthentication: Number.isFinite(createdAt) && Date.now() - createdAt <= 15 * 60 * 1_000,
     platformRole: platformAccess?.role ?? null,
   };

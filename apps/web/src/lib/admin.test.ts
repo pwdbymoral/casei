@@ -36,6 +36,24 @@ describe("admin API adapter", () => {
     expect(init.body).toBe(JSON.stringify({ reason: "security review" }));
   });
 
+  it("preserves the command key and server-issued step-up token on retry", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ status: "active" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await authenticatedAdminAdapter.reactivate(
+      "target-user",
+      "reviewed",
+      "admin-reactivate-fixed-key",
+      "step-up-token",
+    );
+    const init = (fetchMock.mock.calls[0]?.[1] ?? {}) as unknown as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(headers.get("Idempotency-Key")).toBe("admin-reactivate-fixed-key");
+    expect(headers.get("X-Admin-Step-Up")).toBe("step-up-token");
+  });
+
   it("maps permission and offline failures without exposing response internals", async () => {
     vi.stubGlobal(
       "fetch",

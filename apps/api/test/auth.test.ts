@@ -72,6 +72,12 @@ function sessionCookie(response: Response): string {
 }
 
 describe("AUTH-001 identidade", () => {
+  it("expõe TOTP e backup code pela configuração Better Auth", () => {
+    const { auth } = fixture();
+    expect(auth.api).toHaveProperty("verifyTOTP");
+    expect(auth.api).toHaveProperty("verifyBackupCode");
+  });
+
   it("cadastra, captura verificação, verifica e impede enumeração do token", async () => {
     const { app, emailPort, emailStore } = fixture();
     const response = await authRequest(

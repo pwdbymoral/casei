@@ -50,7 +50,7 @@ export class AdminAdapterError extends Error {
   }
 }
 
-type RequestOptions = RequestInit & { idempotencyKey?: string };
+type RequestOptions = RequestInit & { idempotencyKey?: string; stepUpToken?: string };
 
 async function adminRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const origin = configuredApiOrigin();
@@ -59,6 +59,7 @@ async function adminRequest<T>(path: string, options: RequestOptions = {}): Prom
   headers.set("Accept", "application/json");
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (options.idempotencyKey) headers.set("Idempotency-Key", options.idempotencyKey);
+  if (options.stepUpToken) headers.set("X-Admin-Step-Up", options.stepUpToken);
   const response = await fetch(`${origin}${path}`, { ...options, headers, credentials: "include" });
   if (response.status === 204) return undefined as T;
   const body = (await response.json().catch(() => null)) as
@@ -76,7 +77,7 @@ async function adminRequest<T>(path: string, options: RequestOptions = {}): Prom
   return body as T;
 }
 
-function idempotencyKey(action: string): string {
+export function createAdminCommandKey(action: string): string {
   const random =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
@@ -85,6 +86,15 @@ function idempotencyKey(action: string): string {
 }
 
 export const authenticatedAdminAdapter = {
+  async completeStepUp(
+    method: "totp" | "backup_code",
+    code: string,
+  ): Promise<{ token: string; expiresInSeconds: number }> {
+    return adminRequest("/v1/admin/step-up", {
+      method: "POST",
+      body: JSON.stringify({ method, code }),
+    });
+  },
   async searchAccounts(query: string, limit = 50): Promise<AdminAccountList> {
     const params = new URLSearchParams({ query, limit: String(limit) });
     return adminRequest<AdminAccountList>(`/v1/admin/accounts?${params.toString()}`);
@@ -92,23 +102,35 @@ export const authenticatedAdminAdapter = {
   async getAccount(userId: string): Promise<AdminAccountDetail> {
     return adminRequest<AdminAccountDetail>(`/v1/admin/accounts/${encodeURIComponent(userId)}`);
   },
-  async suspend(userId: string, reason: string): Promise<AdminAccountDetail> {
+  async suspend(
+    userId: string,
+    reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
+  ): Promise<AdminAccountDetail> {
     return adminRequest<AdminAccountDetail>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/suspend`,
       {
         method: "POST",
         body: JSON.stringify({ reason }),
-        idempotencyKey: idempotencyKey("suspend"),
+        idempotencyKey: commandKey ?? createAdminCommandKey("suspend"),
+        stepUpToken,
       },
     );
   },
-  async reactivate(userId: string, reason: string): Promise<AdminAccountDetail> {
+  async reactivate(
+    userId: string,
+    reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
+  ): Promise<AdminAccountDetail> {
     return adminRequest<AdminAccountDetail>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/reactivate`,
       {
         method: "POST",
         body: JSON.stringify({ reason }),
-        idempotencyKey: idempotencyKey("reactivate"),
+        idempotencyKey: commandKey ?? createAdminCommandKey("reactivate"),
+        stepUpToken,
       },
     );
   },
@@ -116,41 +138,63 @@ export const authenticatedAdminAdapter = {
     userId: string,
     role: PlatformRole | null,
     reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
   ): Promise<AdminAccountDetail> {
     return adminRequest<AdminAccountDetail>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/platform-role`,
       {
         method: "PATCH",
         body: JSON.stringify({ role, reason }),
-        idempotencyKey: idempotencyKey("role"),
+        idempotencyKey: commandKey ?? createAdminCommandKey("role"),
+        stepUpToken,
       },
     );
   },
-  async revokeSession(userId: string, sessionId: string, reason: string): Promise<void> {
+  async revokeSession(
+    userId: string,
+    sessionId: string,
+    reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
+  ): Promise<void> {
     await adminRequest<void>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
       {
         method: "DELETE",
         body: JSON.stringify({ reason }),
-        idempotencyKey: idempotencyKey("session"),
+        idempotencyKey: commandKey ?? createAdminCommandKey("session"),
+        stepUpToken,
       },
     );
   },
-  async resendVerification(userId: string, reason: string): Promise<void> {
+  async resendVerification(
+    userId: string,
+    reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
+  ): Promise<void> {
     await adminRequest<void>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/verification/resend`,
       {
         method: "POST",
         body: JSON.stringify({ reason }),
-        idempotencyKey: idempotencyKey("verify"),
+        idempotencyKey: commandKey ?? createAdminCommandKey("verify"),
+        stepUpToken,
       },
     );
   },
-  async resendRecovery(userId: string, reason: string): Promise<void> {
+  async resendRecovery(
+    userId: string,
+    reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
+  ): Promise<void> {
     await adminRequest<void>(`/v1/admin/accounts/${encodeURIComponent(userId)}/recovery/resend`, {
       method: "POST",
       body: JSON.stringify({ reason }),
-      idempotencyKey: idempotencyKey("recovery"),
+      idempotencyKey: commandKey ?? createAdminCommandKey("recovery"),
+      stepUpToken,
     });
   },
 };
