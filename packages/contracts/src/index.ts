@@ -413,6 +413,21 @@ export const safeToSpendQuerySchema = z.object({
 });
 export type SafeToSpendQuery = z.infer<typeof safeToSpendQuerySchema>;
 
+export const insightReportKindSchema = z.enum(["all", "income", "expense"]);
+export const insightReportQuerySchema = z
+  .object({
+    asOf: civilDateSchema.optional(),
+    from: civilDateSchema.optional(),
+    to: civilDateSchema.optional(),
+    kind: insightReportKindSchema.default("all"),
+    categoryId: domainIdSchema.optional(),
+  })
+  .refine(
+    (query) => !query.from || !query.to || query.from <= query.to,
+    "from must not be after to",
+  );
+export type InsightReportQuery = z.infer<typeof insightReportQuerySchema>;
+
 const minorAmountSchema = z
   .string()
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
@@ -431,6 +446,57 @@ export const moneySchema = z.object({
 });
 
 export type MoneyContract = z.infer<typeof moneySchema>;
+
+const insightReportPeriodSchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/),
+  income: moneySchema,
+  expense: moneySchema,
+  net: moneySchema,
+  transactionCount: z.number().int().nonnegative(),
+});
+
+const insightReportCategorySchema = z.object({
+  categoryId: domainIdSchema.nullable(),
+  categoryName: z.string().min(1).max(80),
+  income: moneySchema,
+  expense: moneySchema,
+  net: moneySchema,
+  transactionCount: z.number().int().nonnegative(),
+});
+
+export const insightReportSchema = z.object({
+  asOf: civilDateSchema,
+  from: civilDateSchema,
+  to: civilDateSchema,
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  filters: z.object({
+    kind: insightReportKindSchema,
+    categoryId: domainIdSchema.nullable(),
+  }),
+  totals: z.object({
+    income: moneySchema,
+    expense: moneySchema,
+    net: moneySchema,
+    transactionCount: z.number().int().nonnegative(),
+  }),
+  monthly: z.array(insightReportPeriodSchema),
+  categories: z.array(insightReportCategorySchema),
+  reconciliation: z.object({
+    source: z.literal("published_ledger"),
+    transactionCount: z.number().int().nonnegative(),
+    income: moneySchema,
+    expense: moneySchema,
+    export: z.object({
+      domain: z.literal("transactions"),
+      format: z.literal("csv"),
+      from: civilDateSchema,
+      to: civilDateSchema,
+      kind: insightReportKindSchema,
+      categoryId: domainIdSchema.nullable(),
+    }),
+  }),
+});
+export type InsightReportContract = z.infer<typeof insightReportSchema>;
 
 export const positiveMoneySchema = moneySchema.extend({
   minor: minorAmountSchema.refine((value) => BigInt(value) > 0n, "minor must be greater than zero"),
