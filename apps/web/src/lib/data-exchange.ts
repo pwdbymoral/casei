@@ -554,7 +554,6 @@ async function fixtureImportFingerprint(input: StartImportInput): Promise<string
     duplicatePolicy: input.duplicatePolicy,
     file: {
       hash: await fixtureFileFingerprint(input.file),
-      lastModified: input.file.lastModified,
       name: input.file.name,
       size: input.file.size,
       type: input.file.type,
