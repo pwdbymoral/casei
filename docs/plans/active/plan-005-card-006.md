@@ -25,6 +25,9 @@ parcial informado pelo usuário.
   `Idempotency-Key`) e manter os campos de moeda/data no contrato;
 - derivar compromissos da lista paginada de transações, separando próximos e
   vencidos sem incluir fatos já publicados ou cancelados;
+- executar uma consulta própria sem filtros da timeline, percorrendo todos os
+  cursores, para compor saldo da carteira e compromissos sem depender da página
+  ou dos filtros atualmente visíveis;
 - compor dialogs acessíveis para liquidação, recorrência e parcelamento, com
   valores e prévia visíveis antes da confirmação;
 - adicionar pagamento parcial de fatura usando o endpoint existente;
@@ -50,11 +53,11 @@ parcial informado pelo usuário.
 
 ## Riscos
 
-- A lista atual é paginada; a seção mostra apenas compromissos na página carregada
-  e informa a mesma paginação da linha do tempo. Uma rota agregada poderá substituir
-  isso em fatia posterior sem mudar o fluxo.
-- O shell ainda não expõe o fuso civil do workspace ao browser; os defaults de data
-  usam o calendário local do dispositivo até existir esse contexto no contrato.
+- A consulta sem filtros percorre todos os cursores para manter o saldo e os
+  compromissos completos; uma rota agregada/read model do servidor poderá
+  substituir essa leitura em fatia posterior sem mudar o fluxo.
+- O shell fornece o fuso IANA do workspace ao browser, e os defaults de data
+  usam esse calendário civil (não o fuso local do dispositivo).
 - A API ainda não expõe `recurrenceId` no contrato da transação; o campo de valor
   efetivo é apresentado para qualquer compromisso e a validação de recorrência
   variável permanece no servidor.

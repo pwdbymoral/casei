@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   canWriteFinance,
+  civilDateInTimeZone,
   clearTransactionQueryParams,
   commitmentBucket,
   commitmentRemainingMinor,
@@ -10,14 +11,17 @@ import {
   createQuickCaptureTransactionInput,
   createRequestGuard,
   createWorkspaceGenerationGuard,
+  type FinanceAdapter,
   FinanceAdapterError,
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
+  listAllTransactions,
   mergeTransactionPage,
   previewInstallmentMinor,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
+  type TransactionQuery,
   transactionAmountPrefix,
   transactionCardIdForKind,
   transactionKindLabel,
@@ -45,6 +49,73 @@ describe("finance adapter", () => {
     expect(
       await financeAdapterForEnvironment().listCards("019b5d9e-3c12-7a01-8d47-7b5b5dd7a201"),
     ).toEqual(expect.any(Array));
+  });
+
+  it("formats defaults in the workspace timezone instead of the browser timezone", () => {
+    const nearMidnightUtc = new Date("2026-08-25T02:30:00.000Z");
+    expect(civilDateInTimeZone(nearMidnightUtc, "America/Fortaleza")).toBe("2026-08-24");
+    expect(civilDateInTimeZone(nearMidnightUtc, "Asia/Tokyo")).toBe("2026-08-25");
+  });
+
+  it("loads an unfiltered wallet/commitment read model through every cursor page", async () => {
+    const pages = [
+      {
+        items: [
+          {
+            id: "transaction-1",
+            workspaceId: "workspace",
+            kind: "income" as const,
+            state: "posted" as const,
+            amount: { currency: "BRL", minor: "100" },
+            settledAmount: { currency: "BRL", minor: "100" },
+            occurredOn: "2026-08-24",
+            dueOn: null,
+            postedOn: "2026-08-24T12:00:00.000Z",
+            description: "Receita",
+            categoryId: null,
+            cardId: null,
+            statementId: null,
+            version: 0,
+          },
+        ],
+        nextCursor: "cursor-1",
+        hasMore: true,
+      },
+      {
+        items: [
+          {
+            id: "transaction-2",
+            workspaceId: "workspace",
+            kind: "transfer" as const,
+            state: "posted" as const,
+            amount: { currency: "BRL", minor: "50" },
+            settledAmount: { currency: "BRL", minor: "50" },
+            occurredOn: "2026-08-23",
+            dueOn: null,
+            postedOn: "2026-08-23T12:00:00.000Z",
+            description: "Pagamento de fatura",
+            categoryId: null,
+            cardId: null,
+            statementId: "statement-1",
+            version: 0,
+          },
+        ],
+        nextCursor: null,
+        hasMore: false,
+      },
+    ];
+    const calls: Array<Record<string, unknown> | undefined> = [];
+    const adapter = {
+      listTransactions: vi.fn(async (_workspaceId: string, query?: TransactionQuery) => {
+        calls.push(query);
+        return pages[calls.length - 1] ?? pages.at(-1);
+      }),
+    } as unknown as FinanceAdapter;
+    await expect(listAllTransactions(adapter, "workspace")).resolves.toHaveLength(2);
+    expect(calls).toEqual([
+      { cursor: undefined, limit: 100 },
+      { cursor: "cursor-1", limit: 100 },
+    ]);
   });
 
   it("uses the canonical API origin for authenticated finance requests", async () => {

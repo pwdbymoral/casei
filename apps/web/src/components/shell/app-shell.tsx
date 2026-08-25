@@ -63,6 +63,7 @@ export type AuthenticatedWorkspaceScope = {
   workspaceId: string;
   role: NonNullable<ReturnType<typeof getActiveWorkspace>>["role"];
   fixtureMode: boolean;
+  timeZone: string;
   currency: string;
 };
 
@@ -385,6 +386,7 @@ export function AppShell({
         workspaceId: activeWorkspace.id,
         role: activeWorkspace.role,
         fixtureMode: adapterMode === "fixture",
+        timeZone: activeWorkspace.timeZone,
         currency: activeWorkspace.currency,
       }}
     >

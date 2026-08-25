@@ -38,6 +38,7 @@ import {
   type Category,
   type CreditCard,
   canWriteFinance,
+  civilDateInTimeZone,
   clearTransactionQueryParams,
   commitmentBucket,
   commitmentRemainingMinor,
@@ -49,6 +50,7 @@ import {
   type FinanceAuditEvent,
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
+  listAllTransactions,
   mergeTransactionPage,
   previewInstallmentDates,
   previewInstallmentMinor,
@@ -94,19 +96,12 @@ function auditSnapshotText(snapshot: Record<string, unknown> | null): string {
   return JSON.stringify(snapshot, null, 2) ?? "Nenhum snapshot";
 }
 
-function todayCivilDate(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 type FinanceDashboardProps = {
   adapter?: FinanceAdapter;
   fixtureMode?: boolean;
   workspaceId: string;
   role: WorkspaceRole;
+  timeZone: string;
   currency: string;
 };
 
@@ -115,6 +110,7 @@ function FinanceDashboard({
   fixtureMode = false,
   workspaceId,
   role,
+  timeZone,
   currency,
 }: FinanceDashboardProps) {
   const router = useRouter();
@@ -123,6 +119,7 @@ function FinanceDashboard({
     () => providedAdapter ?? financeAdapterForEnvironment({ fixtures: fixtureMode }),
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [walletTransactions, setWalletTransactions] = useState<Transaction[]>([]);
   const [commitmentTransactions, setCommitmentTransactions] = useState<Transaction[]>([]);
   const [dataWorkspaceId, setDataWorkspaceId] = useState(workspaceId);
   const [transactionsNextCursor, setTransactionsNextCursor] = useState<string | null>(null);
@@ -228,7 +225,7 @@ function FinanceDashboard({
   const installmentCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
-  const today = todayCivilDate();
+  const today = civilDateInTimeZone(new Date(), timeZone);
 
   const commitments = useMemo(
     () =>
@@ -285,6 +282,7 @@ function FinanceDashboard({
     // generation guard prevents late responses from repopulating this empty state.
     setDataWorkspaceId(workspaceId);
     setTransactions([]);
+    setWalletTransactions([]);
     setCommitmentTransactions([]);
     setTransactionsNextCursor(null);
     setTransactionsHasMore(false);
@@ -408,26 +406,27 @@ function FinanceDashboard({
           nextCards,
           nextStatements,
           nextCategories,
-          nextPlanned,
-          nextPartial,
+          nextWalletTransactions,
         ] = await Promise.all([
           adapter.listTransactions(workspaceId, { ...timelineQuery, limit: 50 }),
           adapter.listCards(workspaceId),
           adapter.listStatements(workspaceId),
           adapter.listCategories(workspaceId),
-          adapter.listTransactions(workspaceId, { state: "planned", limit: 100 }),
-          adapter.listTransactions(workspaceId, { state: "partially_settled", limit: 100 }),
+          listAllTransactions(adapter, workspaceId),
         ]);
         if (!timelineRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest))
           return;
         setTransactions((current) => mergeTransactionPage(current, nextTransactions, append));
         setTransactionsNextCursor(nextTransactions.nextCursor);
         setTransactionsHasMore(nextTransactions.hasMore);
+        setWalletTransactions(nextWalletTransactions);
         const commitmentById = new Map(
-          [...nextPlanned.items, ...nextPartial.items].map((transaction) => [
-            transaction.id,
-            transaction,
-          ]),
+          nextWalletTransactions
+            .filter(
+              (transaction) =>
+                transaction.state === "planned" || transaction.state === "partially_settled",
+            )
+            .map((transaction) => [transaction.id, transaction]),
         );
         setCommitmentTransactions([...commitmentById.values()]);
         setCards(nextCards);
@@ -450,10 +449,7 @@ function FinanceDashboard({
     void load(Boolean(timelineQuery.cursor));
   }, [load, timelineQuery.cursor]);
 
-  const walletTotal = useMemo(
-    () => walletTotalMinor([...visibleTransactions, ...commitmentTransactions]),
-    [commitmentTransactions, visibleTransactions],
-  );
+  const walletTotal = useMemo(() => walletTotalMinor(walletTransactions), [walletTransactions]);
 
   async function handleTransactionSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -560,6 +556,7 @@ function FinanceDashboard({
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        settlementCommandKey.current = null;
         setSettlingTransaction(null);
         await load();
         if (workspaceRequests.isCurrent(workspaceRequest)) {
@@ -1931,8 +1928,8 @@ function FinanceDashboard({
         <CardContent className="grid gap-5">
           {commitments.length === 0 ? (
             <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-              Nenhum compromisso próximo ou vencido na página carregada. Compromissos futuros
-              continuam fora do saldo até serem liquidados.
+              Nenhum compromisso próximo ou vencido. Compromissos futuros continuam fora do saldo
+              até serem liquidados.
             </p>
           ) : (
             <div className="grid gap-5 md:grid-cols-2">
@@ -2032,7 +2029,10 @@ function FinanceDashboard({
       <Dialog
         open={settlingTransaction !== null}
         onOpenChange={(open) => {
-          if (!open && !settling) setSettlingTransaction(null);
+          if (!open && !settling) {
+            settlementCommandKey.current = null;
+            setSettlingTransaction(null);
+          }
         }}
       >
         <DialogContent>
@@ -2861,12 +2861,13 @@ function FinanceDashboard({
 }
 
 export default function FinancesPage() {
-  const { workspaceId, role, fixtureMode, currency } = useAuthenticatedWorkspace();
+  const { workspaceId, role, fixtureMode, timeZone, currency } = useAuthenticatedWorkspace();
   return (
     <FinanceDashboard
       workspaceId={workspaceId}
       role={role}
       fixtureMode={fixtureMode}
+      timeZone={timeZone}
       currency={currency}
     />
   );

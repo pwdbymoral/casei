@@ -312,6 +312,26 @@ export function previewInstallmentDates(firstDueOn: string, count: number): stri
   });
 }
 
+/** Formats a civil calendar date in the workspace IANA timezone. */
+export function civilDateInTimeZone(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const values = new Map(
+    parts
+      .filter((part) => part.type === "year" || part.type === "month" || part.type === "day")
+      .map((part) => [part.type, part.value]),
+  );
+  const year = values.get("year");
+  const month = values.get("month");
+  const day = values.get("day");
+  if (!year || !month || !day) throw new Error("Não foi possível determinar a data do espaço.");
+  return `${year}-${month}-${day}`;
+}
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -438,6 +458,37 @@ export type FinanceAdapter = {
     installments: Array<{ id: string; number: number; amount: Money; dueOn: string }>;
   }>;
 };
+
+/**
+ * Reads every page for an unfiltered client-side read model. The UI uses this
+ * only for wallet/commitment facts until the API exposes an aggregate balance
+ * endpoint; keeping the cursor loop here prevents timeline filters from
+ * changing the wallet total and ensures commitments beyond the first page are
+ * not silently omitted.
+ */
+export async function listAllTransactions(
+  adapter: FinanceAdapter,
+  workspaceId: string,
+  query: Omit<TransactionQuery, "cursor" | "limit"> = {},
+): Promise<Transaction[]> {
+  const items: Transaction[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await adapter.listTransactions(workspaceId, {
+      ...query,
+      cursor,
+      limit: 100,
+    });
+    items.push(...page.items);
+    if (!page.hasMore) return items;
+    if (!page.nextCursor || seenCursors.has(page.nextCursor)) {
+      throw new Error("A paginação financeira retornou um cursor inválido.");
+    }
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+}
 
 export class FinanceAdapterError extends Error {
   constructor(
