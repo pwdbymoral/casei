@@ -66,16 +66,14 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
               p.role,
               p.status,
               u.created_at,
-              max(s.updated_at) AS last_activity_at,
-              count(DISTINCT CASE WHEN m.status = 'active' THEN m.workspace_id END)::text AS workspace_count,
-              count(DISTINCT CASE WHEN s.expires_at > now() THEN s.id END)::text AS active_session_count
+              md.last_activity_at,
+              md.workspace_count::text AS workspace_count,
+              md.active_session_count::text AS active_session_count
          FROM "user" u
          LEFT JOIN platform_account p ON p.user_id = u.id
-         LEFT JOIN membership m ON m.user_id = u.id
-         LEFT JOIN session s ON s.user_id = u.id
+         LEFT JOIN LATERAL app.platform_account_metadata(u.id) md ON true
         WHERE (u.id = $1 OR lower(u.email) = $1)
           AND ($2::text IS NULL OR u.id > $2)
-        GROUP BY u.id, u.name, u.email, p.role, p.status, u.created_at
         ORDER BY u.id
         LIMIT $3`,
       [query, input.cursor ?? null, Math.min(input.limit, 100) + 1],
@@ -166,6 +164,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     status: "active" | "suspended",
     reason = "",
   ): Promise<AdminAccountDetail> {
+    await this.query(`SELECT app.lock_platform_session_user($1)`, [userId]);
     if (status === "suspended") await this.lockAndProtectLastAdmin(userId);
     await this.query(
       `INSERT INTO platform_account (user_id, role, status, suspension_reason, version)
@@ -237,7 +236,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
         input.targetId,
         input.action,
         input.correlationId,
-        input.ipAddress ?? null,
+        truncateIp(input.ipAddress ?? null),
         input.endpoint ?? null,
         input.reason,
       ],
@@ -296,11 +295,11 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
         );
         const row = existing.rows[0];
         if (!row || row.request_hash !== requestHash) throw new AdminIdempotencyConflictError();
-        if (row.status_code === null || row.response === null) {
+        if (row.status_code === null) {
           throw new Error("Idempotent command is still in progress");
         }
         await client.query("COMMIT");
-        return { replayed: true, result: row.response };
+        return { replayed: true, result: row.response as T };
       }
       if (!actorId || !stepUpToken) throw new AdminPolicyError("step_up_required");
       const consumed = await client.query(
@@ -339,15 +338,14 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
               p.role,
               p.status,
               u.created_at,
-              max(s.updated_at) AS last_activity_at,
-              count(DISTINCT CASE WHEN m.status = 'active' THEN m.workspace_id END)::text AS workspace_count,
-              count(DISTINCT CASE WHEN s.expires_at > now() THEN s.id END)::text AS active_session_count
+              md.last_activity_at,
+              md.workspace_count::text AS workspace_count,
+              md.active_session_count::text AS active_session_count
          FROM "user" u
          LEFT JOIN platform_account p ON p.user_id = u.id
-         LEFT JOIN membership m ON m.user_id = u.id
-         LEFT JOIN session s ON s.user_id = u.id
+         LEFT JOIN LATERAL app.platform_account_metadata(u.id) md ON true
         WHERE u.id = $1
-        GROUP BY u.id, u.name, u.email, p.role, p.status, u.created_at`,
+        `,
       [userId],
     );
     const row = result.rows[0];
@@ -355,11 +353,8 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     const summary = toAccountSummary(row);
     const [workspaces, sessions] = await Promise.all([
       this.query<WorkspaceRow>(
-        `SELECT w.id, w.name, w.status
-           FROM workspace w
-           JOIN membership m ON m.workspace_id = w.id
-          WHERE m.user_id = $1 AND m.status = 'active'
-          ORDER BY w.id`,
+        `SELECT id, name, status
+           FROM app.platform_account_workspaces($1)`,
         [userId],
       ),
       this.query<SessionRow>(

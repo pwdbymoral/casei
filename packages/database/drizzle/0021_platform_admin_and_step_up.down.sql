@@ -1,6 +1,12 @@
 DROP POLICY IF EXISTS "admin_step_up_challenge_scope" ON "admin_step_up_challenge";
 DROP POLICY IF EXISTS "platform_audit_event_scope" ON "platform_audit_event";
 DROP POLICY IF EXISTS "platform_account_read_scope" ON "platform_account";
+DROP TRIGGER IF EXISTS "platform_session_guard" ON "session";
+DROP FUNCTION IF EXISTS "app"."guard_platform_session_insert"();
+DROP FUNCTION IF EXISTS "app"."lock_platform_session_user"(text);
+DROP FUNCTION IF EXISTS "app"."assert_platform_session_allowed"(text);
+DROP FUNCTION IF EXISTS "app"."platform_account_workspaces"(text);
+DROP FUNCTION IF EXISTS "app"."platform_account_metadata"(text);
 DROP FUNCTION IF EXISTS "app"."platform_role_for_user"(text);
 DROP FUNCTION IF EXISTS "app"."platform_status_for_user"(text);
 DROP FUNCTION IF EXISTS "app"."current_platform_role"();

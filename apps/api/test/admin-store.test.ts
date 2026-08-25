@@ -113,4 +113,85 @@ describe("ADMIN PostgreSQL adapter", () => {
     expect(commandRuns).toBe(1);
     expect(queries.some((query) => query.includes("UPDATE admin_step_up_challenge"))).toBe(true);
   });
+
+  it("replays a completed command whose valid response is JSON null", async () => {
+    let idempotencyInsert = 0;
+    let commandRuns = 0;
+    let requestHash = "";
+    const client = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("INSERT INTO idempotency_key")) {
+          idempotencyInsert += 1;
+          if (idempotencyInsert === 1) requestHash = String(values?.[2] ?? "");
+          return idempotencyInsert === 1
+            ? { rows: [{ id: "key-1" }], rowCount: 1 }
+            : { rows: [], rowCount: 0 };
+        }
+        if (text.includes("UPDATE admin_step_up_challenge"))
+          return { rows: [{ id: "proof-1" }], rowCount: 1 };
+        if (text.includes("UPDATE idempotency_key")) return { rows: [], rowCount: 1 };
+        if (text.includes("SELECT request_hash, status_code, response")) {
+          return {
+            rows: [{ request_hash: requestHash, status_code: 200, response: null }],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release: () => undefined,
+    };
+    const store = new PostgresAdminAccountStore({ connect: async () => client } as never);
+    // Use the store's canonical hash by making the first call; the fake returns
+    // a completed row on the retry regardless of the generated digest.
+    await expect(
+      store.executeIdempotent(
+        "scope",
+        "fixed-null-key-0001",
+        { action: "session:revoke" },
+        async () => {
+          commandRuns += 1;
+          return null;
+        },
+        "admin-user",
+        "step-up-proof",
+      ),
+    ).resolves.toEqual({ replayed: false, result: null });
+    await expect(
+      store.executeIdempotent(
+        "scope",
+        "fixed-null-key-0001",
+        { action: "session:revoke" },
+        async () => {
+          commandRuns += 1;
+          return null;
+        },
+        "admin-user",
+        "step-up-proof",
+      ),
+    ).resolves.toEqual({ replayed: true, result: null });
+    expect(commandRuns).toBe(1);
+  });
+
+  it("stores only a truncated audit IP", async () => {
+    let auditValues: unknown[] | undefined;
+    const client = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("INSERT INTO platform_audit_event")) auditValues = values;
+        return { rows: [], rowCount: 1 };
+      },
+      release: () => undefined,
+    };
+    const store = new PostgresAdminAccountStore({ connect: async () => client } as never);
+    await store.withActor("admin-user", () =>
+      store.recordAudit({
+        actorId: "admin-user",
+        targetId: "target-user",
+        action: "account:read",
+        reason: "review",
+        correlationId: "01J00000000000000000000000",
+        ipAddress: "203.0.113.42",
+      }),
+    );
+    expect(auditValues?.[4]).toBe("203.0.113.0/24");
+  });
 });

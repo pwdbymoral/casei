@@ -174,6 +174,7 @@ function makeAuthMessage(
 ): AuthEmailMessage {
   const callbackUrl = assertCallbackUrlAllowlist(data.url, origins);
   const expiresAt = new Date(Date.now() + expiresIn * 1000);
+  const idempotencyKey = request?.headers.get("idempotency-key")?.trim();
   return {
     kind,
     userId: data.user.id,
@@ -183,7 +184,9 @@ function makeAuthMessage(
     callbackUrl,
     correlationId: authCorrelationId(request),
     expiresAt,
-    sourceId: createHash("sha256").update(`${kind}\0${data.token}`).digest("hex"),
+    sourceId: createHash("sha256")
+      .update(`${kind}\0${idempotencyKey ? `admin:${idempotencyKey}` : data.token}`)
+      .digest("hex"),
   };
 }
 
@@ -207,11 +210,10 @@ export function createAuth(options: AuthOptions = {}) {
     options.platformAccountStatus ??
     (applicationDatabase
       ? async (userId: string): Promise<"active" | "suspended" | null> => {
-          const rows = await applicationDatabase.execute<{ status: string | null }>(
-            sql`SELECT app.platform_status_for_user(${userId}) AS status`,
+          const rows = await applicationDatabase.execute<{ allowed: boolean }>(
+            sql`SELECT app.assert_platform_session_allowed(${userId}) AS allowed`,
           );
-          const status = rows.rows[0]?.status;
-          return status === "active" || status === "suspended" ? status : null;
+          return rows.rows[0]?.allowed === false ? "suspended" : "active";
         }
       : undefined);
   const emailStore =

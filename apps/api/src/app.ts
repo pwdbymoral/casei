@@ -54,6 +54,7 @@ export interface IdentityAppOptions {
     email?: string;
     displayName?: string;
     recentAuthentication?: boolean;
+    twoFactorEnabled?: boolean;
     platformRole?: "platform_admin" | "platform_support" | null;
     stepUpToken?: string;
     ipAddress?: string | null;
@@ -284,6 +285,7 @@ async function defaultActorResolver(
     ipAddress: session.session.ipAddress ?? null,
     endpoint: new URL(context.req.url).pathname,
     recentAuthentication: Number.isFinite(createdAt) && Date.now() - createdAt <= 15 * 60 * 1_000,
+    twoFactorEnabled: session.user.twoFactorEnabled === true,
     platformRole: platformAccess?.role ?? null,
   };
 }

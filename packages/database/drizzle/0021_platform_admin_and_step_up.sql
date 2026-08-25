@@ -99,6 +99,80 @@ AS $$
   SELECT p.status FROM public.platform_account AS p WHERE p.user_id = candidate;
 $$;
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."platform_account_metadata"(candidate text)
+RETURNS TABLE(workspace_count bigint, last_activity_at timestamptz, active_session_count bigint)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, app
+AS $$
+BEGIN
+  IF app.current_platform_role() NOT IN ('platform_admin', 'platform_support') THEN
+    RETURN QUERY SELECT 0::bigint, NULL::timestamptz, 0::bigint;
+    RETURN;
+  END IF;
+  RETURN QUERY
+    SELECT count(DISTINCT CASE WHEN m.status = 'active' AND w.status = 'active' THEN m.workspace_id END),
+           max(s.updated_at),
+           count(DISTINCT CASE WHEN s.expires_at > now() THEN s.id END)
+      FROM public."user" u
+      LEFT JOIN public.membership m ON m.user_id = u.id
+      LEFT JOIN public.workspace w ON w.id = m.workspace_id
+      LEFT JOIN public.session s ON s.user_id = u.id
+     WHERE u.id = candidate;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."platform_account_workspaces"(candidate text)
+RETURNS TABLE(id uuid, name text, status text)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, app
+AS $$
+BEGIN
+  IF app.current_platform_role() NOT IN ('platform_admin', 'platform_support') THEN
+    RETURN;
+  END IF;
+  RETURN QUERY
+    SELECT w.id, w.name, w.status
+      FROM public.workspace w
+      JOIN public.membership m ON m.workspace_id = w.id
+     WHERE m.user_id = candidate AND m.status = 'active'
+     ORDER BY w.id;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."assert_platform_session_allowed"(candidate text)
+RETURNS boolean
+LANGUAGE sql SECURITY DEFINER SET search_path = public, app
+AS $$
+  SELECT NOT EXISTS (
+    SELECT 1
+      FROM public.platform_account p
+     WHERE p.user_id = candidate AND p.status = 'suspended'
+  )
+  AND EXISTS (SELECT 1 FROM public."user" u WHERE u.id = candidate);
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."guard_platform_session_insert"()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('casei.platform.session:' || NEW.user_id, 0));
+  IF NOT app.assert_platform_session_allowed(NEW.user_id) THEN
+    RAISE EXCEPTION 'platform session is not allowed' USING ERRCODE = '28000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "app"."lock_platform_session_user"(candidate text)
+RETURNS void
+LANGUAGE sql SECURITY DEFINER SET search_path = public, app
+AS $$
+  SELECT pg_advisory_xact_lock(hashtextextended('casei.platform.session:' || candidate, 0));
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE TRIGGER "platform_session_guard"
+BEFORE INSERT ON "session"
+FOR EACH ROW EXECUTE FUNCTION "app"."guard_platform_session_insert"();
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION "app"."claim_first_platform_admin"(candidate text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app
 AS $$
@@ -128,6 +202,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
 GRANT EXECUTE ON FUNCTION "app"."current_platform_role"() TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."platform_role_for_user"(text) TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."platform_status_for_user"(text) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."platform_account_metadata"(text) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."platform_account_workspaces"(text) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."assert_platform_session_allowed"(text) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."lock_platform_session_user"(text) TO casei_app;
+GRANT EXECUTE ON FUNCTION "app"."guard_platform_session_insert"() TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."claim_first_platform_admin"(text) TO casei_app;
 --> statement-breakpoint
 ALTER TABLE "platform_account" ENABLE ROW LEVEL SECURITY;

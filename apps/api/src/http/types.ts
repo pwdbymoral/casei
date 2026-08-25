@@ -9,6 +9,8 @@ export interface RequestActor {
   recentAuthentication?: boolean;
   /** One-use server-issued proof for mutating platform commands. */
   stepUpToken?: string;
+  /** Better Auth's persisted enrollment state, never accepted from the client. */
+  twoFactorEnabled?: boolean;
   /** Request provenance retained for administrative audit, never authorization. */
   ipAddress?: string | null;
   endpoint?: string | null;
