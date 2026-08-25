@@ -110,7 +110,7 @@ BEGIN
   END IF;
   RETURN QUERY
     SELECT count(DISTINCT CASE WHEN m.status = 'active' AND w.status = 'active' THEN m.workspace_id END),
-           max(s.updated_at),
+           max(s.updated_at)::timestamptz,
            count(DISTINCT CASE WHEN s.expires_at > now() THEN s.id END)
       FROM public."user" u
       LEFT JOIN public.membership m ON m.user_id = u.id
