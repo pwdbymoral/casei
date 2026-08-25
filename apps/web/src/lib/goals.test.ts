@@ -5,7 +5,9 @@ import {
   createHttpGoalsAdapter,
   type Goal,
   type GoalMovement,
+  goalPace,
   goalProgressPercent,
+  simulateGoalContribution,
 } from "./goals";
 
 const goal: Goal = {
@@ -32,6 +34,62 @@ describe("goals adapter", () => {
     expect(goalProgressPercent({ ...goal, reserved: { currency: "BRL", minor: "120000" } })).toBe(
       100,
     );
+  });
+
+  it("derives pace guidance from the server-provided goal planning fields", () => {
+    expect(goalPace(goal)).toEqual({
+      status: "on_track",
+      periods: 5,
+      monthlyMinor: "15000",
+    });
+    expect(
+      goalPace({
+        ...goal,
+        remaining: { currency: "BRL", minor: "0" },
+        contributionPeriodsRemaining: 5,
+        requiredContribution: null,
+      }),
+    ).toMatchObject({ status: "complete" });
+    expect(goalPace({ ...goal, contributionPeriodsRemaining: null })).toEqual({
+      status: "no_deadline",
+      periods: null,
+      monthlyMinor: null,
+    });
+    expect(
+      goalPace({ ...goal, contributionPeriodsRemaining: 0, requiredContribution: null }),
+    ).toEqual({ status: "overdue", periods: 0, monthlyMinor: null });
+  });
+
+  it("simulates contribution periods without mutating the goal or using floating point", () => {
+    expect(simulateGoalContribution(goal, "20000")).toEqual({
+      periodsToTarget: BigInt(4),
+      reachesByDeadline: true,
+      deadlinePeriods: 5,
+    });
+    expect(simulateGoalContribution(goal, "10000")).toEqual({
+      periodsToTarget: BigInt(8),
+      reachesByDeadline: false,
+      deadlinePeriods: 5,
+    });
+    expect(
+      simulateGoalContribution({ ...goal, contributionPeriodsRemaining: null }, "10000"),
+    ).toEqual({
+      periodsToTarget: BigInt(8),
+      reachesByDeadline: null,
+      deadlinePeriods: null,
+    });
+    expect(simulateGoalContribution(goal, "0")).toEqual({
+      periodsToTarget: null,
+      reachesByDeadline: null,
+      deadlinePeriods: 5,
+    });
+    expect(
+      simulateGoalContribution({ ...goal, remaining: { currency: "BRL", minor: "0" } }, "10000"),
+    ).toEqual({
+      periodsToTarget: BigInt(0),
+      reachesByDeadline: true,
+      deadlinePeriods: 5,
+    });
   });
 
   it("uses the published goal routes and concurrency headers", async () => {
