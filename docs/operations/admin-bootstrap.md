@@ -15,6 +15,12 @@ ou e-mail enviados pelo navegador.
 
 O primeiro admin não é criado por seed automático, header, fixture ou sessão fabricada. Promoções,
 rebaixamentos, suspensão e reativação posteriores acontecem no console, com autenticação recente,
-motivo e auditoria transacional. A migration que cria `platform_account` e `platform_audit_event`
-deve entrar somente após DATA-004/0019 e cartões/0020, com o próximo índice livre definido na
-integração; este runbook não fixa o número.
+motivo e auditoria transacional. Aplique `0021_platform_admin_and_step_up.sql` depois de
+DATA-004/0019 e cartões/0020. Essa migration cria o papel persistido, o schema oficial do Better
+Auth two-factor, RLS e as funções controladas de metadados administrativos. Após o bootstrap, o
+primeiro `platform_admin` precisa cadastrar e verificar TOTP; sem isso o layout/API liberam somente
+a jornada de enrollment, não contas, sessões ou comandos.
+
+Reenvios de verificação/recuperação são enfileirados fora da transação de comando e usam a chave de
+idempotência como identidade determinística do outbox. Em migrations futuras, use 0022 ou superior;
+não altere 0019, 0020 ou 0021 depois de aplicadas.
