@@ -64,6 +64,7 @@ describe("finance HTTP composition", () => {
 
   it("mounts deterministic insight endpoints behind the workspace scope", async () => {
     const received: string[] = [];
+    const reportCalls: Array<{ workspaceId: string; kind?: string; categoryId?: string }> = [];
     const app = createApp(undefined, {
       identity: {
         pool: {} as Pool,
@@ -81,6 +82,17 @@ describe("finance HTTP composition", () => {
         pool: {} as Pool,
         service: {} as FinanceService,
         insightService: {
+          getReport: async (
+            scope: { workspaceId: string },
+            query: { from?: string; kind?: string; categoryId?: string },
+          ) => {
+            reportCalls.push({
+              workspaceId: scope.workspaceId,
+              kind: query.kind,
+              categoryId: query.categoryId,
+            });
+            return { endpoint: "reports", from: query.from };
+          },
           getFinancialReadModel: async (
             scope: { workspaceId: string },
             query: { from?: string },
@@ -102,6 +114,13 @@ describe("finance HTTP composition", () => {
     expect(financial.status).toBe(200);
     await expect(financial.json()).resolves.toEqual({ endpoint: "financial" });
     expect(received).toEqual([`${workspaceId}:2026-08-01`]);
+
+    const report = await app.request(
+      `/v1/workspaces/${workspaceId}/insights/reports?from=2026-08-01&to=2026-08-31&kind=expense`,
+    );
+    expect(report.status).toBe(200);
+    await expect(report.json()).resolves.toEqual({ endpoint: "reports", from: "2026-08-01" });
+    expect(reportCalls).toEqual([{ workspaceId, kind: "expense", categoryId: undefined }]);
 
     const safe = await app.request(
       `/v1/workspaces/${workspaceId}/insights/safe-to-spend?horizonDays=45`,
