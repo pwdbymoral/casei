@@ -1,6 +1,6 @@
 # Plano: LOAN-001/002 IOU simples
 
-- Status: concluído
+- Status: em andamento — histórico persistente LOAN-003
 - Spec associada: [finanças](../../specs/financas.md)
 - Plano macro: [MVP Casei](mvp-casei.md)
 
@@ -72,8 +72,22 @@ O incremento web foi implementado na rota `/app/loans` com:
 - histórico visual do contrato e dos pagamentos carregados pelo fixture ou
   registrados na sessão atual.
 
-O contrato HTTP vigente ainda não possui uma leitura de `loan_payment`. Por
-isso, após um recarregamento autenticado a tela exibe o principal já pago como
-agregado, sem fabricar datas ou itens individuais que a API não retorna. A
-leitura persistente detalhada dos pagamentos permanece uma extensão de API
-necessária antes de declarar o histórico completo concluído.
+### Histórico persistente de pagamentos
+
+- `GET /v1/workspaces/:workspaceId/loans/:loanId/payments` retorna os pagamentos
+  persistidos em páginas com cursor opaco e assinado, ordenados por data civil e
+  ID decrescentes.
+- Serviço, rota e adapter validam contrato e workspace antes da leitura; um ID
+  pertencente a outro espaço se comporta como não encontrado.
+- A UI carrega as páginas do histórico real ao abrir o espaço e mantém o novo
+  pagamento na sessão sem duplicá-lo sob retry.
+- Testes cobrem paginação, cursor inválido, isolamento entre espaços, contrato
+  inexistente e mapeamento HTTP/fixture.
+
+Validação local desta extensão: o ciclo Red confirmou ausência de schema,
+serviço e rota; depois do Green, as suítes da API (129 testes) e web (101
+testes), typecheck de API/web/contracts e builds de API/web passaram. A rota
+`/app/loans` foi validada no navegador com fixtures após recarregamento, em
+390 px e 1440 px, sem overflow horizontal nem erro de console. Os testes
+PostgreSQL de paginação e isolamento ficam condicionados a `DATABASE_URL_TEST`
+e foram coletados, mas pulados no ambiente local sem esse serviço.

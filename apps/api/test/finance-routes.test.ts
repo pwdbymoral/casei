@@ -12,8 +12,56 @@ const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
 const cardId = "0190f3c8-2a10-7abc-8def-1234567890ad";
 const statementId = "0190f3c8-2a10-7abc-8def-1234567890ae";
 const statementItemId = "0190f3c8-2a10-7abc-8def-1234567890af";
+const loanId = "0190f3c8-2a10-7abc-8def-1234567890b1";
 
 describe("finance HTTP composition", () => {
+  it("lists an authenticated, scoped loan payment page", async () => {
+    const calls: unknown[][] = [];
+    const payment = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890b2",
+      loanId,
+      amount: { currency: "BRL", minor: "250" },
+      occurredOn: "2026-08-24",
+    };
+    const fakeService = {
+      listLoanPayments: async (...args: unknown[]) => {
+        calls.push(args);
+        return { items: [payment], nextCursor: "signed-next", hasMore: true };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({
+        actor,
+        workspaceId: id,
+        role: "viewer" as const,
+      }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/loans/${loanId}/payments?cursor=signed-old&limit=25`,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      items: [payment],
+      page: { nextCursor: "signed-next", hasMore: true },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toMatchObject({ workspaceId, role: "viewer" });
+    expect(calls[0]?.slice(1)).toEqual([loanId, { cursor: "signed-old", limit: 25 }]);
+  });
+
   it("mounts deterministic insight endpoints behind the workspace scope", async () => {
     const received: string[] = [];
     const app = createApp(undefined, {

@@ -36,9 +36,20 @@ export type CreateLoanInput = {
 export type LoanPaymentInput = { amount: LoanMoney; occurredOn?: string };
 export type LoanPage = { items: Loan[]; nextCursor: string | null; hasMore: boolean };
 export type LoanPageQuery = { limit?: number };
+export type LoanPaymentPage = {
+  items: LoanPayment[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+export type LoanPaymentPageQuery = { cursor?: string; limit?: number };
 
 export type LoansAdapter = {
   listLoans(workspaceId: string, query?: LoanPageQuery): Promise<LoanPage>;
+  listPayments(
+    workspaceId: string,
+    loanId: string,
+    query?: LoanPaymentPageQuery,
+  ): Promise<LoanPaymentPage>;
   createLoan(workspaceId: string, input: CreateLoanInput, idempotencyKey?: string): Promise<Loan>;
   payLoan(
     workspaceId: string,
@@ -88,6 +99,7 @@ const unavailableLoanOperation = async (..._args: unknown[]): Promise<never> => 
 
 export const unauthenticatedLoansAdapter: LoansAdapter = {
   listLoans: unavailableLoanOperation,
+  listPayments: unavailableLoanOperation,
   createLoan: unavailableLoanOperation,
   payLoan: unavailableLoanOperation,
 };
@@ -146,6 +158,20 @@ export function createHttpLoansAdapter(
         hasMore: page.page.hasMore,
       };
     },
+    listPayments: async (workspaceId, loanId, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.cursor !== undefined) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const search = params.toString();
+      const page = await call<JsonPage<LoanPayment>>(
+        path(workspaceId, `/${encodeURIComponent(loanId)}/payments`) + (search ? `?${search}` : ""),
+      );
+      return {
+        items: page.items,
+        nextCursor: page.page.nextCursor,
+        hasMore: page.page.hasMore,
+      };
+    },
     createLoan: (workspaceId, input, commandKey) =>
       call<Loan>(path(workspaceId), {
         method: "POST",
@@ -164,9 +190,37 @@ export function createHttpLoansAdapter(
   };
 }
 
-type FixtureLoansAdapter = LoansAdapter & {
-  listPayments(workspaceId: string, loanId: string): Promise<LoanPayment[]>;
-};
+type FixtureLoansAdapter = LoansAdapter;
+
+export async function listAllLoanPayments(
+  adapter: Pick<LoansAdapter, "listPayments">,
+  workspaceId: string,
+  loanId: string,
+  limit = 100,
+): Promise<LoanPayment[]> {
+  const items: LoanPayment[] = [];
+  let cursor: string | undefined;
+  let hasMore = true;
+  const visited = new Set<string>();
+  while (hasMore) {
+    const page = await adapter.listPayments(workspaceId, loanId, {
+      ...(cursor ? { cursor } : {}),
+      limit,
+    });
+    items.push(...page.items);
+    hasMore = page.hasMore;
+    if (!hasMore) break;
+    if (!page.nextCursor) {
+      throw new LoansAdapterError("O histórico retornou uma paginação incompleta.");
+    }
+    if (visited.has(page.nextCursor)) {
+      throw new LoansAdapterError("O histórico retornou uma paginação inválida.");
+    }
+    visited.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  return items;
+}
 
 function today(): string {
   return new Date().toISOString().slice(0, 10);
@@ -235,6 +289,16 @@ export function createFixtureLoansAdapter(): FixtureLoansAdapter {
           ]
         : [];
     loans.set(workspaceId, seeded);
+    if (workspaceId === "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201") {
+      payments.set(`${workspaceId}:fixture-loan-marina-1`, [
+        {
+          id: "fixture-payment-marina-1",
+          loanId: "fixture-loan-marina-1",
+          amount: { currency: "BRL", minor: "20000" },
+          occurredOn: "2026-08-15",
+        },
+      ]);
+    }
     return seeded;
   };
 
@@ -342,9 +406,26 @@ export function createFixtureLoansAdapter(): FixtureLoansAdapter {
       if (commandId) commands.set(commandId, response);
       return { loan: copyLoan(next), payment: copyPayment(payment) };
     },
-    async listPayments(workspaceId, loanId) {
+    async listPayments(workspaceId, loanId, query = {}) {
       assertLoan(workspaceId, loanId);
-      return (payments.get(`${workspaceId}:${loanId}`) ?? []).map(copyPayment);
+      const ordered = [...(payments.get(`${workspaceId}:${loanId}`) ?? [])].sort(
+        (left, right) =>
+          right.occurredOn.localeCompare(left.occurredOn) || right.id.localeCompare(left.id),
+      );
+      const start = query.cursor
+        ? ordered.findIndex((payment) => payment.id === query.cursor) + 1
+        : 0;
+      if (query.cursor && start === 0) {
+        throw new LoansAdapterError("Cursor de pagamentos inválido.", 400);
+      }
+      const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+      const items = ordered.slice(start, start + limit);
+      const hasMore = start + items.length < ordered.length;
+      return {
+        items: items.map(copyPayment),
+        nextCursor: hasMore ? (items.at(-1)?.id ?? null) : null,
+        hasMore,
+      };
     },
   };
   return adapter;

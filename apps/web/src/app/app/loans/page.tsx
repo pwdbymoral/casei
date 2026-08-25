@@ -36,6 +36,7 @@ import {
   type LoanPayment,
   type LoansAdapter,
   LoansAdapterError,
+  listAllLoanPayments,
   loanCounterpartyAction,
   loanDirectionLabel,
   loanProgressPercent,
@@ -45,9 +46,6 @@ import {
 import { formatMoneyMinor } from "@/lib/money";
 
 type PageStatus = "loading" | "success" | "empty" | "error" | "permission" | "offline";
-type LoanHistoryPort = {
-  listPayments: (workspaceId: string, loanId: string) => Promise<LoanPayment[]>;
-};
 
 function todayInTimeZone(timeZone: string): string {
   return civilDateInTimeZone(new Date(), timeZone);
@@ -89,13 +87,6 @@ function totalRemaining(loans: Loan[], direction: Loan["direction"]): bigint {
         : BigInt(0)),
     BigInt(0),
   );
-}
-
-function historyPort(adapter: LoansAdapter): LoanHistoryPort | null {
-  const candidate = adapter as LoansAdapter & Partial<LoanHistoryPort>;
-  return typeof candidate.listPayments === "function"
-    ? { listPayments: candidate.listPayments.bind(adapter) }
-    : null;
 }
 
 function LoanHistory({
@@ -302,18 +293,14 @@ export default function LoansPage() {
       const page = await adapter.listLoans(workspaceId, { limit: 100 });
       if (generation !== requestGeneration.current) return;
       setLoans(page.items);
-      const port = historyPort(adapter);
-      if (port) {
-        const entries = await Promise.all(
-          page.items.map(
-            async (loan) => [loan.id, await port.listPayments(workspaceId, loan.id)] as const,
-          ),
-        );
-        if (generation !== requestGeneration.current) return;
-        setPayments(Object.fromEntries(entries));
-      } else {
-        setPayments({});
-      }
+      const entries = await Promise.all(
+        page.items.map(
+          async (loan) =>
+            [loan.id, await listAllLoanPayments(adapter, workspaceId, loan.id)] as const,
+        ),
+      );
+      if (generation !== requestGeneration.current) return;
+      setPayments(Object.fromEntries(entries));
       setStatus(page.items.length ? "success" : "empty");
     } catch (cause) {
       if (generation !== requestGeneration.current) return;
@@ -437,7 +424,10 @@ export default function LoansPage() {
       );
       setPayments((current) => ({
         ...current,
-        [result.loan.id]: [...(current[result.loan.id] ?? []), result.payment],
+        [result.loan.id]: [
+          result.payment,
+          ...(current[result.loan.id] ?? []).filter((payment) => payment.id !== result.payment.id),
+        ],
       }));
       setPayingLoan(null);
       setNotice(

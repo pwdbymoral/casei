@@ -4,6 +4,7 @@ import {
   createFixtureLoansAdapter,
   createHttpLoansAdapter,
   type Loan,
+  listAllLoanPayments,
   loanProgressPercent,
   loansAdapterForEnvironment,
 } from "./loans";
@@ -118,6 +119,72 @@ describe("loans adapter", () => {
     ).resolves.toEqual(response);
   });
 
+  it("lists a persisted payment page with an encoded cursor", async () => {
+    const payment = {
+      id: "payment-1",
+      loanId: "loan/1",
+      amount: { currency: "BRL", minor: "25000" },
+      occurredOn: "2026-08-24",
+    };
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(input).toBe(
+        "/v1/workspaces/work%20space/loans/loan%2F1/payments?cursor=next%2Fpage&limit=25",
+      );
+      expect(init?.method).toBeUndefined();
+      return Response.json({
+        items: [payment],
+        page: { nextCursor: "last-page", hasMore: true },
+      });
+    });
+    const adapter = createHttpLoansAdapter({ fetch });
+
+    await expect(
+      adapter.listPayments("work space", "loan/1", { cursor: "next/page", limit: 25 }),
+    ).resolves.toEqual({ items: [payment], nextCursor: "last-page", hasMore: true });
+  });
+
+  it("loads all persisted payment pages without duplicating a cursor", async () => {
+    const adapter = {
+      listPayments: vi
+        .fn()
+        .mockResolvedValueOnce({
+          items: [
+            {
+              id: "payment-2",
+              loanId: "loan-1",
+              amount: { currency: "BRL", minor: "200" },
+              occurredOn: "2026-08-22",
+            },
+          ],
+          nextCursor: "page-2",
+          hasMore: true,
+        })
+        .mockResolvedValueOnce({
+          items: [
+            {
+              id: "payment-1",
+              loanId: "loan-1",
+              amount: { currency: "BRL", minor: "100" },
+              occurredOn: "2026-08-21",
+            },
+          ],
+          nextCursor: null,
+          hasMore: false,
+        }),
+    };
+
+    await expect(
+      listAllLoanPayments(adapter as never, "workspace-1", "loan-1", 1),
+    ).resolves.toMatchObject([{ id: "payment-2" }, { id: "payment-1" }]);
+    expect(adapter.listPayments).toHaveBeenNthCalledWith(1, "workspace-1", "loan-1", {
+      limit: 1,
+    });
+    expect(adapter.listPayments).toHaveBeenNthCalledWith(2, "workspace-1", "loan-1", {
+      cursor: "page-2",
+      limit: 1,
+    });
+  });
+
   it("preserves API conflict details for stale payment versions", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       Response.json(
@@ -164,7 +231,19 @@ describe("loans adapter", () => {
       status: "settled",
       version: 2,
     });
-    await expect(adapter.listPayments(workspaceId, created.id)).resolves.toHaveLength(2);
+    await expect(
+      adapter.listPayments(workspaceId, created.id, { limit: 1 }),
+    ).resolves.toMatchObject({
+      items: [{ id: settled.payment.id }],
+      hasMore: true,
+    });
+    await expect(listAllLoanPayments(adapter, workspaceId, created.id, 1)).resolves.toMatchObject([
+      { id: settled.payment.id },
+      { id: partial.payment.id },
+    ]);
+    await expect(adapter.listPayments("other-workspace", created.id)).rejects.toMatchObject({
+      status: 404,
+    });
     await expect(
       adapter.payLoan(
         workspaceId,
