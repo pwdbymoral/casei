@@ -306,7 +306,7 @@ describe("CARD-003 statement adjustment PostgreSQL", () => {
           },
           "card-purchase-integration-001",
         );
-        expect(typeof purchase.transaction.occurredOn).toBe("string");
+        expect(purchase.transaction.occurredOn).toBe("2030-01-05");
         const firstStatement = (await finance.listStatements(scope, card.id))[0];
         expect(firstStatement).toBeTruthy();
         if (!firstStatement) throw new Error("expected an open statement");
@@ -386,7 +386,7 @@ describe("CARD-003 statement adjustment PostgreSQL", () => {
             winner.response.statement.version,
           ),
         ).rejects.toMatchObject({
-          name: "FinanceConflictError",
+          code: "conflict",
           message: "O estorno precisa apontar para uma compra realizada deste cartão.",
         });
         await expect(
@@ -397,7 +397,7 @@ describe("CARD-003 statement adjustment PostgreSQL", () => {
             winner.response.transaction.version,
           ),
         ).rejects.toMatchObject({
-          name: "FinanceConflictError",
+          code: "conflict",
           message:
             "Este lançamento é um ajuste da fatura; abra a fatura e registre a correção correspondente.",
         });
