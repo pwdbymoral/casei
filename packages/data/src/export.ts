@@ -719,13 +719,17 @@ function zipEndOfCentralDirectory(
 
 async function* versionedZipChunks(
   csvExport: VersionedCsvExport,
+  csvReader: ReadableStreamDefaultReader<Uint8Array>,
+  cancelCsv: () => Promise<void>,
+  releaseCsvReader: () => void,
+  markStarted: () => void,
 ): AsyncGenerator<Uint8Array, void, undefined> {
+  markStarted();
   const encoder = new TextEncoder();
   const csvName = encoder.encode(csvExport.fileName);
   const manifestName = encoder.encode("manifest.json");
   const entries: ZipEntryStats[] = [];
   let archiveOffset = 0;
-  let csvReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let csvDone = false;
 
   try {
@@ -734,7 +738,6 @@ async function* versionedZipChunks(
     yield csvHeader;
     archiveOffset += csvHeader.byteLength;
 
-    csvReader = csvExport.stream.getReader();
     let csvCrc = 0xffffffff;
     let csvSize = 0;
     while (true) {
@@ -796,17 +799,8 @@ async function* versionedZipChunks(
     archiveOffset += end.byteLength;
     yield end;
   } finally {
-    if (csvReader !== undefined) {
-      if (!csvDone) {
-        try {
-          await csvReader.cancel("ZIP export cancelled");
-        } catch {
-          // Preserve the original stream error; the underlying CSV stream also
-          // closes its source iterator on cancel/error.
-        }
-      }
-      csvReader.releaseLock();
-    }
+    if (!csvDone) await cancelCsv();
+    releaseCsvReader();
   }
 }
 
@@ -820,7 +814,31 @@ async function* versionedZipChunks(
 export function createVersionedZipExport(options: VersionedZipExportOptions): VersionedZipExport {
   const csvExport = createVersionedCsvExport(options);
   const fileName = validateZipFileName(options.zipFileName ?? `${options.domain}.zip`);
-  const iterator = versionedZipChunks(csvExport);
+  // Acquire the CSV reader before the ZIP generator starts. An async
+  // generator's `return()` does not execute its `finally` block when it has
+  // never been started, so the wrapper must still be able to cancel the CSV
+  // stream when a client cancels the ZIP before its first pull.
+  const csvReader = csvExport.stream.getReader();
+  let csvCancelled = false;
+  let csvReaderReleased = false;
+  let generatorStarted = false;
+  const cancelCsv = async (): Promise<void> => {
+    if (csvCancelled) return;
+    csvCancelled = true;
+    try {
+      await csvReader.cancel("ZIP export cancelled");
+    } catch {
+      // Preserve the original stream error; cleanup is best effort.
+    }
+  };
+  const releaseCsvReader = (): void => {
+    if (csvReaderReleased) return;
+    csvReaderReleased = true;
+    csvReader.releaseLock();
+  };
+  const iterator = versionedZipChunks(csvExport, csvReader, cancelCsv, releaseCsvReader, () => {
+    generatorStarted = true;
+  });
   const next = iterator.next.bind(iterator);
   const returnIterator = iterator.return?.bind(iterator);
   let reading = false;
@@ -840,9 +858,17 @@ export function createVersionedZipExport(options: VersionedZipExportOptions): Ve
     },
     async cancel() {
       try {
+        // Cancel the underlying CSV first. This also rejects its manifest if
+        // the ZIP generator has not started (or is waiting on a CSV pull).
+        await cancelCsv();
         await returnIterator?.();
       } catch {
         // The stream is already cancelled; preserve the cancellation result.
+      } finally {
+        // An unstarted async generator does not run `finally`; release its
+        // reader explicitly in that only case. A started generator releases
+        // it from versionedZipChunks' finally block.
+        if (!generatorStarted) releaseCsvReader();
       }
     },
   });

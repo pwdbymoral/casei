@@ -301,6 +301,79 @@ describe("exportação ZIP versionada", () => {
     expect(returnCalls).toBe(1);
     await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
   });
+
+  it("cancela a fonte e rejeita o manifesto quando o ZIP é cancelado antes da primeira leitura", async () => {
+    let returnCalls = 0;
+    const exported = createVersionedZipExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              return {
+                done: false,
+                value: {
+                  casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+                  description: "linha",
+                  amount_minor: "1",
+                },
+              };
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    const reader = exported.stream.getReader();
+
+    await reader.cancel("cliente desconectou antes da leitura");
+
+    // The source is still lazy at this point; cancellation must nevertheless
+    // reject the CSV-derived manifest.
+    expect(returnCalls).toBe(0);
+    await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+    await expect(exported.manifestJson).rejects.toMatchObject({ code: "stream_cancelled" });
+  });
+
+  it("cancela a fonte e rejeita o manifesto depois de emitir apenas o cabeçalho ZIP", async () => {
+    let returnCalls = 0;
+    const exported = createVersionedZipExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              return {
+                done: false,
+                value: {
+                  casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+                  description: "linha",
+                  amount_minor: "1",
+                },
+              };
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    const reader = exported.stream.getReader();
+
+    const header = await reader.read();
+    expect(header.done).toBe(false);
+    expect(header.value?.byteLength).toBeGreaterThan(0);
+    await reader.cancel("cliente desconectou depois do cabeçalho");
+
+    expect(returnCalls).toBe(0);
+    await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+    await expect(exported.manifestJson).rejects.toMatchObject({ code: "stream_cancelled" });
+  });
 });
 
 describe("limites e falhas seguras da exportação", () => {
