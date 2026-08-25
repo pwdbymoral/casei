@@ -361,6 +361,7 @@ export type UpdateCategoryInput = { name?: string; kind?: Category["kind"] };
 
 export type FinanceAdapter = {
   listTransactions(workspaceId: string, query?: TransactionQuery): Promise<TransactionPage>;
+  getTransaction(workspaceId: string, transactionId: string): Promise<Transaction>;
   listTransactionAudit(
     workspaceId: string,
     transactionId: string,
@@ -418,6 +419,7 @@ export type FinanceAdapter = {
   ): Promise<CreditCard>;
   archiveCard(workspaceId: string, card: CreditCard): Promise<CreditCard>;
   listStatements(workspaceId: string, cardId?: string): Promise<Statement[]>;
+  getStatement(workspaceId: string, statementId: string): Promise<Statement>;
   listStatementItems(
     workspaceId: string,
     statementId: string,
@@ -511,6 +513,7 @@ const unavailableFinanceOperation = async (..._args: unknown[]): Promise<never> 
 /** Safe default for environments without an explicit authenticated API origin. */
 export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   listTransactions: unavailableFinanceOperation,
+  getTransaction: unavailableFinanceOperation,
   listTransactionAudit: unavailableFinanceOperation,
   getTransactionAudit: unavailableFinanceOperation,
   createTransaction: unavailableFinanceOperation,
@@ -526,6 +529,7 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   updateCard: unavailableFinanceOperation,
   archiveCard: unavailableFinanceOperation,
   listStatements: unavailableFinanceOperation,
+  getStatement: unavailableFinanceOperation,
   listStatementItems: unavailableFinanceOperation,
   closeStatement: unavailableFinanceOperation,
   reopenStatement: unavailableFinanceOperation,
@@ -597,6 +601,10 @@ export function createHttpFinanceAdapter(
         hasMore: response.page.hasMore,
       }));
     },
+    getTransaction: (workspaceId, transactionId) =>
+      call<Transaction>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/transactions/${encodeURIComponent(transactionId)}`,
+      ),
     listTransactionAudit: (workspaceId, transactionId, query = {}) => {
       const params = new URLSearchParams();
       if (query.cursor) params.set("cursor", query.cursor);
@@ -698,6 +706,10 @@ export function createHttpFinanceAdapter(
     listStatements: (workspaceId, cardId) =>
       list<Statement>(
         `/workspaces/${workspaceId}/statements${cardId ? `?cardId=${encodeURIComponent(cardId)}` : ""}`,
+      ),
+    getStatement: (workspaceId, statementId) =>
+      call<Statement>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/statements/${encodeURIComponent(statementId)}`,
       ),
     listStatementItems: (workspaceId, statementId, query = {}) => {
       const params = new URLSearchParams();
@@ -928,6 +940,13 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         nextCursor: hasMore ? `fixture:${start + limit}` : null,
         hasMore,
       };
+    },
+    getTransaction: async (workspaceId, transactionId) => {
+      const transaction = stateFor(workspaceId).transactions.find(
+        (item) => item.id === transactionId,
+      );
+      if (!transaction) throw new FinanceAdapterError("Lançamento não encontrado.", 404);
+      return transaction;
     },
     createTransaction: async (workspaceId, input, commandKey) => {
       const state = stateFor(workspaceId);
@@ -1269,6 +1288,11 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       stateFor(workspaceId).statements.filter(
         (statement) => !cardId || statement.cardId === cardId,
       ),
+    getStatement: async (workspaceId, statementId) => {
+      const statement = stateFor(workspaceId).statements.find((item) => item.id === statementId);
+      if (!statement) throw new FinanceAdapterError("Fatura não encontrada.", 404);
+      return statement;
+    },
     listStatementItems: async (workspaceId, statementId, query = {}) => {
       const state = stateFor(workspaceId);
       const allItems = state.transactions
