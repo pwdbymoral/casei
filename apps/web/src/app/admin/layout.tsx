@@ -9,8 +9,12 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
   if (!session || !["platform_admin", "platform_support"].includes(session.role)) {
     return <AdminAccessDeniedState />;
   }
-  if (session.role === "platform_admin" && !session.twoFactorEnabled) {
+  if (!session.twoFactorEnabled) {
     return <AdminTwoFactorEnrollment />;
   }
-  return <AdminShell displayName={session.displayName}>{children}</AdminShell>;
+  return (
+    <AdminShell displayName={session.displayName} platformRole={session.role}>
+      {children}
+    </AdminShell>
+  );
 }

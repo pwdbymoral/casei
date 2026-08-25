@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import { useRef, useState } from "react";
 
 import { AsyncState } from "@/components/primitives";
+import { useAdminPlatformRole } from "@/components/shell/admin-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,6 +54,7 @@ function formatDate(value: string | null): string {
 }
 
 export default function AdminAccountsPage() {
+  const platformRole = useAdminPlatformRole();
   const [query, setQuery] = useState("");
   const [listState, setListState] = useState<ListState>("idle");
   const [accounts, setAccounts] = useState<AdminAccountSummary[]>([]);
@@ -67,6 +69,7 @@ export default function AdminAccountsPage() {
   );
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [lastCorrelationId, setLastCorrelationId] = useState<string | null>(null);
   const actionCommandKey = useRef<string | null>(null);
   const [stepUpToken, setStepUpToken] = useState<string | null>(null);
   const [stepUpExpiresAt, setStepUpExpiresAt] = useState<number | null>(null);
@@ -87,8 +90,8 @@ export default function AdminAccountsPage() {
     setSelectedId(null);
     try {
       const result = await authenticatedAdminAdapter.searchAccounts(term);
-      setAccounts(result.items);
-      setListState(result.items.length === 0 ? "empty" : "success");
+      setAccounts(result.data.items);
+      setListState(result.data.items.length === 0 ? "empty" : "success");
     } catch (caught) {
       const adapterError = caught instanceof AdminAdapterError ? caught : null;
       setListState(
@@ -106,9 +109,12 @@ export default function AdminAccountsPage() {
     setSelectedId(userId);
     setActionError(null);
     try {
-      setSelected(await authenticatedAdminAdapter.getAccount(userId));
+      const result = await authenticatedAdminAdapter.getAccount(userId);
+      setSelected(result.data);
+      setError(null);
     } catch (caught) {
       setSelected(null);
+      setListState("error");
       setError(
         caught instanceof AdminAdapterError ? caught.message : "Não foi possível carregar a conta.",
       );
@@ -123,6 +129,7 @@ export default function AdminAccountsPage() {
     setSessionId(nextSessionId);
     setReason("");
     setActionError(null);
+    setLastCorrelationId(null);
     actionCommandKey.current = createAdminCommandKey(nextAction);
     setStepUpToken(null);
     setStepUpExpiresAt(null);
@@ -139,8 +146,8 @@ export default function AdminAccountsPage() {
     setActionBusy(true);
     setActionError(null);
     try {
-      let commandStepUpToken =
-        stepUpToken && stepUpExpiresAt && stepUpExpiresAt > Date.now() ? stepUpToken : null;
+      let commandStepUpToken: string | undefined =
+        stepUpToken && stepUpExpiresAt && stepUpExpiresAt > Date.now() ? stepUpToken : undefined;
       if (!commandStepUpToken) {
         if (!stepUpCode.trim()) {
           setActionError("Informe o código do autenticador para continuar.");
@@ -150,19 +157,20 @@ export default function AdminAccountsPage() {
           stepUpMethod,
           stepUpCode.trim(),
         );
-        commandStepUpToken = stepUp.token;
-        setStepUpToken(stepUp.token);
-        setStepUpExpiresAt(Date.now() + stepUp.expiresInSeconds * 1_000);
+        commandStepUpToken = stepUp.data.token;
+        setStepUpToken(stepUp.data.token);
+        setStepUpExpiresAt(Date.now() + stepUp.data.expiresInSeconds * 1_000);
         setStepUpCode("");
       }
       if (action === "session" && sessionId) {
-        await authenticatedAdminAdapter.revokeSession(
+        const command = await authenticatedAdminAdapter.revokeSession(
           selected.userId,
           sessionId,
           reason,
           actionCommandKey.current ?? undefined,
           commandStepUpToken,
         );
+        setLastCorrelationId(command.correlationId);
         actionCommandKey.current = null;
         setAction(null);
         setSessionId(null);
@@ -170,47 +178,53 @@ export default function AdminAccountsPage() {
         return;
       }
       let updated = selected;
+      let commandCorrelationId: string | null = null;
       if (action === "suspend")
-        updated = await authenticatedAdminAdapter.suspend(
-          selected.userId,
-          reason,
-          actionCommandKey.current ?? undefined,
-          commandStepUpToken,
-        );
+        ({ data: updated, correlationId: commandCorrelationId } =
+          await authenticatedAdminAdapter.suspend(
+            selected.userId,
+            reason,
+            actionCommandKey.current ?? undefined,
+            commandStepUpToken,
+          ));
       if (action === "reactivate")
-        updated = await authenticatedAdminAdapter.reactivate(
-          selected.userId,
-          reason,
-          actionCommandKey.current ?? undefined,
-          commandStepUpToken,
-        );
+        ({ data: updated, correlationId: commandCorrelationId } =
+          await authenticatedAdminAdapter.reactivate(
+            selected.userId,
+            reason,
+            actionCommandKey.current ?? undefined,
+            commandStepUpToken,
+          ));
       if (action === "role") {
-        updated = await authenticatedAdminAdapter.changeRole(
-          selected.userId,
-          role === "none" ? null : role,
-          reason,
-          actionCommandKey.current ?? undefined,
-          commandStepUpToken,
-        );
+        ({ data: updated, correlationId: commandCorrelationId } =
+          await authenticatedAdminAdapter.changeRole(
+            selected.userId,
+            role === "none" ? null : role,
+            reason,
+            actionCommandKey.current ?? undefined,
+            commandStepUpToken,
+          ));
       }
       if (action === "verification")
-        await authenticatedAdminAdapter.resendVerification(
-          selected.userId,
-          reason,
-          actionCommandKey.current ?? undefined,
-          commandStepUpToken,
-        );
+        ({ correlationId: commandCorrelationId } =
+          await authenticatedAdminAdapter.resendVerification(
+            selected.userId,
+            reason,
+            actionCommandKey.current ?? undefined,
+            commandStepUpToken,
+          ));
       if (action === "recovery")
-        await authenticatedAdminAdapter.resendRecovery(
+        ({ correlationId: commandCorrelationId } = await authenticatedAdminAdapter.resendRecovery(
           selected.userId,
           reason,
           actionCommandKey.current ?? undefined,
           commandStepUpToken,
-        );
+        ));
       actionCommandKey.current = null;
       setStepUpToken(null);
       setStepUpExpiresAt(null);
       setSelected(updated);
+      setLastCorrelationId(commandCorrelationId);
       setAccounts((current) =>
         current.map((item) => (item.userId === updated.userId ? updated : item)),
       );
@@ -398,6 +412,11 @@ export default function AdminAccountsPage() {
                   {actionError}
                 </p>
               ) : null}
+              {lastCorrelationId ? (
+                <p className="text-sm text-muted-foreground" role="status">
+                  Ação concluída. Protocolo: <code className="break-all">{lastCorrelationId}</code>
+                </p>
+              ) : null}
               <div className="flex flex-wrap gap-2">
                 {selected.status === "suspended" ? (
                   <Button
@@ -418,14 +437,16 @@ export default function AdminAccountsPage() {
                     <ShieldAlertIcon data-icon="inline-start" aria-hidden="true" /> Suspender login
                   </Button>
                 )}
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={actionBusy}
-                  onClick={() => openAction("role")}
-                >
-                  <UserRoundIcon data-icon="inline-start" aria-hidden="true" /> Alterar papel
-                </Button>
+                {platformRole === "platform_admin" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={actionBusy}
+                    onClick={() => openAction("role")}
+                  >
+                    <UserRoundIcon data-icon="inline-start" aria-hidden="true" /> Alterar papel
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   variant="outline"

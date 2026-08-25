@@ -51,8 +51,12 @@ export class AdminAdapterError extends Error {
 }
 
 type RequestOptions = RequestInit & { idempotencyKey?: string; stepUpToken?: string };
+export type AdminAdapterResult<T> = { data: T; correlationId: string | null };
 
-async function adminRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function adminRequest<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<AdminAdapterResult<T>> {
   const origin = configuredApiOrigin();
   if (!origin) throw new AdminAdapterError(0, "offline", "A origem da API não foi configurada.");
   const headers = new Headers(options.headers);
@@ -61,7 +65,8 @@ async function adminRequest<T>(path: string, options: RequestOptions = {}): Prom
   if (options.idempotencyKey) headers.set("Idempotency-Key", options.idempotencyKey);
   if (options.stepUpToken) headers.set("X-Admin-Step-Up", options.stepUpToken);
   const response = await fetch(`${origin}${path}`, { ...options, headers, credentials: "include" });
-  if (response.status === 204) return undefined as T;
+  const correlationId = response.headers.get("X-Correlation-ID");
+  if (response.status === 204) return { data: undefined as T, correlationId };
   const body = (await response.json().catch(() => null)) as
     | { error?: { code?: string; message?: string } }
     | T
@@ -74,7 +79,7 @@ async function adminRequest<T>(path: string, options: RequestOptions = {}): Prom
       error?.message ?? "Não foi possível concluir a ação.",
     );
   }
-  return body as T;
+  return { data: body as T, correlationId };
 }
 
 export function createAdminCommandKey(action: string): string {
@@ -88,14 +93,14 @@ export function createAdminCommandKey(action: string): string {
 export const authenticatedAdminAdapter = {
   async startTwoFactorEnrollment(
     password: string,
-  ): Promise<{ totpURI: string; backupCodes: string[] }> {
-    return adminRequest("/v1/admin/two-factor/enroll", {
+  ): Promise<AdminAdapterResult<{ totpURI: string; backupCodes: string[] }>> {
+    return adminRequest<{ totpURI: string; backupCodes: string[] }>("/v1/admin/two-factor/enroll", {
       method: "POST",
       body: JSON.stringify({ password }),
     });
   },
-  async verifyTwoFactorEnrollment(code: string): Promise<void> {
-    await adminRequest<void>("/v1/admin/two-factor/verify", {
+  async verifyTwoFactorEnrollment(code: string): Promise<AdminAdapterResult<void>> {
+    return adminRequest<void>("/v1/admin/two-factor/verify", {
       method: "POST",
       body: JSON.stringify({ code }),
     });
@@ -103,17 +108,17 @@ export const authenticatedAdminAdapter = {
   async completeStepUp(
     method: "totp" | "backup_code",
     code: string,
-  ): Promise<{ token: string; expiresInSeconds: number }> {
-    return adminRequest("/v1/admin/step-up", {
+  ): Promise<AdminAdapterResult<{ token: string; expiresInSeconds: number }>> {
+    return adminRequest<{ token: string; expiresInSeconds: number }>("/v1/admin/step-up", {
       method: "POST",
       body: JSON.stringify({ method, code }),
     });
   },
-  async searchAccounts(query: string, limit = 50): Promise<AdminAccountList> {
+  async searchAccounts(query: string, limit = 50): Promise<AdminAdapterResult<AdminAccountList>> {
     const params = new URLSearchParams({ query, limit: String(limit) });
     return adminRequest<AdminAccountList>(`/v1/admin/accounts?${params.toString()}`);
   },
-  async getAccount(userId: string): Promise<AdminAccountDetail> {
+  async getAccount(userId: string): Promise<AdminAdapterResult<AdminAccountDetail>> {
     return adminRequest<AdminAccountDetail>(`/v1/admin/accounts/${encodeURIComponent(userId)}`);
   },
   async suspend(
@@ -121,7 +126,7 @@ export const authenticatedAdminAdapter = {
     reason: string,
     commandKey?: string,
     stepUpToken?: string,
-  ): Promise<AdminAccountDetail> {
+  ): Promise<AdminAdapterResult<AdminAccountDetail>> {
     return adminRequest<AdminAccountDetail>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/suspend`,
       {
@@ -137,7 +142,7 @@ export const authenticatedAdminAdapter = {
     reason: string,
     commandKey?: string,
     stepUpToken?: string,
-  ): Promise<AdminAccountDetail> {
+  ): Promise<AdminAdapterResult<AdminAccountDetail>> {
     return adminRequest<AdminAccountDetail>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/reactivate`,
       {
@@ -154,7 +159,7 @@ export const authenticatedAdminAdapter = {
     reason: string,
     commandKey?: string,
     stepUpToken?: string,
-  ): Promise<AdminAccountDetail> {
+  ): Promise<AdminAdapterResult<AdminAccountDetail>> {
     return adminRequest<AdminAccountDetail>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/platform-role`,
       {
@@ -171,8 +176,8 @@ export const authenticatedAdminAdapter = {
     reason: string,
     commandKey?: string,
     stepUpToken?: string,
-  ): Promise<void> {
-    await adminRequest<void>(
+  ): Promise<AdminAdapterResult<void>> {
+    return adminRequest<void>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
       {
         method: "DELETE",
@@ -187,8 +192,8 @@ export const authenticatedAdminAdapter = {
     reason: string,
     commandKey?: string,
     stepUpToken?: string,
-  ): Promise<void> {
-    await adminRequest<void>(
+  ): Promise<AdminAdapterResult<void>> {
+    return adminRequest<void>(
       `/v1/admin/accounts/${encodeURIComponent(userId)}/verification/resend`,
       {
         method: "POST",
@@ -203,8 +208,8 @@ export const authenticatedAdminAdapter = {
     reason: string,
     commandKey?: string,
     stepUpToken?: string,
-  ): Promise<void> {
-    await adminRequest<void>(`/v1/admin/accounts/${encodeURIComponent(userId)}/recovery/resend`, {
+  ): Promise<AdminAdapterResult<void>> {
+    return adminRequest<void>(`/v1/admin/accounts/${encodeURIComponent(userId)}/recovery/resend`, {
       method: "POST",
       body: JSON.stringify({ reason }),
       idempotencyKey: commandKey ?? createAdminCommandKey("recovery"),

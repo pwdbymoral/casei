@@ -51,7 +51,7 @@ export function assertPlatformTwoFactor(
   role: PlatformRole | null | undefined,
   twoFactorEnabled: boolean | undefined,
 ): void {
-  if (role === "platform_admin" && twoFactorEnabled !== true) {
+  if ((role === "platform_admin" || role === "platform_support") && twoFactorEnabled !== true) {
     throw new AdminPolicyError("step_up_required");
   }
 }

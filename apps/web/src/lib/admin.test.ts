@@ -54,6 +54,27 @@ describe("admin API adapter", () => {
     expect(headers.get("X-Admin-Step-Up")).toBe("step-up-token");
   });
 
+  it("exposes the server correlation ID from successful commands", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ status: "active" }), {
+            status: 200,
+            headers: { "X-Correlation-ID": "01J00000000000000000000000" },
+          }),
+      ),
+    );
+    const result = await authenticatedAdminAdapter.reactivate(
+      "target-user",
+      "reviewed",
+      "admin-reactivate-correlation",
+      "step-up-token",
+    );
+    expect(result.correlationId).toBe("01J00000000000000000000000");
+    expect(result.data).toEqual({ status: "active" });
+  });
+
   it("maps permission and offline failures without exposing response internals", async () => {
     vi.stubGlobal(
       "fetch",

@@ -3,6 +3,7 @@ import {
   AdminPolicyError,
   assertCanPerformPlatformAction,
   assertLastPlatformAdminCanChange,
+  assertPlatformTwoFactor,
   assertRecentPlatformAuthentication,
   normalizeAdminAccountSearch,
   type PlatformAdminAction,
@@ -33,6 +34,16 @@ describe("ADMIN-001 platform policy", () => {
       new AdminPolicyError("recent_auth_required"),
     );
     expect(() => assertRecentPlatformAuthentication(true)).not.toThrow();
+  });
+
+  it("requires TOTP enrollment for both platform roles", () => {
+    expect(() => assertPlatformTwoFactor("platform_admin", false)).toThrowError(
+      new AdminPolicyError("step_up_required"),
+    );
+    expect(() => assertPlatformTwoFactor("platform_support", false)).toThrowError(
+      new AdminPolicyError("step_up_required"),
+    );
+    expect(() => assertPlatformTwoFactor("platform_support", true)).not.toThrow();
   });
 
   it("does not allow the last active platform admin to be removed or suspended", () => {

@@ -178,6 +178,16 @@ describe("ADMIN-001/002 service", () => {
     ).rejects.toMatchObject({ code: "step_up_required" });
   });
 
+  it("requires enrolled TOTP before support can use the console", async () => {
+    const service = new AdminService(new MemoryAdminStore(), new MemoryAuthPort());
+    await expect(
+      service.searchAccounts(
+        { ...actor("platform_support"), twoFactorEnabled: false },
+        { query: "person@example.com", limit: 50 },
+      ),
+    ).rejects.toMatchObject({ code: "step_up_required" });
+  });
+
   it("requires recent authentication for suspension and protects the last admin", async () => {
     const store = new MemoryAdminStore();
     store.current.role = "platform_admin";

@@ -21,8 +21,8 @@ export function AdminTwoFactorEnrollment() {
     setError(null);
     try {
       const result = await authenticatedAdminAdapter.startTwoFactorEnrollment(password);
-      setTotpURI(result.totpURI);
-      setBackupCodes(result.backupCodes);
+      setTotpURI(result.data.totpURI);
+      setBackupCodes(result.data.backupCodes);
     } catch (caught) {
       setError(
         caught instanceof AdminAdapterError
