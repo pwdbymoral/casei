@@ -104,7 +104,7 @@ RETURNS TABLE(workspace_count bigint, last_activity_at timestamptz, active_sessi
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, app
 AS $$
 BEGIN
-  IF app.current_platform_role() NOT IN ('platform_admin', 'platform_support') THEN
+  IF COALESCE(app.current_platform_role(), '') NOT IN ('platform_admin', 'platform_support') THEN
     RETURN QUERY SELECT 0::bigint, NULL::timestamptz, 0::bigint;
     RETURN;
   END IF;
@@ -125,7 +125,7 @@ RETURNS TABLE(id uuid, name text, status text)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, app
 AS $$
 BEGIN
-  IF app.current_platform_role() NOT IN ('platform_admin', 'platform_support') THEN
+  IF COALESCE(app.current_platform_role(), '') NOT IN ('platform_admin', 'platform_support') THEN
     RETURN;
   END IF;
   RETURN QUERY
