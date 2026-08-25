@@ -507,6 +507,9 @@ const fixtureExports = new Map<string, ExportJob>();
 const fixtureImportKeys = new Map<string, ImportJob>();
 const fixtureRetryKeys = new Map<string, ImportJob>();
 const fixtureExportKeys = new Map<string, ExportJob>();
+const fixtureImportFingerprints = new Map<string, string>();
+const fixtureRetryFingerprints = new Map<string, string>();
+const fixtureExportFingerprints = new Map<string, string>();
 
 function fixtureKey(workspaceId: string, key: string): string {
   return `${workspaceId}\u001f${key}`;
@@ -514,6 +517,51 @@ function fixtureKey(workspaceId: string, key: string): string {
 
 function fixturePermission(message: string): DataExchangeError {
   return new DataExchangeError(message, 403, "permission");
+}
+
+function fixturePayloadConflict(): DataExchangeError {
+  return new DataExchangeError("A chave de idempotência já foi usada com outro payload.", 409);
+}
+
+function canonicalFixtureValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalFixtureValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalFixtureValue(nested)]),
+    );
+  }
+  return value;
+}
+
+function fixtureFingerprint(value: unknown): string {
+  return JSON.stringify(canonicalFixtureValue(value));
+}
+
+async function fixtureFileFingerprint(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let hash = 2_166_136_261;
+  for (const byte of bytes) {
+    hash = Math.imul(hash ^ byte, 16_777_619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+async function fixtureImportFingerprint(input: StartImportInput): Promise<string> {
+  return fixtureFingerprint({
+    applyMode: input.applyMode,
+    duplicatePolicy: input.duplicatePolicy,
+    file: {
+      hash: await fixtureFileFingerprint(input.file),
+      lastModified: input.file.lastModified,
+      name: input.file.name,
+      size: input.file.size,
+      type: input.file.type,
+    },
+    mapping: input.mapping,
+    preview: input.preview,
+  });
 }
 
 function rememberImport(job: ImportJob): ImportJob {
@@ -539,8 +587,12 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
   previewImport: (workspaceId, input) => localPreview(workspaceId, input, false),
   async startImport(workspaceId, input, idempotencyKey) {
     const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const fingerprint = await fixtureImportFingerprint(input);
     const replay = fixtureImportKeys.get(replayKey);
-    if (replay) return replay;
+    if (replay) {
+      if (fixtureImportFingerprints.get(replayKey) !== fingerprint) throw fixturePayloadConflict();
+      return replay;
+    }
     if (!input.preview.canConfirm || input.preview.rowLimitExceeded)
       throw new DataExchangeError("Corrija a prévia antes de confirmar a importação.");
     if (input.applyMode === "all_or_nothing" && input.preview.counts.errors > 0)
@@ -565,6 +617,7 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
         message: "A política de revisão exige uma decisão antes de aplicar duplicatas prováveis.",
       };
       fixtureImportKeys.set(replayKey, reviewJob);
+      fixtureImportFingerprints.set(replayKey, fingerprint);
       return rememberImport(reviewJob);
     }
     const job: ImportJob = {
@@ -583,6 +636,7 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
       expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
     };
     fixtureImportKeys.set(replayKey, job);
+    fixtureImportFingerprints.set(replayKey, fingerprint);
     return rememberImport(job);
   },
   async getImportJob(workspaceId, jobId) {
@@ -612,14 +666,20 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     if (current.workspaceId !== workspaceId)
       throw fixturePermission("Esta importação pertence a outro espaço.");
     const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const fingerprint = fixtureFingerprint({ jobId });
     const replay = fixtureRetryKeys.get(replayKey);
-    if (replay) return replay;
+    if (replay) {
+      if (fixtureRetryFingerprints.get(replayKey) !== fingerprint) throw fixturePayloadConflict();
+      return replay;
+    }
     if (current.errors.some((error) => error.message.includes("aguardando revisão"))) {
       fixtureRetryKeys.set(replayKey, current);
+      fixtureRetryFingerprints.set(replayKey, fingerprint);
       return current;
     }
     const next = { ...current, status: "processing" as const, progress: 0, appliedRows: 0 };
     fixtureRetryKeys.set(replayKey, next);
+    fixtureRetryFingerprints.set(replayKey, fingerprint);
     return rememberImport(next);
   },
   async cancelImport(workspaceId, jobId) {
@@ -639,8 +699,12 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
   },
   async createExport(workspaceId, input, idempotencyKey) {
     const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const fingerprint = fixtureFingerprint(input);
     const replay = fixtureExportKeys.get(replayKey);
-    if (replay) return replay;
+    if (replay) {
+      if (fixtureExportFingerprints.get(replayKey) !== fingerprint) throw fixturePayloadConflict();
+      return replay;
+    }
     const job: ExportJob = {
       id: id("export"),
       workspaceId,
@@ -653,6 +717,7 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
       expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
     };
     fixtureExportKeys.set(replayKey, job);
+    fixtureExportFingerprints.set(replayKey, fingerprint);
     return rememberExport(job);
   },
   async getExportJob(workspaceId, jobId) {

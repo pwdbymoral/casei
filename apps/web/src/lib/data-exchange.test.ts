@@ -204,6 +204,19 @@ describe("data exchange UI ports", () => {
       "same-key",
     );
     expect(replay.id).toBe(first.id);
+    await expect(
+      adapter.startImport(
+        "workspace-isolated",
+        {
+          preview,
+          file,
+          mapping: preview.mapping,
+          duplicatePolicy: "import",
+          applyMode: "valid_only",
+        },
+        "same-key",
+      ),
+    ).rejects.toThrow("outro payload");
     await expect(adapter.getImportJob("other-workspace", first.id)).rejects.toMatchObject({
       code: "permission",
     });
@@ -227,6 +240,9 @@ describe("data exchange UI ports", () => {
       "export-key",
     );
     expect(exportReplay.id).toBe(exportJob.id);
+    await expect(
+      adapter.createExport("workspace-export", { domain: "products", format: "csv" }, "export-key"),
+    ).rejects.toThrow("outro payload");
     await expect(adapter.getExportJob("other-workspace", exportJob.id)).rejects.toMatchObject({
       code: "permission",
     });
@@ -262,6 +278,22 @@ describe("data exchange UI ports", () => {
     expect(review.appliedRows).toBe(0);
     const reviewRetry = await adapter.retryImport("workspace-review", review.id, "review-retry");
     expect(reviewRetry.id).toBe(review.id);
+
+    const secondImport = await adapter.startImport(
+      "workspace-isolated",
+      {
+        preview,
+        file,
+        mapping: preview.mapping,
+        duplicatePolicy: "ignore",
+        applyMode: "valid_only",
+      },
+      "second-key",
+    );
+    await adapter.retryImport("workspace-isolated", first.id, "same-retry-key");
+    await expect(
+      adapter.retryImport("workspace-isolated", secondImport.id, "same-retry-key"),
+    ).rejects.toThrow("outro payload");
   });
 
   it("protege mensagens do relatório contra formula injection", () => {
