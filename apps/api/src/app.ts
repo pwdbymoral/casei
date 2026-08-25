@@ -21,6 +21,8 @@ import {
 } from "./http/index.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
+import { configureImportRoutes } from "./import-routes.js";
+import type { ImportApplication } from "./import-service.js";
 import { InsightService } from "./insight-service.js";
 import { configureStockRoutes } from "./stock-routes.js";
 import { StockService } from "./stock-service.js";
@@ -32,6 +34,7 @@ export interface AppOptions {
   finance?: FinanceAppOptions;
   stock?: StockAppOptions;
   identity?: IdentityAppOptions;
+  import?: ImportAppOptions;
 }
 
 export interface IdentityAppOptions {
@@ -66,6 +69,10 @@ export interface StockAppOptions {
   pool: Pool;
   service?: StockService;
   applicationRole?: string;
+}
+
+export interface ImportAppOptions {
+  application: ImportApplication;
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -165,6 +172,18 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
       scopeMiddleware: async (context, next) => {
         if (!actorMiddleware || !scopeMiddleware)
           throw new Error("Stock auth boundary is unavailable");
+        await actorMiddleware(context, async () => {
+          await scopeMiddleware(context, next);
+        });
+      },
+    });
+  }
+  if (options.import) {
+    configureImportRoutes(v1, {
+      application: options.import.application,
+      scopeMiddleware: async (context, next) => {
+        if (!actorMiddleware || !scopeMiddleware)
+          throw new Error("Import auth boundary is unavailable");
         await actorMiddleware(context, async () => {
           await scopeMiddleware(context, next);
         });
