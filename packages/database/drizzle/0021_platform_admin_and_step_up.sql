@@ -117,7 +117,16 @@ BEGIN
 EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
-ALTER ROLE casei_platform_boundary NOLOGIN NOSUPERUSER NOBYPASSRLS;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_roles
+     WHERE rolname = 'casei_platform_boundary'
+       AND (rolcanlogin OR rolsuper OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'casei_platform_boundary must remain NOLOGIN/NOSUPERUSER/NOBYPASSRLS';
+  END IF;
+END $$;
 GRANT USAGE ON SCHEMA "public", "app" TO casei_platform_boundary;
 GRANT SELECT ON "user", "workspace", "membership", "session" TO casei_platform_boundary;
 GRANT SELECT, INSERT, UPDATE ON "platform_account" TO casei_platform_boundary;
