@@ -46,6 +46,7 @@ describe("finance transaction audit history", () => {
         description: "segredo",
         actorEmail: "private@example.test",
         nested: { token: "secret" },
+        walletVersion: 4,
       }),
     ).toEqual({
       kind: "expense",
@@ -54,6 +55,7 @@ describe("finance transaction audit history", () => {
       cardId: null,
       statementId: null,
       version: 2,
+      walletVersion: 4,
     });
     expect(redactFinanceAuditSnapshot(["not", "an", "object"])).toBeNull();
     expect(redactFinanceAuditSnapshot({ version: "2", state: { secret: true } })).toEqual({});

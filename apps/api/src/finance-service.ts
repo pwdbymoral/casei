@@ -3726,8 +3726,10 @@ export function redactFinanceAuditSnapshot(value: unknown): Record<string, unkno
     if (source[key] === null || typeof source[key] === "string")
       snapshot[key] = source[key] ?? null;
   }
-  if (typeof source.version === "number" && Number.isInteger(source.version)) {
-    snapshot.version = source.version;
+  for (const key of ["version", "walletVersion"] as const) {
+    if (typeof source[key] === "number" && Number.isInteger(source[key])) {
+      snapshot[key] = source[key];
+    }
   }
   return snapshot;
 }

@@ -15,7 +15,14 @@ BEGIN
          "updated_at" = now()
    WHERE "workspace_id" = NEW."workspace_id"
      AND "id" = NEW."account_id"
-     AND "kind" = 'wallet';
+     AND "kind" = 'wallet'
+     AND EXISTS (
+       SELECT 1
+         FROM "ledger_event" published_event
+        WHERE published_event."workspace_id" = NEW."workspace_id"
+          AND published_event."id" = NEW."event_id"
+          AND published_event."status" = 'published'
+     );
   RETURN NEW;
 END;
 $$;
@@ -30,6 +37,10 @@ UPDATE "financial_account" account
   FROM (
     SELECT entry."workspace_id", entry."account_id", count(*)::integer AS entry_count
       FROM "ledger_entry" entry
+      JOIN "ledger_event" published_event
+        ON published_event."workspace_id" = entry."workspace_id"
+       AND published_event."id" = entry."event_id"
+       AND published_event."status" = 'published'
       JOIN "financial_account" wallet
         ON wallet."workspace_id" = entry."workspace_id"
        AND wallet."id" = entry."account_id"

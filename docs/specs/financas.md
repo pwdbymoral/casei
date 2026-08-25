@@ -151,7 +151,10 @@ valor zero apenas marca a inicialização como concluída, pois o ledger não ac
 Novos onboardings materializam a abertura na mesma unidade transacional da criação do espaço.
 
 `POST /v1/workspaces/:workspaceId/wallet/adjustments/preview` recebe o saldo observado e retorna,
-sem mutação, o saldo calculado, a diferença assinada e a versão da carteira. A confirmação usa
+sem criar ajuste, o saldo calculado, a diferença assinada e a versão da carteira. Se a preferência
+de saldo inicial ainda estiver pendente (por exemplo, em um espaço legado), essa primeira prévia
+pode materializar a abertura idempotentemente antes do cálculo; essa é a única mutação permitida
+nessa operação e não altera o saldo observado informado. A confirmação usa
 `POST /v1/workspaces/:workspaceId/wallet/adjustments`, repete o saldo observado, exige motivo
 não vazio, `Idempotency-Key` e `If-Match: "v<version>"`, e recalcula a diferença sob lock. Se a
 carteira mudou desde a prévia, responde conflito de versão sem publicar nada; diferença zero é

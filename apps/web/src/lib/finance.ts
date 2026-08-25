@@ -1064,8 +1064,18 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         correlationId: "fixture-correlation",
         result: "success",
         reason: input.reason.trim(),
-        before: { kind: "adjustment", state: "posted", version: expectedWallet.version },
-        after: { kind: "adjustment", state: "posted", version: state.walletVersion },
+        before: {
+          kind: "adjustment",
+          state: "posted",
+          version: transaction.version,
+          walletVersion: expectedWallet.version,
+        },
+        after: {
+          kind: "adjustment",
+          state: "posted",
+          version: transaction.version,
+          walletVersion: state.walletVersion,
+        },
       };
       state.transactionAudit.set(transaction.id, [event]);
       if (commandKey) state.walletAdjustmentCommands.set(commandKey, { fingerprint, result });

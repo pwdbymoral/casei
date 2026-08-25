@@ -1410,7 +1410,8 @@ function FinanceDashboard({
       setWalletAdjustmentPreview(null);
       setWalletAdjustmentReason("");
       setWalletAdjustmentConfirmed(true);
-      await load();
+      if (timelineQuery.cursor) updateTimelineQuery({ cursor: null });
+      else await load(false);
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       if (cause instanceof FinanceAdapterError && cause.status === 412) {
