@@ -69,6 +69,11 @@ O cálculo é informativo e pode divergir do emissor por autorizações pendente
 - Excluir/arquivar cartão com saldo ou fatura aberta é bloqueado; arquivamento permanece disponível após quitar ou transferir os vínculos.
 - Duas compras de mesmo valor/data não são duplicatas por si só.
 - Pagamento e fechamento concorrentes usam lock/versionamento para não produzir saldo incorreto.
+- Estorno e tarifa/juros vinculados à fatura não podem ser revertidos pelo comando genérico da
+  linha do tempo; a correção deve ser registrada na composição da fatura para preservar a origem e
+  a auditoria.
+- Estornos concorrentes da mesma compra usam o lançamento original como lock canônico e nunca
+  podem superar o saldo ainda não estornado.
 
 ## Critérios de aceitação
 

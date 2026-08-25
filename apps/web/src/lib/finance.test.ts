@@ -18,6 +18,8 @@ import {
   listAllTransactions,
   mergeTransactionPage,
   previewInstallmentMinor,
+  type Statement,
+  shouldPreserveStatementAdjustmentCommandKey,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
@@ -1167,6 +1169,96 @@ describe("finance adapter", () => {
     ).toHaveLength(2);
   });
 
+  it("persists statement adjustments and partial refunds without changing the original purchase", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const cardId = "019b5d9e-3c12-7a10-8d47-7b5b5dd7a210";
+    const purchase = await adapter.createTransaction(workspaceId, {
+      kind: "expense",
+      amount: { currency: "BRL", minor: "3000" },
+      cardId,
+      description: "Compra no cartão",
+    });
+    let statement = (await adapter.listStatements(workspaceId))[0] as Statement;
+    statement = await adapter.closeStatement(workspaceId, statement);
+    const adjusted = await adapter.createStatementAdjustment(
+      workspaceId,
+      statement,
+      {
+        kind: "fee",
+        amount: { currency: "BRL", minor: "100" },
+        description: "Tarifa",
+      },
+      "fixture-adjustment-001",
+    );
+    await expect(
+      adapter.createStatementAdjustment(
+        workspaceId,
+        statement,
+        {
+          kind: "fee",
+          amount: { currency: "BRL", minor: "100" },
+          description: "Tarifa",
+        },
+        "fixture-adjustment-001",
+      ),
+    ).resolves.toEqual(adjusted);
+    await expect(
+      adapter.createStatementRefund(
+        workspaceId,
+        adjusted.statement,
+        {
+          sourceTransactionId: adjusted.transaction.id,
+          amount: { currency: "BRL", minor: "10" },
+        },
+        "fixture-refund-from-adjustment-001",
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "A compra original não pertence a este cartão.",
+    });
+    await expect(
+      adapter.reverseTransaction(
+        workspaceId,
+        adjusted.transaction,
+        "fixture-reverse-adjustment-001",
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message:
+        "Este lançamento é um ajuste da fatura; abra a fatura e registre a correção correspondente.",
+    });
+    const refunded = await adapter.createStatementRefund(
+      workspaceId,
+      adjusted.statement,
+      {
+        sourceTransactionId: purchase.id,
+        amount: { currency: "BRL", minor: "1250" },
+      },
+      "fixture-refund-001",
+    );
+    await expect(
+      adapter.createStatementRefund(
+        workspaceId,
+        adjusted.statement,
+        {
+          sourceTransactionId: purchase.id,
+          amount: { currency: "BRL", minor: "1250" },
+        },
+        "fixture-refund-001",
+      ),
+    ).resolves.toEqual(refunded);
+    expect(refunded.statement.total.minor).toBe("1850");
+    expect(refunded.transaction.amount.minor).toBe("1250");
+    expect(purchase.amount.minor).toBe("3000");
+    const items = await adapter.listStatementItems(workspaceId, statement.id);
+    expect(items.items.map((item) => [item.type, item.amount.minor])).toEqual([
+      ["refund", "-1250"],
+      ["adjustment", "100"],
+      ["purchase", "3000"],
+    ]);
+  });
+
   it("persists fixture recurrence and installment plans for idempotent retries", async () => {
     const adapter = createFixtureFinanceAdapter();
     const recurrenceInput = {
@@ -1284,6 +1376,69 @@ describe("finance adapter", () => {
     expect(keys).toEqual(["statement-payment-retry", "statement-payment-retry"]);
   });
 
+  it("reuses statement correction keys across retryable failures", async () => {
+    let attempts = 0;
+    const keys: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempts += 1;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (attempts === 1) throw new TypeError("network interrupted");
+      return Response.json({
+        transaction: { id: "adjustment-1" },
+        statement: { id: "statement-1", version: 2 },
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const statement = {
+      id: "statement-1",
+      workspaceId: "workspace",
+      cardId: "card-1",
+      periodStart: "2026-08-01",
+      closingOn: "2026-08-10",
+      dueOn: "2026-08-17",
+      state: "closed" as const,
+      total: { currency: "BRL", minor: "3000" },
+      paid: { currency: "BRL", minor: "0" },
+      openAmount: { currency: "BRL", minor: "3000" },
+      version: 1,
+    };
+    const input = {
+      kind: "fee" as const,
+      amount: { currency: "BRL", minor: "100" },
+      description: "Tarifa",
+    };
+    await expect(
+      adapter.createStatementAdjustment(
+        "workspace",
+        statement,
+        input,
+        "statement-correction-retry",
+      ),
+    ).rejects.toThrow("network interrupted");
+    await expect(
+      adapter.createStatementAdjustment(
+        "workspace",
+        statement,
+        input,
+        "statement-correction-retry",
+      ),
+    ).resolves.toMatchObject({ transaction: { id: "adjustment-1" } });
+    expect(keys).toEqual(["statement-correction-retry", "statement-correction-retry"]);
+  });
+
+  it("keeps a statement correction key while cancel/close/switch controls are pending", () => {
+    let commandKey: string | null = "statement-correction-pending";
+    for (const interaction of ["cancel", "close", "switch-action", "switch-purchase"]) {
+      if (!shouldPreserveStatementAdjustmentCommandKey(true)) commandKey = null;
+      expect(commandKey, `${interaction} must preserve the pending command key`).toBe(
+        "statement-correction-pending",
+      );
+    }
+    expect(shouldPreserveStatementAdjustmentCommandKey(false)).toBe(false);
+    if (!shouldPreserveStatementAdjustmentCommandKey(false)) commandKey = null;
+    expect(commandKey).toBeNull();
+  });
+
   it("reuses recurrence and installment keys across retryable failures", async () => {
     const keysByPath = new Map<string, string[]>();
     const attemptsByPath = new Map<string, number>();
@@ -1339,5 +1494,64 @@ describe("finance adapter", () => {
       "installment-retry",
       "installment-retry",
     ]);
+  });
+
+  it("sends statement adjustment and refund commands with the statement version", async () => {
+    const requests: Array<{ path: string; headers: Headers; body: unknown }> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      requests.push({
+        path: String(input),
+        headers: new Headers(init?.headers),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return Response.json({
+        transaction: { id: "transaction-1" },
+        statement: { id: "statement-1", version: 2 },
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const statement = {
+      id: "statement-1",
+      workspaceId: "workspace",
+      cardId: "card-1",
+      periodStart: "2026-08-01",
+      closingOn: "2026-08-10",
+      dueOn: "2026-08-17",
+      state: "closed" as const,
+      total: { currency: "BRL", minor: "3000" },
+      paid: { currency: "BRL", minor: "0" },
+      openAmount: { currency: "BRL", minor: "3000" },
+      version: 1,
+    };
+    await adapter.createStatementAdjustment(
+      "workspace",
+      statement,
+      {
+        kind: "fee",
+        amount: { currency: "BRL", minor: "100" },
+        description: "Tarifa",
+      },
+      "statement-adjustment-test",
+    );
+    await adapter.createStatementRefund(
+      "workspace",
+      statement,
+      {
+        sourceTransactionId: "purchase-1",
+        amount: { currency: "BRL", minor: "100" },
+      },
+      "statement-refund-test",
+    );
+    expect(requests.map(({ path }) => path)).toEqual([
+      "/v1/workspaces/workspace/statements/statement-1/adjustments",
+      "/v1/workspaces/workspace/statements/statement-1/refunds",
+    ]);
+    expect(
+      requests.map(({ headers }) => [headers.get("Idempotency-Key"), headers.get("If-Match")]),
+    ).toEqual([
+      ["statement-adjustment-test", '"v1"'],
+      ["statement-refund-test", '"v1"'],
+    ]);
+    expect(statementItemAmountPrefix({ type: "refund", state: "posted" })).toBe("−");
   });
 });

@@ -107,18 +107,20 @@ auditoria detalhada e concorrência de produção continuam pendentes para o Gat
 
 - [ ] **CARD-001 Cartão e ciclos:** cadastro, arquivamento, cálculo persistido de ciclos e limites de mês.
 - [ ] **CARD-002 Compra/cartão:** compra à vista/parcelada gera despesa/passivo e associação idempotente à fatura sugerida.
-- [ ] **CARD-003 Fatura:** abrir, fechar, reabrir com confirmação, ajuste pós-fechamento, total e estados.
+- [x] **CARD-003 Fatura:** abrir, fechar, reabrir com confirmação, ajuste pós-fechamento, total e estados.
 - [ ] **CARD-004 Pagamento:** total, parcial, excedente/crédito e cancelamento como transferência ledger.
-- [ ] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
+- [x] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
 - [ ] **CARD-006 UI cartões/fatura:** visão por ciclo, composição explicável, ações frequentes e correção de fatura.
 
 O mesmo PR entrega cadastro de cartão, compra, associação à fatura aberta, pagamento total/parcial,
 parcelamento exato e recorrência com bloqueio explícito de ocorrência variável não confirmada. Fechamento,
 reabertura, estorno em fatura fechada e as telas de cartão permanecem nas tarefas seguintes.
 
-Uma fatia posterior acrescenta a composição explicável por compras/pagamentos e a reabertura explícita,
-versionada e restrita a faturas fechadas sem pagamentos. `CARD-003` e `CARD-006` permanecem abertos até
-existirem ajuste pós-fechamento, correção de ciclo, estorno/tarifas e visão completa por ciclo.
+Uma fatia posterior acrescentou a composição explicável por compras/pagamentos e a reabertura explícita,
+versionada e restrita a faturas fechadas sem pagamentos. A fatia CARD-003/005 agora também registra
+ajustes pós-fechamento, tarifas/juros e estornos parciais ou totais vinculados à compra original,
+preservando o lançamento original e emitindo reversão assinada no ledger. `CARD-006` permanece aberto
+somente para a validação final de browser da visão completa por ciclo.
 
 **Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
 
