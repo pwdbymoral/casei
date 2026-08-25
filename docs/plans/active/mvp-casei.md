@@ -163,7 +163,7 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 - [x] **DATA-002 Parser/mapeamento:** CSV/XLSX, encoding/locale, sugestão editável e perfis salvos. O pacote `@casei/data` oferece representação tabular comum, parser XLSX limitado e sem macros/links externos, mapeamento editável e perfil serializável sem arquivo original.
 - [x] **DATA-003 Validação/preflight:** resultado por linha, fingerprints, política de duplicata e conflito de versão. O preflight aceita CSV/XLSX, mantém linhas físicas e classifica válidas, duplicatas sugeridas e erros antes da aplicação; conflito de versão permanece responsabilidade da aplicação DATA-004.
 - [ ] **DATA-004 Aplicação:** jobs em lotes chamando casos de uso, revalidação de ator/capacidade antes de cada lote, atomicidade por linha, cancelamento/retry/reversão.
-- [ ] **DATA-005 Export:** CSVs versionados, ZIP/manifesto/checksum, formula injection e streaming/proxy autorizado no download, sem URL presignada para export sensível.
+- [x] **DATA-005 Export:** CSVs versionados, ZIP/manifesto/checksum, formula injection e streaming/proxy autorizado no download, sem URL presignada para export sensível. `@casei/data` oferece CSV e ZIP streaming com manifesto/checksum; jobs, storage e proxy permanecem no boundary de aplicação.
 - [ ] **DATA-006 UI import/export:** upload, mapping, preview, progresso, resultado, retry e relatório acessível.
 
 **Gate 7:** arquivos maliciosos/maiores são rejeitados; reimport não duplica; export reimporta; acesso expirado ou de outro espaço falha sem vazamento.
