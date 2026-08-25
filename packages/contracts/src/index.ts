@@ -413,6 +413,21 @@ export const safeToSpendQuerySchema = z.object({
 });
 export type SafeToSpendQuery = z.infer<typeof safeToSpendQuerySchema>;
 
+export const insightReportKindSchema = z.enum(["all", "income", "expense"]);
+export const insightReportQuerySchema = z
+  .object({
+    asOf: civilDateSchema.optional(),
+    from: civilDateSchema.optional(),
+    to: civilDateSchema.optional(),
+    kind: insightReportKindSchema.default("all"),
+    categoryId: domainIdSchema.optional(),
+  })
+  .refine(
+    (query) => !query.from || !query.to || query.from <= query.to,
+    "from must not be after to",
+  );
+export type InsightReportQuery = z.infer<typeof insightReportQuerySchema>;
+
 const minorAmountSchema = z
   .string()
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
@@ -431,6 +446,57 @@ export const moneySchema = z.object({
 });
 
 export type MoneyContract = z.infer<typeof moneySchema>;
+
+const insightReportPeriodSchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/),
+  income: moneySchema,
+  expense: moneySchema,
+  net: moneySchema,
+  transactionCount: z.number().int().nonnegative(),
+});
+
+const insightReportCategorySchema = z.object({
+  categoryId: domainIdSchema.nullable(),
+  categoryName: z.string().min(1).max(80),
+  income: moneySchema,
+  expense: moneySchema,
+  net: moneySchema,
+  transactionCount: z.number().int().nonnegative(),
+});
+
+export const insightReportSchema = z.object({
+  asOf: civilDateSchema,
+  from: civilDateSchema,
+  to: civilDateSchema,
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  filters: z.object({
+    kind: insightReportKindSchema,
+    categoryId: domainIdSchema.nullable(),
+  }),
+  totals: z.object({
+    income: moneySchema,
+    expense: moneySchema,
+    net: moneySchema,
+    transactionCount: z.number().int().nonnegative(),
+  }),
+  monthly: z.array(insightReportPeriodSchema),
+  categories: z.array(insightReportCategorySchema),
+  reconciliation: z.object({
+    source: z.literal("published_ledger"),
+    transactionCount: z.number().int().nonnegative(),
+    income: moneySchema,
+    expense: moneySchema,
+    export: z.object({
+      domain: z.literal("transactions"),
+      format: z.literal("csv"),
+      from: civilDateSchema,
+      to: civilDateSchema,
+      kind: insightReportKindSchema,
+      categoryId: domainIdSchema.nullable(),
+    }),
+  }),
+});
+export type InsightReportContract = z.infer<typeof insightReportSchema>;
 
 export const positiveMoneySchema = moneySchema.extend({
   minor: minorAmountSchema.refine((value) => BigInt(value) > 0n, "minor must be greater than zero"),
@@ -859,9 +925,73 @@ export const recurrenceTransitionSchema = z.object({
 });
 export type RecurrenceTransitionInput = z.infer<typeof recurrenceTransitionSchema>;
 
+export const recurrenceEditScopeSchema = z.enum(["this", "this_and_future", "future_unsettled"]);
+export type RecurrenceEditScope = z.infer<typeof recurrenceEditScopeSchema>;
+
+/**
+ * Edits are anchored to an already materialized occurrence. The server keeps
+ * posted/partially settled occurrences immutable and records one-off edits as
+ * exceptions so a later series edit cannot silently overwrite them.
+ */
+export const updateRecurrenceSchema = z
+  .object({
+    scope: recurrenceEditScopeSchema,
+    effectiveOn: civilDateSchema,
+    amount: positiveMoneySchema.optional(),
+    description: z.string().trim().max(500).optional(),
+    endOn: civilDateSchema.nullable().optional(),
+    estimatedAmount: positiveMoneySchema.nullable().optional(),
+  })
+  .refine(
+    (value) =>
+      value.amount !== undefined ||
+      value.description !== undefined ||
+      value.endOn !== undefined ||
+      value.estimatedAmount !== undefined,
+    "Informe ao menos um campo para editar.",
+  )
+  .superRefine((value, context) => {
+    if (
+      value.scope === "this" &&
+      (value.endOn !== undefined || value.estimatedAmount !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["scope"],
+        message: "Uma exceção pode alterar somente valor e descrição da ocorrência.",
+      });
+    }
+  });
+export type UpdateRecurrenceInput = z.infer<typeof updateRecurrenceSchema>;
+
 export const createInstallmentPlanSchema = z.object({
   total: positiveMoneySchema,
   count: z.number().int().min(2).max(999),
   firstDueOn: civilDateSchema,
   description: z.string().trim().max(500).default(""),
 });
+export type CreateInstallmentPlanInput = z.infer<typeof createInstallmentPlanSchema>;
+
+export const installmentPreviewSchema = createInstallmentPlanSchema;
+export type InstallmentPreviewInput = z.infer<typeof installmentPreviewSchema>;
+
+export const installmentPlanUpdateSchema = z
+  .object({
+    total: positiveMoneySchema.optional(),
+    count: z.number().int().min(2).max(999).optional(),
+    firstDueOn: civilDateSchema.optional(),
+    description: z.string().trim().max(500).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+export type InstallmentPlanUpdateInput = z.infer<typeof installmentPlanUpdateSchema>;
+
+export const installmentUpdateSchema = z
+  .object({
+    amount: positiveMoneySchema.optional(),
+    dueOn: civilDateSchema.optional(),
+    description: z.string().trim().max(500).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+export type InstallmentUpdateInput = z.infer<typeof installmentUpdateSchema>;
+
+export const installmentCancelSchema = z.object({ confirm: z.literal(true) });

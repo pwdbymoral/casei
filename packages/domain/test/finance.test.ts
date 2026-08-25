@@ -159,6 +159,7 @@ describe("financial domain", () => {
     const parts = distributeInstallments(brl(100n), 3);
     expect(parts.map((part) => part.minor)).toEqual([34n, 33n, 33n]);
     expect(parts.reduce((sum, part) => sum + part.minor, 0n)).toBe(100n);
+    expect(() => distributeInstallments(brl(2n), 3)).toThrow("todas as parcelas");
   });
 
   it("calculates card cycles at closing-day boundaries", () => {

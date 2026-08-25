@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { calculateSafeToSpendAmounts, resolveInsightWindow } from "../src/insight-service.js";
+import {
+  calculateSafeToSpendAmounts,
+  resolveInsightWindow,
+  resolveReportWindow,
+} from "../src/insight-service.js";
 
 describe("insight safe-to-spend calculation", () => {
   it("uses the canonical formula and exposes negative gross separately", () => {
@@ -31,5 +35,16 @@ describe("insight safe-to-spend calculation", () => {
     });
     expect(() => resolveInsightWindow({ asOf: "2026-09-01", from: "2026-09-02" })).toThrow();
     expect(() => resolveInsightWindow({ asOf: "2026-09-01", to: "2026-08-31" })).toThrow();
+  });
+
+  it("defaults reports to the current calendar month and rejects future inversion", () => {
+    expect(resolveReportWindow({ asOf: "2026-08-24" })).toEqual({
+      from: "2026-08-01",
+      to: "2026-08-24",
+    });
+    expect(
+      resolveReportWindow({ asOf: "2026-08-24", from: "2026-07-15", to: "2026-08-31" }),
+    ).toEqual({ from: "2026-07-15", to: "2026-08-31" });
+    expect(() => resolveReportWindow({ asOf: "2026-08-24", from: "2026-09-01" })).toThrow();
   });
 });

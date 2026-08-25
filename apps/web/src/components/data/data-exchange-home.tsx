@@ -15,6 +15,7 @@ import {
   UploadIcon,
   XIcon,
 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -169,6 +170,7 @@ function ProgressBar({ value, label }: { value: number; label: string }) {
 
 export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataExchangeAdapter }) {
   const { workspaceId, role, fixtureMode } = useAuthenticatedWorkspace();
+  const searchParams = useSearchParams();
   const adapter = useMemo(
     () => providedAdapter ?? dataExchangeAdapterForEnvironment({ fixtures: fixtureMode }),
     [fixtureMode, providedAdapter],
@@ -192,10 +194,19 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
   const [exportPending, setExportPending] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
-  const [exportDomain, setExportDomain] = useState<DataDomain>("transactions");
+  const [exportDomain, setExportDomain] = useState<DataDomain>(() =>
+    searchParams.get("domain") === "products" || searchParams.get("domain") === "complete"
+      ? (searchParams.get("domain") as DataDomain)
+      : "transactions",
+  );
   const [exportFormat, setExportFormat] = useState<"csv" | "zip">("csv");
-  const [exportFrom, setExportFrom] = useState("");
-  const [exportTo, setExportTo] = useState("");
+  const [exportFrom, setExportFrom] = useState(() => searchParams.get("from") ?? "");
+  const [exportTo, setExportTo] = useState(() => searchParams.get("to") ?? "");
+  const [exportKind] = useState<"all" | "income" | "expense">(() => {
+    const value = searchParams.get("kind");
+    return value === "income" || value === "expense" ? value : "all";
+  });
+  const [exportCategoryId] = useState<string | null>(() => searchParams.get("categoryId") || null);
   const [activeExport, setActiveExport] = useState<ExportJob | null>(null);
   const importOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
@@ -380,6 +391,8 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
             format: exportFormat,
             from: exportFrom || undefined,
             to: exportTo || undefined,
+            kind: exportKind,
+            categoryId: exportCategoryId,
           },
           key,
         ),
@@ -970,6 +983,20 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   />
                 </Field>
               </div>
+              {searchParams.has("from") ||
+              searchParams.has("to") ||
+              searchParams.has("kind") ||
+              searchParams.has("categoryId") ? (
+                <Alert>
+                  <FileSpreadsheetIcon aria-hidden="true" />
+                  <AlertDescription>
+                    Este recorte veio de Relatórios: período {exportFrom || "aberto"} a{" "}
+                    {exportTo || "aberto"}, tipo{" "}
+                    {exportKind === "all" ? "receitas e despesas" : exportKind}, categoria{" "}
+                    {exportCategoryId ?? "todas"}.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
             </FieldGroup>
             <Button
               type="button"
