@@ -127,6 +127,13 @@
       "when": 1787579600000,
       "tag": "0017_wallet_adjustment",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787583200000,
+      "tag": "0018_wallet_publish_version",
+      "breakpoints": true
     }
   ]
 }
