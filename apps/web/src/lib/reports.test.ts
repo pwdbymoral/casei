@@ -6,6 +6,8 @@ import {
   type FinancialReport,
   reportExportPath,
   reportFiltersFromSearchParams,
+  simulationApplyCommandKey,
+  simulationEventMatchesReport,
   simulationToPlannedTransaction,
 } from "./reports";
 
@@ -95,6 +97,44 @@ describe("report filters and export reconciliation", () => {
 });
 
 describe("isolated report simulations", () => {
+  it("uses a stable idempotency key for each apply retry", () => {
+    expect(simulationApplyCommandKey("change-1")).toBe("report-simulation-change-1");
+    expect(simulationApplyCommandKey("change-1")).toBe(simulationApplyCommandKey("change-1"));
+  });
+
+  it("accepts only events covered by the active period, kind and category filters", () => {
+    expect(
+      simulationEventMatchesReport(report, {
+        kind: "expense",
+        occurredOn: "2026-08-20",
+        categoryId: "market",
+      }),
+    ).toBe(true);
+    expect(
+      simulationEventMatchesReport(report, {
+        kind: "expense",
+        occurredOn: "2026-09-01",
+        categoryId: "market",
+      }),
+    ).toBe(false);
+
+    const filtered = { ...report, filters: { kind: "expense" as const, categoryId: "market" } };
+    expect(
+      simulationEventMatchesReport(filtered, {
+        kind: "income",
+        occurredOn: "2026-08-20",
+        categoryId: "market",
+      }),
+    ).toBe(false);
+    expect(
+      simulationEventMatchesReport(filtered, {
+        kind: "expense",
+        occurredOn: "2026-08-20",
+        categoryId: "leisure",
+      }),
+    ).toBe(false);
+  });
+
   it("adds a hypothetical event without mutating the canonical report or source events", () => {
     const simulated = applySimulationChanges(
       report,
@@ -136,9 +176,36 @@ describe("isolated report simulations", () => {
     expect(report.categories).toHaveLength(1);
   });
 
-  it("can replace a source event only in the temporary copy", () => {
+  it("does not change a filtered report for an out-of-scope hypothetical event", () => {
+    const filtered = {
+      ...report,
+      filters: { kind: "expense" as const, categoryId: "market" },
+    };
     const simulated = applySimulationChanges(
-      report,
+      filtered,
+      [],
+      [
+        {
+          id: "simulation-outside-filter",
+          operation: "add",
+          event: {
+            id: "hypothetical-income",
+            kind: "income",
+            amountMinor: "300",
+            occurredOn: "2026-08-20",
+            categoryId: "leisure",
+            categoryName: "Lazer",
+          },
+        },
+      ],
+    );
+    expect(simulated).toEqual(filtered);
+  });
+
+  it("can replace a source event only in the temporary copy", () => {
+    const replaceable = { ...report, to: "2026-09-30" };
+    const simulated = applySimulationChanges(
+      replaceable,
       [
         {
           id: "expense-1",

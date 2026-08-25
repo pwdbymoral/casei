@@ -8,11 +8,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AsyncState } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -35,11 +36,15 @@ import {
   reportFiltersToSearchParams,
   type SimulationChange,
   type SimulationEvent,
+  simulationApplyCommandKey,
   simulationEventFromTransaction,
+  simulationEventMatchesReport,
   simulationToPlannedTransaction,
 } from "@/lib/reports";
 
 type SurfaceStatus = "loading" | "success" | "error" | "permission";
+type SimulationApplyStatus = "applying" | "applied" | "failed";
+type SimulationApplyState = Record<string, { status: SimulationApplyStatus; message?: string }>;
 
 function firstDayOfMonth(value: string): string {
   return `${value.slice(0, 7)}-01`;
@@ -105,7 +110,9 @@ export default function ReportsPage() {
   const [simulationCategoryId, setSimulationCategoryId] = useState("");
   const [simulationError, setSimulationError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  const [simulationApplyState, setSimulationApplyState] = useState<SimulationApplyState>({});
   const [notice, setNotice] = useState<string | null>(null);
+  const loadSequence = useRef(0);
   const adapter = useMemo(
     () => reportAdapterForEnvironment({ fixtures: fixtureMode }),
     [fixtureMode],
@@ -120,46 +127,61 @@ export default function ReportsPage() {
     [report, events, changes],
   );
 
-  const load = useCallback(async () => {
-    setStatus("loading");
-    setError(null);
-    try {
-      const [nextReport, nextCategories, transactions] = await Promise.all([
-        adapter.getReport(workspaceId, filters),
-        financeAdapter.listCategories(workspaceId),
-        listAllTransactions(financeAdapter, workspaceId, {
-          from: filters.from,
-          to: filters.to,
-          kind: filters.kind === "all" ? undefined : filters.kind,
-        }),
-      ]);
-      setReport(nextReport);
-      setCategories(nextCategories);
-      setEvents(
-        transactionEvents(
-          transactions.filter(
-            (transaction) =>
-              transaction.state === "posted" || transaction.state === "partially_settled",
+  const load = useCallback(
+    async (options: { clearSimulation?: boolean } = {}) => {
+      const sequence = ++loadSequence.current;
+      const isCurrent = () => sequence === loadSequence.current;
+      setStatus("loading");
+      setError(null);
+      try {
+        const [nextReport, nextCategories, transactions] = await Promise.all([
+          adapter.getReport(workspaceId, filters),
+          financeAdapter.listCategories(workspaceId),
+          listAllTransactions(financeAdapter, workspaceId, {
+            from: filters.from,
+            to: filters.to,
+            kind: filters.kind === "all" ? undefined : filters.kind,
+          }),
+        ]);
+        if (!isCurrent()) return;
+        setReport(nextReport);
+        setCategories(nextCategories);
+        setEvents(
+          transactionEvents(
+            transactions.filter(
+              (transaction) =>
+                transaction.state === "posted" || transaction.state === "partially_settled",
+            ),
+            nextCategories,
           ),
-          nextCategories,
-        ),
-      );
-      setChanges([]);
-      setStatus("success");
-    } catch (cause) {
-      setStatus(
-        cause instanceof Error &&
-          "status" in cause &&
-          (cause.status === 401 || cause.status === 403)
-          ? "permission"
-          : "error",
-      );
-      setError(cause instanceof Error ? cause.message : "Não foi possível carregar os relatórios.");
-    }
-  }, [adapter, financeAdapter, filters, workspaceId]);
+        );
+        if (options.clearSimulation !== false) {
+          setChanges([]);
+          setSimulationApplyState({});
+        }
+        setStatus("success");
+      } catch (cause) {
+        if (!isCurrent()) return;
+        setStatus(
+          cause instanceof Error &&
+            "status" in cause &&
+            (cause.status === 401 || cause.status === 403)
+            ? "permission"
+            : "error",
+        );
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível carregar os relatórios.",
+        );
+      }
+    },
+    [adapter, financeAdapter, filters, workspaceId],
+  );
 
   useEffect(() => {
     void load();
+    return () => {
+      loadSequence.current += 1;
+    };
   }, [load]);
 
   function updateFilters(next: Partial<ReportFilters>) {
@@ -189,6 +211,10 @@ export default function ReportsPage() {
       categoryId: category?.id ?? null,
       categoryName: category?.name ?? "Sem categoria",
     };
+    if (report && !simulationEventMatchesReport(report, event)) {
+      setSimulationError("O evento precisa respeitar o período, tipo e categoria filtrados.");
+      return;
+    }
     setChanges((current) => [
       ...current,
       { id: `change-${crypto.randomUUID()}`, operation: "add", event },
@@ -201,24 +227,64 @@ export default function ReportsPage() {
     if (!writeAccess || changes.length === 0) return;
     setApplying(true);
     setSimulationError(null);
-    try {
-      for (const change of changes) {
+    const pending = changes.filter(
+      (change) => simulationApplyState[change.id]?.status !== "applied",
+    );
+    setSimulationApplyState((current) =>
+      Object.fromEntries([
+        ...Object.entries(current),
+        ...pending.map((change) => [change.id, { status: "applying" as const }]),
+      ]),
+    );
+    const appliedIds: string[] = [];
+    const failures: Array<{ id: string; message: string }> = [];
+    for (const change of pending) {
+      try {
         await financeAdapter.createTransaction(
           workspaceId,
           simulationToPlannedTransaction(change.event, currency),
-          `report-simulation-${change.id}`,
+          simulationApplyCommandKey(change.id),
         );
+        appliedIds.push(change.id);
+        setSimulationApplyState((current) => ({
+          ...current,
+          [change.id]: { status: "applied" },
+        }));
+      } catch (cause) {
+        const message =
+          cause instanceof Error ? cause.message : "Não foi possível aplicar este item.";
+        failures.push({ id: change.id, message });
+        setSimulationApplyState((current) => ({
+          ...current,
+          [change.id]: { status: "failed", message },
+        }));
       }
+    }
+    const remaining = changes.filter((change) => !appliedIds.includes(change.id));
+    setChanges(remaining);
+    setSimulationApplyState((current) =>
+      Object.fromEntries(
+        remaining.map((change) => [change.id, current[change.id] ?? { status: "failed" }]),
+      ),
+    );
+    if (failures.length === 0) {
       setChanges([]);
       setNotice("Planejamento aplicado. Os eventos agora aparecem como compromissos futuros.");
       await load();
-    } catch (cause) {
-      setSimulationError(
-        cause instanceof Error ? cause.message : "Não foi possível aplicar o planejamento.",
+    } else {
+      const appliedSummary = changes
+        .filter((change) => appliedIds.includes(change.id))
+        .map(
+          (change) =>
+            `${change.event.kind === "expense" ? "Gasto" : "Entrada"} de ${amountLabel(change.event.amountMinor, currency)}`,
+        )
+        .join(", ");
+      setNotice(
+        `Aplicados: ${appliedSummary || "nenhum"}. Falhas: ${failures.length}. Tente novamente os itens com erro.`,
       );
-    } finally {
-      setApplying(false);
+      if (appliedIds.length > 0) await load({ clearSimulation: false });
     }
+    setApplying(false);
   }
 
   return (
@@ -569,11 +635,31 @@ export default function ReportsPage() {
                         {change.event.kind === "expense" ? "Gasto" : "Entrada"} de{" "}
                         {amountLabel(change.event.amountMinor, currency)} em{" "}
                         {change.event.occurredOn} · {change.event.categoryName}
+                        {simulationApplyState[change.id] ? (
+                          <Badge
+                            className="ml-2"
+                            variant={
+                              simulationApplyState[change.id]?.status === "failed"
+                                ? "destructive"
+                                : simulationApplyState[change.id]?.status === "applied"
+                                  ? "secondary"
+                                  : "outline"
+                            }
+                            title={simulationApplyState[change.id]?.message}
+                          >
+                            {simulationApplyState[change.id]?.status === "failed"
+                              ? "Falhou — tente novamente"
+                              : simulationApplyState[change.id]?.status === "applied"
+                                ? "Aplicado"
+                                : "Aplicando…"}
+                          </Badge>
+                        ) : null}
                         <Button
                           type="button"
                           variant="ghost"
                           size="sm"
                           className="ml-2 min-h-8"
+                          disabled={applying}
                           onClick={() =>
                             setChanges((current) => current.filter((item) => item.id !== change.id))
                           }
