@@ -71,6 +71,21 @@ export type ImportJob = {
   message?: string;
 };
 
+export type ImportLineResult = {
+  lineNumber: number;
+  status: "applied" | "skipped" | "rejected" | "reversed";
+  fingerprint?: string;
+  targetType?: string;
+  targetId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+export type ImportLineResultsPage = {
+  items: readonly ImportLineResult[];
+  nextAfterLine: number | null;
+};
+
 export type ExportJob = {
   id: string;
   workspaceId: string;
@@ -121,6 +136,12 @@ export interface DataExchangeAdapter {
   getImportJob(workspaceId: string, jobId: string): Promise<ImportJob>;
   retryImport(workspaceId: string, jobId: string, idempotencyKey: string): Promise<ImportJob>;
   cancelImport(workspaceId: string, jobId: string, idempotencyKey: string): Promise<ImportJob>;
+  listImportResults(
+    workspaceId: string,
+    jobId: string,
+    afterLine?: number,
+    limit?: number,
+  ): Promise<ImportLineResultsPage>;
   listExportJobs(workspaceId: string): Promise<ExportJob[]>;
   createExport(
     workspaceId: string,
@@ -546,7 +567,7 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 function workspacePath(workspaceId: string, suffix: string): string {
-  return `${requireApiOrigin()}/v1/workspaces/${encodeURIComponent(workspaceId)}/data${suffix}`;
+  return `${requireApiOrigin()}/v1/workspaces/${encodeURIComponent(workspaceId)}${suffix}`;
 }
 
 const httpDataExchangeAdapter: DataExchangeAdapter = {
@@ -609,6 +630,16 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
       method: "POST",
       headers: { Accept: "application/json", "Idempotency-Key": idempotencyKey },
     }),
+  async listImportResults(workspaceId, jobId, afterLine, limit = 50) {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (afterLine !== undefined) query.set("afterLine", String(afterLine));
+    return requestJson<{
+      items: ImportLineResult[];
+      page: { nextAfterLine: number | null };
+    }>(workspacePath(workspaceId, `/imports/${encodeURIComponent(jobId)}/lines?${query}`)).then(
+      ({ items, page }) => ({ items, nextAfterLine: page.nextAfterLine }),
+    );
+  },
   listExportJobs: (workspaceId) => requestJson(workspacePath(workspaceId, "/exports")),
   createExport: (workspaceId, input, idempotencyKey) =>
     requestJson(workspacePath(workspaceId, "/exports"), {
@@ -641,6 +672,7 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
 };
 
 const fixtureImports = new Map<string, ImportJob>();
+const fixtureImportResults = new Map<string, ImportLineResult[]>();
 const fixtureExports = new Map<string, ExportJob>();
 const fixtureImportKeys = new Map<string, ImportJob>();
 const fixtureRetryKeys = new Map<string, ImportJob>();
@@ -650,6 +682,40 @@ const fixtureExportKeys = new Map<string, ExportJob>();
 const fixtureImportFingerprints = new Map<string, string>();
 const fixtureRetryFingerprints = new Map<string, string>();
 const fixtureExportFingerprints = new Map<string, string>();
+
+function fixtureResultsForPreview(
+  preview: ImportPreview,
+  duplicatePolicy: DuplicatePolicy,
+  acceptedDuplicateLines: readonly number[] = [],
+): ImportLineResult[] {
+  const accepted = new Set(acceptedDuplicateLines);
+  return preview.rows.map((row) => {
+    if (row.status === "invalid") {
+      return {
+        lineNumber: row.rowNumber,
+        status: "rejected",
+        errorCode: "invalid_row",
+        errorMessage: row.errors.join(" ") || "A linha foi rejeitada na prévia.",
+      };
+    }
+    if (
+      row.status === "duplicate" &&
+      (duplicatePolicy === "ignore" ||
+        (duplicatePolicy === "review" && !accepted.has(row.rowNumber)))
+    ) {
+      return {
+        lineNumber: row.rowNumber,
+        status: "skipped",
+        errorCode: "duplicate_suggestion",
+        errorMessage:
+          duplicatePolicy === "review"
+            ? "Duplicata provável aguardando revisão."
+            : "Duplicata provável ignorada.",
+      };
+    }
+    return { lineNumber: row.rowNumber, status: "applied" };
+  });
+}
 
 function fixtureKey(workspaceId: string, key: string): string {
   return `${workspaceId}\u001f${key}`;
@@ -785,6 +851,14 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     };
     fixtureImportKeys.set(replayKey, job);
     fixtureImportFingerprints.set(replayKey, fingerprint);
+    fixtureImportResults.set(
+      job.id,
+      fixtureResultsForPreview(
+        input.preview,
+        input.duplicatePolicy,
+        input.acceptedDuplicateLines,
+      ),
+    );
     return rememberImport(job);
   },
   async getImportJob(workspaceId, jobId) {
@@ -856,6 +930,19 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     fixtureCancelKeys.set(replayKey, next);
     fixtureCancelFingerprints.set(replayKey, fingerprint);
     return rememberImport(next);
+  },
+  async listImportResults(workspaceId, jobId, afterLine, limit = 50) {
+    const current = fixtureImports.get(jobId);
+    if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
+    if (current.workspaceId !== workspaceId)
+      throw fixturePermission("Esta importação pertence a outro espaço.");
+    const items = fixtureImportResults.get(jobId) ?? [];
+    const filtered = items.filter((item) => afterLine === undefined || item.lineNumber > afterLine);
+    const pageItems = filtered.slice(0, limit);
+    return {
+      items: pageItems,
+      nextAfterLine: filtered.length > limit ? (pageItems.at(-1)?.lineNumber ?? null) : null,
+    };
   },
   async listExportJobs(workspaceId) {
     return [...fixtureExports.values()].filter((job) => job.workspaceId === workspaceId);
@@ -958,6 +1045,15 @@ export function importStatusLabel(status: ImportJobStatus): string {
     partial: "Concluída parcialmente",
     failed: "Falhou",
     canceled: "Cancelada",
+  }[status];
+}
+
+export function importLineStatusLabel(status: ImportLineResult["status"]): string {
+  return {
+    applied: "Aplicada",
+    skipped: "Ignorada",
+    rejected: "Rejeitada",
+    reversed: "Revertida",
   }[status];
 }
 
