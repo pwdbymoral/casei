@@ -977,6 +977,8 @@ describe("finance adapter", () => {
     const total = await adapter.postTransaction(workspaceId, partial);
     expect(total).toMatchObject({ state: "posted", version: 2 });
     expect(total.settledAmount.minor).toBe("5000");
+    const wallet = await adapter.listTransactions(workspaceId, { limit: 100 });
+    expect(walletTotalMinor(wallet.items)).toBe("-5000");
   });
 
   it("persists fixture invoice payments and replays them by idempotency key", async () => {

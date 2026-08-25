@@ -544,6 +544,10 @@ function FinanceDashboard({
       setTransactions((current) =>
         current.map((transaction) => (transaction.id === updated.id ? updated : transaction)),
       );
+      setWalletTransactions((current) => [
+        ...current.filter((transaction) => transaction.id !== updated.id),
+        updated,
+      ]);
       setCommitmentTransactions((current) =>
         updated.state === "posted" || updated.state === "canceled"
           ? current.filter((transaction) => transaction.id !== updated.id)
