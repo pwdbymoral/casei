@@ -3986,7 +3986,7 @@ export class FinanceService {
     occurredOn: string,
     amount: bigint,
   ) {
-    const card = await client.query<{ closing_day: number; due_day: number }>(
+    const card = await client.query<{ closing_day: number | string; due_day: number | string }>(
       `SELECT closing_day, due_day FROM credit_card WHERE workspace_id = $1 AND id = $2`,
       [workspaceId, cardId],
     );
@@ -3994,8 +3994,8 @@ export class FinanceService {
     if (!cardRow) throw new FinanceNotFoundError();
     const dates = calculateStatementDates(
       occurredOn,
-      cardRow.closing_day,
-      cardRow.due_day,
+      Number(cardRow.closing_day),
+      Number(cardRow.due_day),
       "purchase",
     );
     await client.query(
