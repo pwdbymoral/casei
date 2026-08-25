@@ -531,6 +531,7 @@ function DashboardContent({
 export default function TodayPage() {
   const { workspaceId, fixtureMode, timeZone } = useAuthenticatedWorkspace();
   const [status, setStatus] = useState<DashboardStatus>("loading");
+  const [statusWorkspaceId, setStatusWorkspaceId] = useState(workspaceId);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
   const dataRef = useRef<DashboardData | null>(null);
@@ -557,6 +558,7 @@ export default function TodayPage() {
   const load = useCallback(async () => {
     const request = loadRequest.begin();
     const workspaceRequest = workspaceRequests.begin(workspaceId);
+    setStatusWorkspaceId(workspaceId);
     setStatus(dataRef.current ? "success" : "loading");
     setError(null);
     try {
@@ -652,7 +654,8 @@ export default function TodayPage() {
   }, [load, loadRequest, workspaceId, workspaceRequests]);
 
   const visibleData = data?.workspaceId === workspaceId ? data : null;
-  const visibleStatus = visibleData ? status : "loading";
+  const visibleStatus =
+    visibleData || statusWorkspaceId === workspaceId ? status : ("loading" as const);
 
   return (
     <AsyncState
