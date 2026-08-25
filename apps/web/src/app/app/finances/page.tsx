@@ -57,6 +57,7 @@ import {
   type SettlementInput,
   type Statement,
   type StatementItem,
+  shouldPreserveStatementAdjustmentCommandKey,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
@@ -3029,6 +3030,7 @@ function FinanceDashboard({
         open={visibleViewingStatement !== null}
         onOpenChange={(open) => {
           if (!open) {
+            if (shouldPreserveStatementAdjustmentCommandKey(savingStatementAdjustment)) return;
             setViewingStatement(null);
             setStatementAdjustmentMode(null);
             setStatementRefundSourceId(null);
@@ -3134,7 +3136,14 @@ function FinanceDashboard({
                               variant="ghost"
                               size="sm"
                               className="ml-2"
+                              disabled={savingStatementAdjustment}
                               onClick={() => {
+                                if (
+                                  shouldPreserveStatementAdjustmentCommandKey(
+                                    savingStatementAdjustment,
+                                  )
+                                )
+                                  return;
                                 statementAdjustmentCommandKey.current = null;
                                 setStatementAdjustmentError(null);
                                 setStatementRefundSourceId(item.transactionId);
@@ -3158,7 +3167,10 @@ function FinanceDashboard({
                     type="button"
                     variant="outline"
                     size="sm"
+                    disabled={savingStatementAdjustment}
                     onClick={() => {
+                      if (shouldPreserveStatementAdjustmentCommandKey(savingStatementAdjustment))
+                        return;
                       statementAdjustmentCommandKey.current = null;
                       setStatementAdjustmentError(null);
                       setStatementAdjustmentMode("adjustment");
@@ -3191,6 +3203,7 @@ function FinanceDashboard({
                       <select
                         id="statement-adjustment-kind"
                         className="h-9 rounded-md border bg-background px-3 text-sm"
+                        disabled={savingStatementAdjustment}
                         value={statementAdjustmentKind}
                         onChange={(event) =>
                           setStatementAdjustmentKind(
@@ -3216,6 +3229,7 @@ function FinanceDashboard({
                       value={statementAdjustmentAmount}
                       onChange={setStatementAdjustmentAmount}
                       currency={currency}
+                      disabled={savingStatementAdjustment}
                     />
                   </Field>
                   <Field>
@@ -3224,6 +3238,7 @@ function FinanceDashboard({
                       id="statement-adjustment-description"
                       value={statementAdjustmentDescription}
                       onChange={(event) => setStatementAdjustmentDescription(event.target.value)}
+                      disabled={savingStatementAdjustment}
                       placeholder={
                         statementAdjustmentMode === "refund" ? "Opcional" : "Ex.: tarifa do emissor"
                       }
@@ -3234,7 +3249,10 @@ function FinanceDashboard({
                     <Button
                       type="button"
                       variant="ghost"
+                      disabled={savingStatementAdjustment}
                       onClick={() => {
+                        if (shouldPreserveStatementAdjustmentCommandKey(savingStatementAdjustment))
+                          return;
                         setStatementAdjustmentMode(null);
                         setStatementAdjustmentError(null);
                         statementAdjustmentCommandKey.current = null;
@@ -3266,7 +3284,9 @@ function FinanceDashboard({
             </div>
           ) : null}
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>Fechar</DialogClose>
+            <DialogClose render={<Button variant="outline" disabled={savingStatementAdjustment} />}>
+              Fechar
+            </DialogClose>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -19,6 +19,7 @@ import {
   mergeTransactionPage,
   previewInstallmentMinor,
   type Statement,
+  shouldPreserveStatementAdjustmentCommandKey,
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
@@ -1423,6 +1424,19 @@ describe("finance adapter", () => {
       ),
     ).resolves.toMatchObject({ transaction: { id: "adjustment-1" } });
     expect(keys).toEqual(["statement-correction-retry", "statement-correction-retry"]);
+  });
+
+  it("keeps a statement correction key while cancel/close/switch controls are pending", () => {
+    let commandKey: string | null = "statement-correction-pending";
+    for (const interaction of ["cancel", "close", "switch-action", "switch-purchase"]) {
+      if (!shouldPreserveStatementAdjustmentCommandKey(true)) commandKey = null;
+      expect(commandKey, `${interaction} must preserve the pending command key`).toBe(
+        "statement-correction-pending",
+      );
+    }
+    expect(shouldPreserveStatementAdjustmentCommandKey(false)).toBe(false);
+    if (!shouldPreserveStatementAdjustmentCommandKey(false)) commandKey = null;
+    expect(commandKey).toBeNull();
   });
 
   it("reuses recurrence and installment keys across retryable failures", async () => {

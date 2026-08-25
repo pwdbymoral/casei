@@ -226,6 +226,11 @@ export function shouldRetryIdempotentCommand(error: unknown): boolean {
   );
 }
 
+/** Closing or changing a correction form while its request is pending must not lose its key. */
+export function shouldPreserveStatementAdjustmentCommandKey(saving: boolean): boolean {
+  return saving;
+}
+
 export function hasTransactionQueryFilters(query: TransactionQuery): boolean {
   return Boolean(
     query.search || query.from || query.to || query.state || query.kind || query.cardId,
