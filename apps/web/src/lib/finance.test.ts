@@ -970,8 +970,13 @@ describe("finance adapter", () => {
 
     const partial = await adapter.postTransaction(workspaceId, created, {
       amount: { currency: "BRL", minor: "2000" },
+      occurredOn: "2026-08-30",
     });
-    expect(partial).toMatchObject({ state: "partially_settled", version: 1 });
+    expect(partial).toMatchObject({
+      state: "partially_settled",
+      version: 1,
+      occurredOn: "2026-08-30",
+    });
     expect(partial.settledAmount.minor).toBe("2000");
 
     const total = await adapter.postTransaction(workspaceId, partial);

@@ -1050,6 +1050,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         ...current,
         settledAmount: { ...current.settledAmount, minor: settledMinor.toString() },
         state: settledMinor === BigInt(current.amount.minor) ? "posted" : "partially_settled",
+        occurredOn: input.occurredOn ?? current.occurredOn,
         postedOn: new Date().toISOString(),
         version: current.version + 1,
       };
