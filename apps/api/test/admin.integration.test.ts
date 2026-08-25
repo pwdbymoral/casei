@@ -22,6 +22,7 @@ describe("ADMIN PostgreSQL boundary", () => {
       await ensureApplicationRole(adminPool);
       await adminPool.query(`CREATE DATABASE "${databaseName}"`);
       pool = getDatabasePool({ connectionString: databaseUrl.toString() });
+      pool.on("error", () => undefined);
       await migrate(createDatabase(pool), {
         migrationsFolder: fileURLToPath(
           new URL("../../../packages/database/drizzle", import.meta.url),
@@ -139,6 +140,7 @@ describe("ADMIN PostgreSQL boundary", () => {
       await ensureApplicationRole(adminPool);
       await adminPool.query(`CREATE DATABASE "${databaseName}"`);
       pool = getDatabasePool({ connectionString: databaseUrl.toString() });
+      pool.on("error", () => undefined);
       await migrate(createDatabase(pool), {
         migrationsFolder: fileURLToPath(
           new URL("../../../packages/database/drizzle", import.meta.url),
