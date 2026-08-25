@@ -229,6 +229,17 @@ export type SimulationChange = {
   event: SimulationEvent;
 };
 
+export function simulationEventMatchesReport(
+  report: Pick<FinancialReport, "from" | "to" | "filters">,
+  event: Pick<SimulationEvent, "kind" | "occurredOn" | "categoryId">,
+): boolean {
+  if (event.occurredOn < report.from || event.occurredOn > report.to) return false;
+  if (report.filters.kind !== "all" && report.filters.kind !== event.kind) return false;
+  if (report.filters.categoryId !== null && report.filters.categoryId !== event.categoryId)
+    return false;
+  return true;
+}
+
 function money(currency: string, minor: bigint): ReportMoney {
   return { currency, minor: minor.toString() };
 }
@@ -299,13 +310,19 @@ export function applySimulationChanges(
     if (change.operation === "replace") {
       const previous = change.eventId ? eventById.get(change.eventId) : undefined;
       if (!previous) continue;
-      applyEventDelta(next, previous, -BigInt(1));
-      applyEventDelta(next, change.event, BigInt(1));
+      if (simulationEventMatchesReport(report, previous)) {
+        applyEventDelta(next, previous, -BigInt(1));
+      }
+      if (simulationEventMatchesReport(report, change.event)) {
+        applyEventDelta(next, change.event, BigInt(1));
+      }
       eventById.set(previous.id, change.event);
-    } else {
+    } else if (simulationEventMatchesReport(report, change.event)) {
       applyEventDelta(next, change.event, BigInt(1));
     }
   }
+  next.monthly = next.monthly.filter((item) => item.transactionCount > 0);
+  next.categories = next.categories.filter((item) => item.transactionCount > 0);
   next.reconciliation = {
     ...next.reconciliation,
     transactionCount: next.totals.transactionCount,
@@ -347,4 +364,9 @@ export function simulationToPlannedTransaction(
     categoryId: event.categoryId,
     cardId: null,
   };
+}
+
+/** The key is stable per simulated item, so an uncertain retry replays safely. */
+export function simulationApplyCommandKey(changeId: string): string {
+  return `report-simulation-${changeId}`;
 }
