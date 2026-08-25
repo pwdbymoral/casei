@@ -5,11 +5,126 @@ import { createDatabase, ensureApplicationRole, getDatabasePool } from "@casei/d
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { describe, expect, it } from "vitest";
 import { FinanceService } from "../src/finance-service.js";
+import { InvalidCursorError } from "../src/http/cursor.js";
 
 const adminUrl = process.env.DATABASE_URL_TEST;
 const integrationIt = adminUrl ? it : it.skip;
 
 describe("LOAN-001/002 simple IOU PostgreSQL", () => {
+  integrationIt("paginates persisted payments and hides a foreign contract", async () => {
+    const fixture = await createFixture();
+    try {
+      const service = new FinanceService(fixture.pool, {
+        cursorSecret: "loan-integration-secret",
+      });
+      const created = await service.createLoan(
+        fixture.scope,
+        {
+          direction: "lent",
+          counterparty: "Bia",
+          principal: { currency: "BRL", minor: "600" },
+          occurredOn: "2030-01-10",
+        },
+        "loan-history-create-001",
+      );
+      const first = await service.payLoan(
+        fixture.scope,
+        created.loan.id,
+        "loan-history-payment-001",
+        0,
+        { amount: { currency: "BRL", minor: "100" }, occurredOn: "2030-01-20" },
+      );
+      const second = await service.payLoan(
+        fixture.scope,
+        created.loan.id,
+        "loan-history-payment-002",
+        1,
+        { amount: { currency: "BRL", minor: "200" }, occurredOn: "2030-01-21" },
+      );
+
+      const firstPage = await service.listLoanPayments(fixture.scope, created.loan.id, {
+        limit: 1,
+      });
+      expect(firstPage).toMatchObject({
+        items: [{ id: second.response.payment.id, amount: { minor: "200" } }],
+        hasMore: true,
+      });
+      const nextCursor = firstPage.nextCursor;
+      expect(nextCursor).toBeTruthy();
+      if (!nextCursor) throw new Error("expected a next cursor");
+      const secondPage = await service.listLoanPayments(fixture.scope, created.loan.id, {
+        cursor: nextCursor,
+        limit: 1,
+      });
+      expect(secondPage).toMatchObject({
+        items: [{ id: first.response.payment.id, amount: { minor: "100" } }],
+        hasMore: false,
+        nextCursor: null,
+      });
+      await expect(
+        service.listLoanPayments(fixture.scope, created.loan.id, {
+          cursor: "cursor-tampered",
+          limit: 1,
+        }),
+      ).rejects.toBeInstanceOf(InvalidCursorError);
+
+      const otherLoan = await service.createLoan(
+        fixture.scope,
+        {
+          direction: "lent",
+          counterparty: "Outra pessoa",
+          principal: { currency: "BRL", minor: "100" },
+          occurredOn: "2030-01-10",
+        },
+        "loan-history-other-contract-001",
+      );
+      await expect(
+        service.listLoanPayments(fixture.scope, otherLoan.loan.id, {
+          cursor: nextCursor,
+          limit: 1,
+        }),
+      ).rejects.toBeInstanceOf(InvalidCursorError);
+
+      const otherWorkspace = await fixture.pool.query<{ id: string }>(
+        `INSERT INTO workspace (name) VALUES ('Outra casa') RETURNING id`,
+      );
+      const otherWorkspaceId = otherWorkspace.rows[0]?.id;
+      if (!otherWorkspaceId) throw new Error("other workspace was not created");
+      await fixture.pool.query(
+        `INSERT INTO workspace_preference (workspace_id, currency_code, timezone)
+         VALUES ($1, 'BRL', 'America/Fortaleza')`,
+        [otherWorkspaceId],
+      );
+      await fixture.pool.query(
+        `INSERT INTO membership (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [otherWorkspaceId, fixture.scope.actorId],
+      );
+      const foreign = await service.createLoan(
+        { ...fixture.scope, workspaceId: otherWorkspaceId },
+        {
+          direction: "borrowed",
+          counterparty: "Pessoa externa",
+          principal: { currency: "BRL", minor: "100" },
+          occurredOn: "2030-01-10",
+        },
+        "loan-history-foreign-001",
+      );
+      await expect(
+        service.listLoanPayments(fixture.scope, foreign.loan.id, { limit: 10 }),
+      ).rejects.toMatchObject({ code: "not_found" });
+      await expect(
+        service.listLoanPayments(
+          { ...fixture.scope, workspaceId: otherWorkspaceId },
+          foreign.loan.id,
+          { cursor: nextCursor, limit: 1 },
+        ),
+      ).rejects.toBeInstanceOf(InvalidCursorError);
+    } finally {
+      await fixture.close();
+    }
+  });
+
   integrationIt("keeps lent principal/reimbursements out of income and expense", async () => {
     const fixture = await createFixture();
     try {

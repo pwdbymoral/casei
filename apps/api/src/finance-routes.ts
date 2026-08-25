@@ -257,6 +257,16 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     return context.json(loan);
   });
 
+  router.get("/workspaces/:workspaceId/loans/:loanId/payments", async (context) => {
+    const loanId = parseDomainId(context.req.param("loanId"));
+    const query = parseQuery(context, paginationQuerySchema);
+    const page = await service.listLoanPayments(scopeOf(context), loanId, query);
+    return context.json({
+      items: page.items,
+      page: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+    });
+  });
+
   router.post("/workspaces/:workspaceId/loans/:loanId/payments", async (context) => {
     const loanId = parseDomainId(context.req.param("loanId"));
     const expectedVersion = requireIfMatch(context);
