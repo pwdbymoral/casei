@@ -123,6 +123,43 @@ export interface DataExchangeAdapter {
   downloadExport(workspaceId: string, jobId: string): Promise<Blob>;
 }
 
+export type DataExchangeOperationState = {
+  pending: boolean;
+  key: string | null;
+};
+
+export type DataExchangeOperationStart<T> =
+  | { started: false; key: string | null; promise: null }
+  | { started: true; key: string; promise: Promise<T> };
+
+/**
+ * Starts an idempotent UI operation once. A rejected request keeps its key so
+ * a retry after an uncertain network failure replays the same operation.
+ */
+export function beginDataExchangeOperation<T>(
+  state: DataExchangeOperationState,
+  prefix: string,
+  keyFactory: () => string,
+  run: (key: string) => Promise<T>,
+): DataExchangeOperationStart<T> {
+  if (state.pending) return { started: false, key: state.key, promise: null };
+  const key = state.key ?? `${prefix}-${keyFactory()}`;
+  state.pending = true;
+  state.key = key;
+  const promise = run(key).then(
+    (value) => {
+      state.pending = false;
+      state.key = null;
+      return value;
+    },
+    (error: unknown) => {
+      state.pending = false;
+      throw error;
+    },
+  );
+  return { started: true, key, promise };
+}
+
 export type DataExchangeErrorCode = "offline" | "permission" | "unavailable" | "request_failed";
 
 export class DataExchangeError extends Error {
@@ -207,35 +244,115 @@ export function inferMapping(
   };
 }
 
-function splitCsvLine(line: string, delimiter: "," | ";" | "\t"): string[] {
-  const cells: string[] = [];
-  let cell = "";
-  let quoted = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i];
-    if (char === '"') {
-      if (quoted && line[i + 1] === '"') {
-        cell += '"';
-        i += 1;
-      } else quoted = !quoted;
-    } else if (char === delimiter && !quoted) {
-      cells.push(cell.trim());
-      cell = "";
-    } else cell += char;
+export function detectPreviewDelimiter(text: string, locale: ImportLocale): "," | ";" | "\t" {
+  const counts: Record<"," | ";" | "\t", number> = { ",": 0, ";": 0, "\t": 0 };
+  let inQuotes = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] ?? "";
+    if (character === '"') {
+      if (inQuotes && text[index + 1] === '"') index += 1;
+      else inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    if (character === "\r" || character === "\n") break;
+    if (character === "," || character === ";" || character === "\t") counts[character] += 1;
   }
-  cells.push(cell.trim());
-  return cells;
+  if (counts[";"] > counts[","] && counts[";"] >= counts["\t"]) return ";";
+  if (counts["\t"] > counts[","] && counts["\t"] > counts[";"]) return "\t";
+  return locale === "pt-BR" ? ";" : ",";
 }
 
-export function detectPreviewDelimiter(text: string, locale: ImportLocale): "," | ";" | "\t" {
-  const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
-  const candidates: Array<"," | ";" | "\t"> = [",", ";", "\t"];
-  const counts = candidates.map((delimiter) => ({
-    delimiter,
-    count: firstLine.split(delimiter).length - 1,
-  }));
-  counts.sort((left, right) => right.count - left.count);
-  return counts[0]?.count ? counts[0].delimiter : locale === "pt-BR" ? ";" : ",";
+type ParsedCsvPreview = {
+  records: string[][];
+  rowLimitExceeded: boolean;
+};
+
+function parseCsvPreviewRecords(
+  text: string,
+  delimiter: "," | ";" | "\t",
+  maxDataRows: number,
+): ParsedCsvPreview {
+  const records: string[][] = [];
+  let cells: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+  let atFieldStart = true;
+  let justClosedQuote = false;
+  let rowHasContent = false;
+  let rowLimitExceeded = false;
+
+  const finishCell = () => {
+    cells.push(cell);
+    cell = "";
+    atFieldStart = true;
+    justClosedQuote = false;
+  };
+
+  const finishRecord = () => {
+    finishCell();
+    const isBlank = cells.every((value) => value.trim() === "");
+    const preserveEmptyRecord = records.length > 0 && cells.length === 1 && !rowHasContent;
+    if (!isBlank || rowHasContent || preserveEmptyRecord || records.length === 0) {
+      records.push(cells);
+      if (records.length > maxDataRows + 1) rowLimitExceeded = true;
+    }
+    cells = [];
+    atFieldStart = true;
+    justClosedQuote = false;
+    rowHasContent = false;
+  };
+
+  for (let index = 0; index < text.length && !rowLimitExceeded; index += 1) {
+    const character = text[index] ?? "";
+    if (inQuotes) {
+      if (character === '"') {
+        if (text[index + 1] === '"') {
+          cell += '"';
+          index += 1;
+        } else {
+          inQuotes = false;
+          justClosedQuote = true;
+        }
+      } else cell += character;
+      continue;
+    }
+    if (character === '"') {
+      if (cell.length !== 0 || !atFieldStart || justClosedQuote) {
+        throw new Error("Aspas só podem iniciar um campo CSV.");
+      }
+      inQuotes = true;
+      atFieldStart = false;
+      rowHasContent = true;
+      continue;
+    }
+    if (justClosedQuote && character !== delimiter && character !== "\r" && character !== "\n") {
+      throw new Error("Uma célula CSV entre aspas deve terminar no separador ou no fim da linha.");
+    }
+    if (character === delimiter) {
+      finishCell();
+      rowHasContent = true;
+      continue;
+    }
+    if (character === "\r" || character === "\n") {
+      finishRecord();
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+      continue;
+    }
+    cell += character;
+    atFieldStart = false;
+    justClosedQuote = false;
+    rowHasContent = true;
+  }
+
+  if (inQuotes) throw new Error("O arquivo contém uma célula CSV entre aspas sem fechamento.");
+  if (
+    !rowLimitExceeded &&
+    (cell.length > 0 || cells.length > 0 || rowHasContent || text.length === 0)
+  ) {
+    finishRecord();
+  }
+  return { records, rowLimitExceeded };
 }
 
 export function parseLocalCsvPreview(
@@ -253,17 +370,15 @@ export function parseLocalCsvPreview(
   message?: string;
 } {
   const delimiter = detectPreviewDelimiter(text, options.locale);
-  const lines = text
-    .replace(/^\uFEFF/, "")
-    .split(/\r?\n/)
-    .filter((line, index, all) => line !== "" || index < all.length - 1);
-  const headers = (lines.shift() ?? "").split(delimiter).map((header) => header.trim());
+  const parsedCsv = parseCsvPreviewRecords(text.replace(/^\uFEFF/, ""), delimiter, MAX_IMPORT_ROWS);
+  const records = parsedCsv.records;
+  const headers = (records.shift() ?? []).map((header) => header.trim());
   const fields = dataFieldsForDomain(options.domain);
   const inferred = inferMapping(headers, fields, options.mapping);
   const seenRows = new Set<string>();
-  const rowLimitExceeded = lines.length > MAX_IMPORT_ROWS;
-  const rows: ImportPreviewRow[] = lines.slice(0, MAX_IMPORT_ROWS).map((line, index) => {
-    const cells = splitCsvLine(line, delimiter);
+  const rowLimitExceeded = parsedCsv.rowLimitExceeded;
+  const rows: ImportPreviewRow[] = records.slice(0, MAX_IMPORT_ROWS).map((rawCells, index) => {
+    const cells = rawCells.map((cell) => cell.trim());
     const errors: string[] = [];
     for (const field of fields.filter((item) => item.required)) {
       const header = inferred.mapping[field.key];
@@ -446,7 +561,13 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
       headers: { Accept: "application/json" },
     });
   },
-  startImport(workspaceId, input, idempotencyKey) {
+  async startImport(workspaceId, input, idempotencyKey) {
+    if (!input.preview.serverBacked) {
+      throw new DataExchangeError(
+        "Atualize a prévia com o servidor antes de confirmar a importação.",
+        409,
+      );
+    }
     const form = new FormData();
     form.set("file", input.file);
     form.set("previewId", input.preview.id);
@@ -795,6 +916,22 @@ export function importStatusLabel(status: ImportJobStatus): string {
     failed: "Falhou",
     canceled: "Cancelada",
   }[status];
+}
+
+export type ExportHistorySurfaceStatus =
+  | "loading"
+  | "success"
+  | "empty"
+  | "error"
+  | "offline"
+  | "permission";
+
+export function exportHistorySurfaceStatus(
+  status: Exclude<ExportHistorySurfaceStatus, "empty">,
+  hasJobs: boolean,
+): ExportHistorySurfaceStatus {
+  if (status === "success") return hasJobs ? "success" : "empty";
+  return status;
 }
 
 export function exportStatusLabel(status: ExportJobStatus): string {

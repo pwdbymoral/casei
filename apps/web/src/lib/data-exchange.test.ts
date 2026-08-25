@@ -1,11 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  beginDataExchangeOperation,
   canExportData,
   canImportData,
   dataExchangeAdapterForEnvironment,
   dataFieldsForDomain,
   detectPreviewDelimiter,
+  exportHistorySurfaceStatus,
   formatDataFileSize,
   inferMapping,
   MAX_IMPORT_ROWS,
@@ -25,6 +27,22 @@ describe("data exchange UI ports", () => {
     expect(preview.unknownHeaders).toEqual(["Observação"]);
     expect(preview.counts).toEqual({ valid: 1, warnings: 1, duplicates: 0, errors: 0 });
     expect(preview.canConfirm).toBe(true);
+  });
+
+  it("mantém aspas, separadores e quebras de linha dentro de uma célula CSV", () => {
+    const preview = parseLocalCsvPreview(
+      'Tipo;Valor;Data;Descrição\n"despesa";10,00;2026-08-25;"Mercado; feira\nperto de casa"',
+      { domain: "transactions", locale: "pt-BR" },
+    );
+
+    expect(preview.rows).toHaveLength(1);
+    expect(preview.rows[0]?.cells).toEqual([
+      "despesa",
+      "10,00",
+      "2026-08-25",
+      "Mercado; feira\nperto de casa",
+    ]);
+    expect(preview.rows[0]?.status).toBe("valid");
   });
 
   it("marca linha inválida quando campo obrigatório não foi preenchido", () => {
@@ -96,6 +114,101 @@ describe("data exchange UI ports", () => {
     expect(canImportData("viewer")).toBe(false);
     expect(canExportData("viewer")).toBe(true);
     expect(formatDataFileSize(10_000_000)).toBe("9.5 MB");
+  });
+
+  it("preserva o estado de permissão no histórico de exportações", () => {
+    expect(exportHistorySurfaceStatus("permission", false)).toBe("permission");
+    expect(exportHistorySurfaceStatus("success", false)).toBe("empty");
+  });
+
+  it("ignora duplo clique de retry e export enquanto o adapter deferred está pendente", async () => {
+    let resolveRetry!: (value: string) => void;
+    const retryDeferred = new Promise<string>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const retryAdapter = { retryImport: vi.fn((_key: string) => retryDeferred) };
+    const retryState = { pending: false, key: null as string | null };
+    const firstRetry = beginDataExchangeOperation(
+      retryState,
+      "retry",
+      () => "stable-retry",
+      (key) => retryAdapter.retryImport(key),
+    );
+    const duplicateRetry = beginDataExchangeOperation(
+      retryState,
+      "retry",
+      () => "different-retry",
+      (key) => retryAdapter.retryImport(key),
+    );
+
+    if (!firstRetry.started) throw new Error("retry operation did not start");
+    expect(firstRetry.started).toBe(true);
+    expect(duplicateRetry.started).toBe(false);
+    expect(duplicateRetry.key).toBe(firstRetry.key);
+    expect(retryAdapter.retryImport).toHaveBeenCalledTimes(1);
+    resolveRetry("retried");
+    await expect(firstRetry.promise).resolves.toBe("retried");
+    expect(retryState).toEqual({ pending: false, key: null });
+
+    let resolveExport!: (value: string) => void;
+    const exportDeferred = new Promise<string>((resolve) => {
+      resolveExport = resolve;
+    });
+    const exportAdapter = { createExport: vi.fn((_key: string) => exportDeferred) };
+    const exportState = { pending: false, key: null as string | null };
+    const firstExport = beginDataExchangeOperation(
+      exportState,
+      "export",
+      () => "stable-export",
+      (key) => exportAdapter.createExport(key),
+    );
+    const duplicateExport = beginDataExchangeOperation(
+      exportState,
+      "export",
+      () => "different-export",
+      (key) => exportAdapter.createExport(key),
+    );
+
+    if (!firstExport.started) throw new Error("export operation did not start");
+    expect(duplicateExport.started).toBe(false);
+    expect(duplicateExport.key).toBe(firstExport.key);
+    expect(exportAdapter.createExport).toHaveBeenCalledTimes(1);
+    resolveExport("exported");
+    await expect(firstExport.promise).resolves.toBe("exported");
+    expect(exportState).toEqual({ pending: false, key: null });
+  });
+
+  it("exige uma nova prévia server-backed depois de revisar CSV offline", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    try {
+      const adapter = dataExchangeAdapterForEnvironment();
+      const file = new File(["Tipo;Valor;Data\ndespesa;10,00;2026-08-25"], "offline.csv", {
+        type: "text/csv",
+      });
+      const preview = await adapter.previewImport("workspace-reconnect", {
+        file,
+        domain: "transactions",
+        locale: "pt-BR",
+      });
+      expect(preview.serverBacked).toBe(false);
+
+      vi.stubGlobal("navigator", { onLine: true });
+      await expect(
+        adapter.startImport(
+          "workspace-reconnect",
+          {
+            preview,
+            file,
+            mapping: preview.mapping,
+            duplicatePolicy: "ignore",
+            applyMode: "valid_only",
+          },
+          "reconnect-key",
+        ),
+      ).rejects.toMatchObject({ status: 409 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("exercita o port de fixture sem prometer persistência no servidor", async () => {

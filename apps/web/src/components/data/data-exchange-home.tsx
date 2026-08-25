@@ -48,14 +48,17 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  beginDataExchangeOperation,
   canExportData,
   canImportData,
   type DataDomain,
   type DataExchangeAdapter,
   DataExchangeError,
+  type DataExchangeOperationState,
   type DuplicatePolicy,
   dataExchangeAdapterForEnvironment,
   type ExportJob,
+  exportHistorySurfaceStatus,
   exportStatusLabel,
   formatDataFileSize,
   type ImportApplyMode,
@@ -183,8 +186,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [applyMode, setApplyMode] = useState<ImportApplyMode>("valid_only");
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
+  const [exportPending, setExportPending] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportDomain, setExportDomain] = useState<DataDomain>("transactions");
   const [exportFormat, setExportFormat] = useState<"csv" | "zip">("csv");
@@ -192,7 +197,8 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [exportTo, setExportTo] = useState("");
   const [activeExport, setActiveExport] = useState<ExportJob | null>(null);
   const importIdempotencyKey = useRef<string | null>(null);
-  const exportIdempotencyKey = useRef<string | null>(null);
+  const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
+  const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
 
   const importAllowed = canImportData(role);
   const exportAllowed = canExportData(role);
@@ -275,6 +281,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportJob(null);
     setImportError(null);
     importIdempotencyKey.current = null;
+    retryOperation.current.key = null;
   }
 
   async function previewFile() {
@@ -329,39 +336,56 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
 
   async function retryImport() {
     if (!importJob || !online) return;
+    const jobId = importJob.id;
+    const operation = beginDataExchangeOperation(
+      retryOperation.current,
+      "retry",
+      () => crypto.randomUUID(),
+      (key) => adapter.retryImport(workspaceId, jobId, key),
+    );
+    if (!operation.started) return;
+    setRetryPending(true);
     try {
       setImportError(null);
-      setImportJob(
-        await adapter.retryImport(workspaceId, importJob.id, `retry-${crypto.randomUUID()}`),
-      );
+      setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
+    } finally {
+      setRetryPending(false);
     }
   }
 
   async function createExport() {
     if (!exportAllowed || (exportDomain === "complete" && !completeExportAllowed) || !online)
       return;
+    const operation = beginDataExchangeOperation(
+      exportOperation.current,
+      "export",
+      () => crypto.randomUUID(),
+      (key) =>
+        adapter.createExport(
+          workspaceId,
+          {
+            domain: exportDomain,
+            format: exportFormat,
+            from: exportFrom || undefined,
+            to: exportTo || undefined,
+          },
+          key,
+        ),
+    );
+    if (!operation.started) return;
+    setExportPending(true);
     setExportError(null);
-    if (activeExport && terminalExport(activeExport)) exportIdempotencyKey.current = null;
-    const key = exportIdempotencyKey.current ?? `export-${crypto.randomUUID()}`;
-    exportIdempotencyKey.current = key;
     try {
-      const next = await adapter.createExport(
-        workspaceId,
-        {
-          domain: exportDomain,
-          format: exportFormat,
-          from: exportFrom || undefined,
-          to: exportTo || undefined,
-        },
-        key,
-      );
+      const next = await operation.promise;
       setActiveExport(next);
       setExportJobs((current) => [next, ...current.filter((job) => job.id !== next.id)]);
     } catch (error) {
       setExportStatus(errorStatus(error));
       setExportError(errorMessage(error));
+    } finally {
+      setExportPending(false);
     }
   }
 
@@ -382,8 +406,13 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       : "";
   const canConfirmImport = Boolean(
     preview?.canConfirm === true &&
+      (preview.serverBacked || fixtureMode) &&
       !mappingDirty &&
       (applyMode === "valid_only" || preview.counts.errors === 0),
+  );
+  const exportSurfaceStatus = exportHistorySurfaceStatus(
+    exportStatus === "idle" ? "loading" : exportStatus,
+    exportJobs.length > 0,
   );
 
   return (
@@ -560,7 +589,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   <p className="text-sm text-muted-foreground">
                     {preview.serverBacked
                       ? "Validação do servidor concluída."
-                      : "Prévia local para revisar o formato; a validação canônica acontece no servidor."}
+                      : !online
+                        ? "Prévia local para revisar o formato; a validação canônica acontece no servidor."
+                        : "Esta prévia local precisa ser atualizada com o servidor antes de confirmar."}
                   </p>
                 </div>
                 {preview.message ? (
@@ -730,9 +761,11 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   </Button>
                   {previewStatus === "success" && !canConfirmImport ? (
                     <span className="text-sm text-muted-foreground">
-                      {applyMode === "all_or_nothing" && preview.counts.errors > 0
-                        ? "Corrija os erros ou escolha importar somente as linhas válidas."
-                        : "Corrija os campos obrigatórios e atualize a prévia para confirmar."}
+                      {!preview.serverBacked && !fixtureMode
+                        ? "Atualize a prévia com o servidor antes de confirmar."
+                        : applyMode === "all_or_nothing" && preview.counts.errors > 0
+                          ? "Corrija os erros ou escolha importar somente as linhas válidas."
+                          : "Corrija os campos obrigatórios e atualize a prévia para confirmar."}
                     </span>
                   ) : null}
                 </div>
@@ -808,10 +841,19 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     <Button
                       type="button"
                       variant="outline"
-                      disabled={!online}
+                      disabled={!online || retryPending}
                       onClick={() => void retryImport()}
                     >
-                      <RefreshCwIcon data-icon="inline-start" aria-hidden="true" /> Tentar novamente
+                      {retryPending ? (
+                        <LoaderCircleIcon
+                          data-icon="inline-start"
+                          className="animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
+                      )}{" "}
+                      {retryPending ? "Tentando novamente…" : "Tentar novamente"}
                     </Button>
                   ) : null}
                   {importJob.errors.length > 0 ? (
@@ -853,6 +895,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     const next = event.target.value as DataDomain;
                     setExportDomain(next);
                     if (next !== "complete") setExportFormat("csv");
+                    exportOperation.current.key = null;
                   }}
                 >
                   <option value="transactions">Transações</option>
@@ -869,7 +912,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                   value={exportFormat}
                   disabled={!exportAllowed || exportDomain !== "complete"}
-                  onChange={(event) => setExportFormat(event.target.value as "csv" | "zip")}
+                  onChange={(event) => {
+                    setExportFormat(event.target.value as "csv" | "zip");
+                    exportOperation.current.key = null;
+                  }}
                 >
                   <option value="csv">CSV UTF-8</option>
                   <option value="zip">ZIP completo com manifesto</option>
@@ -886,7 +932,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     type="date"
                     value={exportFrom}
                     disabled={!exportAllowed}
-                    onChange={(event) => setExportFrom(event.target.value)}
+                    onChange={(event) => {
+                      setExportFrom(event.target.value);
+                      exportOperation.current.key = null;
+                    }}
                   />
                 </Field>
                 <Field>
@@ -896,7 +945,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     type="date"
                     value={exportTo}
                     disabled={!exportAllowed}
-                    onChange={(event) => setExportTo(event.target.value)}
+                    onChange={(event) => {
+                      setExportTo(event.target.value);
+                      exportOperation.current.key = null;
+                    }}
                   />
                 </Field>
               </div>
@@ -908,11 +960,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                 !exportAllowed ||
                 (exportDomain === "complete" && !completeExportAllowed) ||
                 !online ||
+                exportPending ||
                 Boolean(activeExport && !terminalExport(activeExport))
               }
               onClick={() => void createExport()}
             >
-              {activeExport && !terminalExport(activeExport) ? (
+              {exportPending || (activeExport && !terminalExport(activeExport)) ? (
                 <LoaderCircleIcon
                   data-icon="inline-start"
                   className="animate-spin"
@@ -921,7 +974,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
               ) : (
                 <FileDownIcon data-icon="inline-start" aria-hidden="true" />
               )}{" "}
-              Gerar exportação
+              {exportPending ? "Gerando exportação…" : "Gerar exportação"}
             </Button>
             {activeExport && !terminalExport(activeExport) ? (
               <ProgressBar value={activeExport.progress} label="Gerando arquivo" />
@@ -960,9 +1013,22 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {exportStatus === "loading" ? (
+          {exportSurfaceStatus === "loading" ? (
             <AsyncState status="loading" />
-          ) : exportJobs.length === 0 ? (
+          ) : exportSurfaceStatus === "permission" ? (
+            <AsyncState
+              status="permission"
+              title="Sem permissão para ver exportações"
+              description={exportError ?? "Seu papel atual não permite consultar este histórico."}
+              action={{ label: "Tentar novamente", onClick: () => void loadExports() }}
+            />
+          ) : exportSurfaceStatus === "error" || exportSurfaceStatus === "offline" ? (
+            <AsyncState
+              status={exportSurfaceStatus}
+              description={exportError ?? undefined}
+              action={{ label: "Tentar novamente", onClick: () => void loadExports() }}
+            />
+          ) : exportSurfaceStatus === "empty" ? (
             <Empty className="min-h-32 border">
               <EmptyHeader>
                 <EmptyMedia variant="icon">

@@ -22,6 +22,9 @@ um arquivo antes da aplicação; a validação canônica continua no servidor.
 Quando não há conexão, o adapter autenticado usa esse fallback somente para
 CSV; XLSX continua exigindo o servidor. A confirmação e o envio permanecem
 bloqueados offline.
+Depois que a conexão volta, uma prévia CSV local precisa ser atualizada e
+validada pelo servidor antes da confirmação; o fixture de desenvolvimento é a
+única exceção explícita.
 
 Não fazem parte desta fatia storage, job worker, persistência de perfis,
 autorização server-side, reimportação efetiva ou um parser XLSX no navegador.
@@ -51,3 +54,6 @@ fórmulas de planilha; a proteção canônica de exportações continua em DATA-
 No adapter de fixtures, chaves de idempotência são isoladas por espaço,
 reproduzem o mesmo resultado e rejeitam uma segunda requisição com payload
 divergente; a aplicação server-side permanece responsabilidade do DATA-004.
+O parser local mantém campos CSV RFC 4180 com aspas, separadores e quebras de
+linha; retries e exportações têm estado pending e uma chave estável enquanto a
+operação está em andamento.
