@@ -66,6 +66,7 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     const job = await options.application.cancel(context.req.param("importId"), scope.workspaceId, {
       actorId: scope.actorId,
       correlationId: scope.correlationId,
+      origin: "api",
     });
     return context.json(job, 202);
   });
@@ -80,6 +81,7 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
       {
         actorId: scope.actorId,
         correlationId: scope.correlationId,
+        origin: "api",
       },
     );
     return context.json(job, 202);

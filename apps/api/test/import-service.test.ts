@@ -1,4 +1,5 @@
 import type { ImportCreateRequest } from "@casei/contracts";
+import type { JobExecutionContext } from "@casei/database";
 import { describe, expect, it } from "vitest";
 import type {
   ImportBatchContext,
@@ -61,6 +62,7 @@ class MemoryStore implements ImportStore {
   authorized = true;
   nextId = 0;
   batchCalls = 0;
+  lastExecution?: JobExecutionContext;
 
   async createJob(input: Parameters<ImportStore["createJob"]>[0]): Promise<ImportJobRecord> {
     const id = `job-${++this.nextId}`;
@@ -108,15 +110,18 @@ class MemoryStore implements ImportStore {
     scope: string,
     rows: readonly ImportSourceRow[],
     callback: (context: ImportBatchContext) => Promise<T>,
+    execution?: JobExecutionContext,
   ): Promise<T> {
     const job = await this.getJob(jobId, scope);
     if (!job) throw new Error("not found");
     this.batchCalls += 1;
+    this.lastExecution = execution;
     const beforeJob = job;
     const beforeResults = new Map(this.results.get(jobId));
     const context: ImportBatchContext = {
       job,
       rows,
+      renewLease: async () => true,
       assertAuthorized: async () => {
         if (!this.authorized) throw new ImportAuthorizationError();
       },
@@ -414,6 +419,36 @@ describe("DATA-004 aplicação de importação", () => {
     expect(commands.applied).toHaveLength(2);
   });
 
+  it("propaga o lease de execução para cada lote e renova antes da leitura", async () => {
+    const store = new MemoryStore();
+    const commands = new MemoryCommands();
+    let renewals = 0;
+    const execution: JobExecutionContext = {
+      runBatch: async (callback) =>
+        callback({
+          client: {} as never,
+          beforeTransition: async () => undefined,
+          renewLease: async () => true,
+        }),
+      renewLease: async () => {
+        renewals += 1;
+        return true;
+      },
+    };
+    const app = new ImportApplication(store, source(rows()), commands, { batchSize: 3 });
+    const job = await app.create({
+      workspaceId,
+      actorId,
+      correlationId: "corr-lease",
+      request: baseRequest,
+    });
+
+    await app.run(job.id, workspaceId, execution);
+
+    expect(store.lastExecution).toBe(execution);
+    expect(renewals).toBeGreaterThan(0);
+  });
+
   it("cancela antes do lote seguinte quando membership/capacidade é revogada", async () => {
     const store = new MemoryStore();
     const commands = new MemoryCommands();
@@ -445,6 +480,7 @@ describe("DATA-004 aplicação de importação", () => {
     const reversed = await app.reverse(job.id, workspaceId, {
       actorId: "requester-2",
       correlationId: "corr-reverse-request",
+      origin: "api",
     });
 
     expect(reversed.state).toBe("reversed");
