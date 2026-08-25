@@ -29,6 +29,10 @@ compatível com o tipo da transação.
   razão; alteração de metadados continua versionada e auditada.
 - Cartão/fatura e recorrência são recusados com orientação explícita, sem
   alterar o registro.
+- Parcelas são recusadas para preservar a soma do plano; sua edição terá
+  comando próprio.
+- Editar metadados de um lançamento histórico não exige reativar a categoria
+  arquivada que já está vinculada a ele.
 - Auditoria registra `transaction.updated` com snapshots redigidos e escopo
   do workspace.
 

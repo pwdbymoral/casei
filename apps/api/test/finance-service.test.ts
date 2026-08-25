@@ -189,10 +189,11 @@ describe("finance command guards", () => {
       due_on: "2028-02-05",
       posted_on: null,
       description: "Mercado",
-      category_id: null,
+      category_id: "0190f3c8-2a10-7abc-8def-1234567890b2",
       card_id: null,
       statement_id: null,
       recurrence_id: null,
+      installment_plan_id: null,
       version: 0,
     };
     const updated = {
@@ -282,6 +283,7 @@ describe("finance command guards", () => {
                 card_id: null,
                 statement_id: null,
                 recurrence_id: null,
+                installment_plan_id: null,
                 version: 2,
               },
             ],
@@ -305,6 +307,58 @@ describe("finance command guards", () => {
         2,
       ),
     ).rejects.toThrow("só podem");
+  });
+
+  it("rejects direct edits to installment occurrences", async () => {
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM finance_transaction") && sql.includes("FOR UPDATE"))
+          return {
+            rows: [
+              {
+                id: "0190f3c8-2a10-7abc-8def-1234567890ac",
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                kind: "expense",
+                state: "planned",
+                amount_minor: "1000",
+                settled_minor: "0",
+                currency_code: "BRL",
+                occurred_on: "2028-02-01",
+                due_on: null,
+                posted_on: null,
+                description: "Parcela",
+                category_id: null,
+                card_id: null,
+                statement_id: null,
+                recurrence_id: null,
+                installment_plan_id: "0190f3c8-2a10-7abc-8def-1234567890b1",
+                version: 0,
+              },
+            ],
+          };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    await expect(
+      service.updateTransaction(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "member",
+        },
+        "0190f3c8-2a10-7abc-8def-1234567890ac",
+        { amount: { currency: "BRL", minor: "1100" } },
+        "transaction-edit-installment-001",
+        0,
+      ),
+    ).rejects.toThrow("parcelamento");
   });
 
   it("only reopens a closed statement that has no payments", () => {

@@ -310,6 +310,7 @@ interface TransactionRow {
   card_id: string | null;
   statement_id: string | null;
   recurrence_id: string | null;
+  installment_plan_id?: string | null;
   created_at?: Date | string;
   version: number;
 }
@@ -644,7 +645,7 @@ export class FinanceService {
           const currentResult = await client.query<TransactionRow>(
             `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
                     occurred_on, due_on, posted_on, description, category_id, card_id, statement_id,
-                    recurrence_id, version
+                    recurrence_id, installment_plan_id, version
                FROM finance_transaction
               WHERE workspace_id = $1 AND id = $2
               FOR UPDATE`,
@@ -656,6 +657,11 @@ export class FinanceService {
           if (current.recurrence_id) {
             throw new FinanceConflictError(
               "Edite a série de recorrência pelo comando de série, não pela ocorrência.",
+            );
+          }
+          if (current.installment_plan_id) {
+            throw new FinanceConflictError(
+              "Edite o parcelamento pelo comando do plano, não pela parcela individual.",
             );
           }
           if (current.card_id || current.statement_id) {
@@ -686,7 +692,7 @@ export class FinanceService {
           const nextDescription = parsed.description ?? current.description;
           const nextCategoryId =
             parsed.categoryId === undefined ? current.category_id : parsed.categoryId;
-          if (nextCategoryId) {
+          if (parsed.categoryId !== undefined && nextCategoryId) {
             const category = await client.query<{
               kind: "income" | "expense" | "both";
               archived: boolean;
