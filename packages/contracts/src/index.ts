@@ -542,8 +542,16 @@ export const loanPaymentSchema = z.object({
   occurredOn: civilDateSchema.optional(),
 });
 
+export const loanPaymentViewSchema = z.object({
+  id: domainIdSchema,
+  loanId: domainIdSchema,
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema,
+});
+
 export type CreateLoanInput = z.infer<typeof createLoanSchema>;
 export type LoanPaymentInput = z.infer<typeof loanPaymentSchema>;
+export type LoanPaymentView = z.infer<typeof loanPaymentViewSchema>;
 
 export const transactionListQuerySchema = paginationQuerySchema
   .extend({
