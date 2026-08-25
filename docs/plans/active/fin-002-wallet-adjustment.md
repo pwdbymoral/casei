@@ -26,6 +26,10 @@ saldo observado sem fabricar renda ou despesa.
 4. Adapter e fluxo acessível/responsivo na tela de Finanças.
 5. Testes de contrato, domínio, serviço, rota, adapter e schema; validações canônicas do repositório.
 
+Hardening posterior: a migração `0018_wallet_publish_version` também versiona a carteira quando
+um evento com lançamentos já existentes transita de `draft` para `published`; eventos inseridos já
+publicados continuam usando o gatilho por lançamento da 0017, sem contar lançamentos `draft`.
+
 ## Evidência esperada
 
 - Testes demonstram delta positivo e negativo, diferença zero, moeda incompatível, replay,

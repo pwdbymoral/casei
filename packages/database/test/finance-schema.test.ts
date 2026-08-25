@@ -70,6 +70,18 @@ if (!adminUrl) {
           [workspaceId],
         );
         assert.equal(afterDraft.rows[0]?.version, 0);
+        await client.query(
+          `UPDATE ledger_event
+              SET status = 'published', published_at = now()
+            WHERE workspace_id = $1 AND id = $2`,
+          [workspaceId, draftEvent.rows[0]?.id],
+        );
+        const afterDraftPublication = await client.query<{ version: number }>(
+          `SELECT version FROM financial_account WHERE workspace_id = $1 AND kind = 'wallet'`,
+          [workspaceId],
+        );
+        assert.equal(afterDraftPublication.rows[0]?.version, 1);
+
         const event = await client.query<{ id: string }>(
           `INSERT INTO ledger_event (workspace_id, event_type, currency_code, status, occurred_on, published_at)
            VALUES ($1, 'test.published.v1', 'BRL', 'published', '2026-08-23', now()) RETURNING id`,
@@ -85,7 +97,10 @@ if (!adminUrl) {
           `SELECT version FROM financial_account WHERE workspace_id = $1 AND kind = 'wallet'`,
           [workspaceId],
         );
-        assert.equal(afterPublished.rows[0]?.version, 1);
+        // The direct-published path advances once even though the event's
+        // entries are inserted by separate statements. The second entry of
+        // the same event must not advance the version again.
+        assert.equal(afterPublished.rows[0]?.version, 2);
         await client.query("COMMIT");
         // The first context was transaction-local. Re-establish the scope for
         // the post-commit negative checks so RLS does not turn the UPDATE into
