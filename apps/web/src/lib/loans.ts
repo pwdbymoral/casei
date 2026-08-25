@@ -213,6 +213,7 @@ function createLoanFingerprint(input: CreateLoanInput): string {
 function paymentFingerprint(loan: Loan, input: LoanPaymentInput): string {
   return JSON.stringify({
     loanId: loan.id,
+    expectedVersion: loan.version,
     amount: {
       currency: input.amount.currency,
       minor: input.amount.minor,
@@ -402,7 +403,7 @@ export function createFixtureLoansAdapter(): FixtureLoansAdapter {
       return copyLoan(created);
     },
     async payLoan(workspaceId, loan, input, commandKey) {
-      const commandId = commandKey ? `payment:${workspaceId}:${commandKey}` : null;
+      const commandId = commandKey ? `payment:${workspaceId}:${loan.id}:${commandKey}` : null;
       if (commandId) {
         const replay = commands.get(commandId);
         if (replay) {

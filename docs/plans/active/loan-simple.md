@@ -54,8 +54,8 @@ RLS e ausência de contas income/expense nos eventos.
 - PostgreSQL cobre migration `0013_loans`, FKs compostas, RLS, ledger,
   auditoria, retry, excedente e concorrência.
 - A jornada visual foi adicionada em LOAN-003 depois da estabilização do
-  contrato; a limitação de leitura detalhada do histórico está registrada
-  abaixo.
+  contrato; o histórico detalhado é carregado pela leitura persistente
+  paginada do contrato.
 
 ## LOAN-003 — incremento web
 

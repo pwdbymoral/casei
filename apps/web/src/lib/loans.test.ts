@@ -248,7 +248,7 @@ describe("loans adapter", () => {
     await expect(
       adapter.payLoan(
         workspaceId,
-        partial.loan,
+        created,
         { amount: { currency: "BRL", minor: "4000" }, occurredOn: "2026-08-21" },
         "fixture-payment-1",
       ),
@@ -282,6 +282,43 @@ describe("loans adapter", () => {
         { amount: { currency: "BRL", minor: "3000" }, occurredOn: "2026-08-21" },
         "same-payment-key",
       ),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("scopes payment idempotency by loan and expected version", async () => {
+    const adapter = createFixtureLoansAdapter();
+    const workspaceId = "loan-payment-command-scope-workspace";
+    const input = {
+      direction: "lent" as const,
+      counterparty: "Rafa",
+      principal: { currency: "BRL", minor: "10000" },
+      occurredOn: "2026-08-20",
+    };
+    const firstLoan = await adapter.createLoan(workspaceId, input, "loan-a-create");
+    const secondLoan = await adapter.createLoan(
+      workspaceId,
+      { ...input, counterparty: "Ana" },
+      "loan-b-create",
+    );
+    const paymentInput = {
+      amount: { currency: "BRL", minor: "1000" },
+      occurredOn: "2026-08-21",
+    };
+    const firstPayment = await adapter.payLoan(
+      workspaceId,
+      firstLoan,
+      paymentInput,
+      "shared-payment-key",
+    );
+
+    await expect(
+      adapter.payLoan(workspaceId, secondLoan, paymentInput, "shared-payment-key"),
+    ).resolves.toMatchObject({
+      loan: { id: secondLoan.id, version: 1 },
+      payment: { loanId: secondLoan.id },
+    });
+    await expect(
+      adapter.payLoan(workspaceId, firstPayment.loan, paymentInput, "shared-payment-key"),
     ).rejects.toMatchObject({ status: 409 });
   });
 });
