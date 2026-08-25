@@ -866,7 +866,19 @@ export const updateRecurrenceSchema = z
       value.endOn !== undefined ||
       value.estimatedAmount !== undefined,
     "Informe ao menos um campo para editar.",
-  );
+  )
+  .superRefine((value, context) => {
+    if (
+      value.scope === "this" &&
+      (value.endOn !== undefined || value.estimatedAmount !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["scope"],
+        message: "Uma exceção pode alterar somente valor e descrição da ocorrência.",
+      });
+    }
+  });
 export type UpdateRecurrenceInput = z.infer<typeof updateRecurrenceSchema>;
 
 export const createInstallmentPlanSchema = z.object({

@@ -140,6 +140,13 @@ describe("finance contracts", () => {
         amount: { currency: "BRL", minor: "100" },
       }),
     ).toMatchObject({ scope: "this_and_future" });
+    expect(() =>
+      updateRecurrenceSchema.parse({
+        scope: "this",
+        effectiveOn: "2028-02-29",
+        endOn: "2028-12-31",
+      }),
+    ).toThrow("somente valor e descrição");
   });
 
   it("validates installment preview and future edit commands", () => {
