@@ -29,7 +29,12 @@ bytes NUL e tamanho; `FileScanPort` é uma injeção explícita para scanner de
 malware do deploy e o scanner de formato nunca declara um antivírus limpo.
 O pacote aceita `CASEI_OBJECT_STORAGE_*` por ambiente, credenciais são
 opcionais para permitir a cadeia padrão do SDK/IAM e um par parcial de chaves é
-rejeitado.
+rejeitado. A chave é gerada por `createOpaqueStorageKey` no formato
+`ambiente/workspace-uuid/job-uuid/random-uuid.ext`; o adapter rejeita qualquer
+outra gramática, portanto nome original, e-mail ou outro texto livre nunca vira
+`storageKey`. Se a remoção de um upload parcial falhar, o adapter expõe erro
+`cleanup_failed` marcado para retry/reaper em vez de esconder a falha. Em
+produção, bucket e região precisam ser declarados explicitamente.
 
 ## Consequências
 

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import {
   DeleteObjectCommand,
@@ -12,6 +12,7 @@ export const DEFAULT_OBJECT_STORAGE_MAX_BYTES = 10_000_000;
 export const DEFAULT_OBJECT_STORAGE_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type StoredFileFormat = "csv" | "xlsx";
+export type StorageEnvironment = "dev" | "test" | "staging" | "prod";
 export type ObjectBody =
   | AsyncIterable<Uint8Array>
   | Iterable<Uint8Array>
@@ -67,7 +68,8 @@ export type ObjectStorageErrorCode =
   | "object_not_found"
   | "storage_unavailable"
   | "scan_rejected"
-  | "invalid_format";
+  | "invalid_format"
+  | "cleanup_failed";
 
 export class ObjectStorageError extends Error {
   constructor(
@@ -114,6 +116,46 @@ export class InvalidFormatError extends ObjectStorageError {
   }
 }
 
+export class ObjectStorageCleanupError extends ObjectStorageError {
+  readonly retryable = true;
+  readonly requiresReaper = true;
+
+  constructor(
+    readonly operationError: ObjectStorageError,
+    readonly cleanupError: ObjectStorageError,
+  ) {
+    super(
+      "cleanup_failed",
+      "O upload falhou e a limpeza do objeto temporário também falhou; tente novamente ou execute o reaper.",
+    );
+    this.name = "ObjectStorageCleanupError";
+  }
+}
+
+const uuidSource = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const uuidPattern = new RegExp(`^${uuidSource}$`, "u");
+const storageKeyPattern = new RegExp(
+  `^(dev|test|staging|prod)\\/${uuidSource}\\/${uuidSource}\\/${uuidSource}\\.(csv|xlsx)$`,
+  "u",
+);
+
+export interface OpaqueStorageKeyInput {
+  readonly environment: StorageEnvironment;
+  readonly workspaceId: string;
+  readonly jobId: string;
+  readonly format: StoredFileFormat;
+}
+
+/** Generates the only key shape accepted by the adapter: namespace + UUIDs + format. */
+export function createOpaqueStorageKey(input: OpaqueStorageKeyInput): string {
+  if (!uuidPattern.test(input.workspaceId) || !uuidPattern.test(input.jobId)) {
+    throw new InvalidObjectInputError("Workspace e job devem usar UUIDs opacos.");
+  }
+  const key = `${input.environment}/${input.workspaceId}/${input.jobId}/${randomUUID()}.${input.format}`;
+  validateKey(key);
+  return key;
+}
+
 export interface FileScanStartInput {
   readonly format: StoredFileFormat;
   readonly contentType: string;
@@ -153,6 +195,7 @@ export class FormatFileScanPort implements FileScanPort {
   start(input: FileScanStartInput): FileScanSession {
     let byteLength = 0;
     let prefix = new Uint8Array(0);
+    let containsNul = false;
     let complete = false;
 
     return {
@@ -167,9 +210,7 @@ export class FormatFileScanPort implements FileScanPort {
           next.set(chunk.slice(0, remaining), prefix.byteLength);
           prefix = next;
         }
-        if (chunk.includes(0)) {
-          throw new ScanRejectedError("O arquivo contém bytes NUL incompatíveis com o formato.");
-        }
+        containsNul ||= chunk.includes(0);
       },
       complete: async () => {
         if (complete) throw new InvalidObjectInputError("O scanner foi finalizado duas vezes.");
@@ -182,6 +223,8 @@ export class FormatFileScanPort implements FileScanPort {
           }
         } else if (!csvContentTypes.has(contentType ?? "") || isZipPrefix(prefix)) {
           throw new InvalidFormatError("O arquivo CSV não corresponde ao formato declarado.");
+        } else if (containsNul) {
+          throw new ScanRejectedError("O arquivo contém bytes NUL incompatíveis com o formato.");
         }
         if (byteLength !== input.contentLength) {
           throw new InvalidObjectInputError("O tamanho informado não corresponde ao stream.");
@@ -274,9 +317,19 @@ export class S3ObjectStorage implements ObjectStoragePort {
         expiresAt: expiresAt.toISOString(),
       };
     } catch (error) {
-      if (putStarted || uploaded) await this.delete({ key: input.key }).catch(() => undefined);
-      if (error instanceof ObjectStorageError) throw error;
-      throw mapProviderError(error);
+      const operationError = error instanceof ObjectStorageError ? error : mapProviderError(error);
+      if (putStarted || uploaded) {
+        try {
+          await this.delete({ key: input.key });
+        } catch (cleanupError) {
+          const mappedCleanupError =
+            cleanupError instanceof ObjectStorageError
+              ? cleanupError
+              : mapProviderError(cleanupError);
+          throw new ObjectStorageCleanupError(operationError, mappedCleanupError);
+        }
+      }
+      throw operationError;
     }
   }
 
@@ -449,7 +502,11 @@ export function objectStorageConfigFromEnvironment(
 ): ObjectStorageConfig {
   const bucket = env.CASEI_OBJECT_STORAGE_BUCKET?.trim();
   if (!bucket) throw new Error("CASEI_OBJECT_STORAGE_BUCKET is required");
-  const region = env.CASEI_OBJECT_STORAGE_REGION ?? "us-east-1";
+  const configuredRegion = env.CASEI_OBJECT_STORAGE_REGION?.trim();
+  if (env.NODE_ENV === "production" && !configuredRegion) {
+    throw new Error("CASEI_OBJECT_STORAGE_REGION is required in production");
+  }
+  const region = configuredRegion || "us-east-1";
   const endpoint = env.CASEI_OBJECT_STORAGE_ENDPOINT?.trim();
   if (endpoint) {
     let parsedEndpoint: URL;
@@ -546,15 +603,10 @@ function validateConfig(config: ObjectStorageConfig): void {
 }
 
 function validateKey(key: string): void {
-  if (
-    !key ||
-    key.length > 512 ||
-    key.startsWith("/") ||
-    key.endsWith("/") ||
-    key.split("/").some((part) => part === ".." || part === ".") ||
-    hasControlCharacter(key)
-  ) {
-    throw new InvalidObjectInputError("A chave do objeto deve ser opaca e segura.");
+  if (!storageKeyPattern.test(key) || hasControlCharacter(key)) {
+    throw new InvalidObjectInputError(
+      "A chave do objeto deve seguir o namespace opaco e não pode conter dados pessoais.",
+    );
   }
 }
 

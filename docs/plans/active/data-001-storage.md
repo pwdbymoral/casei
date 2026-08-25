@@ -21,6 +21,8 @@ assinatura e bytes incompatíveis antes da confirmação do upload.
   ambiente, sem provider ou segredo inventado no código.
 - A chave de objeto é opaca e validada, sem nome original, e o adapter grava
   apenas metadados operacionais mínimos (`sha256`, tamanho, formato e expiração).
+  `createOpaqueStorageKey` gera `ambiente/workspace-uuid/job-uuid/random-uuid.ext`
+  e chaves fora dessa gramática são rejeitadas, impedindo PII na chave.
 - O TTL máximo é 24 horas, com expiração lógica revalidada em `head`/`get` e
   lifecycle de bucket permanecendo responsabilidade do deploy.
 - O adapter aplica SSE-S3 (`AES256`) no upload e `Cache-Control: no-store`; o
@@ -28,7 +30,11 @@ assinatura e bytes incompatíveis antes da confirmação do upload.
   boundary DATA-004/DATA-006.
 - Não há implementação de antivírus externo neste slice. `FileScanPort` é uma
   dependência explícita; o `FormatFileScanPort` apenas valida o formato seguro
-  conhecido e não declara um arquivo limpo contra malware.
+  conhecido e não declara um arquivo limpo contra malware. A validação de XLSX
+  reconhece a assinatura ZIP antes de considerar bytes NUL, que são normais em
+  conteúdo binário.
+- Falha ao remover um upload parcial não é absorvida: `cleanup_failed` sinaliza
+  uma operação retryable e requer reaper/limpeza posterior.
 
 ## Etapas e rastreabilidade
 
@@ -50,8 +56,8 @@ assinatura e bytes incompatíveis antes da confirmação do upload.
   rejeitar o objeto e o conteúdo não é confirmado.
 - `head`, `get` e `delete` usam a mesma chave opaca e não retornam URL assinada.
 - Configuração de produção exige bucket/região e credencial parcialmente
-  preenchida é rejeitada; desenvolvimento pode usar endpoint S3-compatible e
-  `forcePathStyle` explicitamente.
+  preenchida é rejeitada; desenvolvimento pode usar região padrão, endpoint
+  S3-compatible e `forcePathStyle` explicitamente.
 
 ## Validação
 

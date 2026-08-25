@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createOpaqueStorageKey,
   ExpiredObjectError,
   FormatFileScanPort,
   InvalidFormatError,
   InvalidObjectInputError,
+  ObjectStorageCleanupError,
   type ObjectStorageClient,
   ObjectStorageError,
   objectStorageConfigFromEnvironment,
@@ -18,6 +20,13 @@ const config = {
   maxBytes: 10,
   maxTtlMs: 24 * 60 * 60 * 1000,
 };
+
+const storageKey = createOpaqueStorageKey({
+  environment: "test",
+  workspaceId: "0190f3c8-7b2d-4f63-8f4a-0b9a8d1c2e3f",
+  jobId: "0190f3c8-7b2d-4f64-8f4a-0b9a8d1c2e3f",
+  format: "csv",
+});
 
 function fakeClient(handler: (command: { input: Record<string, unknown> }) => Promise<unknown>) {
   return { send: handler } as unknown as ObjectStorageClient;
@@ -37,7 +46,7 @@ describe("ObjectStoragePort S3-compatible", () => {
     const expiresAt = new Date(Date.now() + 60_000);
 
     const result = await storage.put({
-      key: "prod/0190f3c8/job-1/input.csv",
+      key: storageKey,
       body: [new TextEncoder().encode("a,b\n1,2")],
       contentLength: 7,
       contentType: "text/csv",
@@ -47,10 +56,10 @@ describe("ObjectStoragePort S3-compatible", () => {
     });
 
     expect(received).toBe("a,b\n1,2");
-    expect(result.key).toBe("prod/0190f3c8/job-1/input.csv");
+    expect(result.key).toBe(storageKey);
     expect(putInput).toMatchObject({
       Bucket: "casei-test",
-      Key: "prod/0190f3c8/job-1/input.csv",
+      Key: storageKey,
       ContentLength: 7,
       ContentType: "text/csv",
       CacheControl: "no-store",
@@ -80,7 +89,7 @@ describe("ObjectStoragePort S3-compatible", () => {
 
     await expect(
       storage.put({
-        key: "prod/workspace/job/input.csv",
+        key: storageKey,
         body: [new TextEncoder().encode("too-long")],
         contentLength: 2,
         contentType: "text/csv",
@@ -92,7 +101,7 @@ describe("ObjectStoragePort S3-compatible", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1]?.input).toMatchObject({
       Bucket: "casei-test",
-      Key: "prod/workspace/job/input.csv",
+      Key: storageKey,
     });
     expect(calls[1]?.input).not.toHaveProperty("Body");
   });
@@ -108,9 +117,7 @@ describe("ObjectStoragePort S3-compatible", () => {
       config,
     );
 
-    await expect(storage.get({ key: "prod/workspace/job/input.csv" })).rejects.toBeInstanceOf(
-      ExpiredObjectError,
-    );
+    await expect(storage.get({ key: storageKey })).rejects.toBeInstanceOf(ExpiredObjectError);
   });
 
   it("returns a lazy ReadableStream and verifies length/hash at EOF", async () => {
@@ -134,7 +141,7 @@ describe("ObjectStoragePort S3-compatible", () => {
       config,
     );
 
-    const result = await storage.get({ key: "prod/workspace/job/input.csv" });
+    const result = await storage.get({ key: storageKey });
     await expect(new Response(result.stream).text()).resolves.toBe("a,b\n1,2");
     expect(consumed).toBe(true);
   });
@@ -165,7 +172,7 @@ describe("ObjectStoragePort S3-compatible", () => {
       () => now,
     );
 
-    const result = await storage.get({ key: "prod/workspace/job/input.csv", now });
+    const result = await storage.get({ key: storageKey, now });
     const reader = result.stream.getReader();
     const firstRead = await reader.read();
     expect(firstRead).toMatchObject({ done: false });
@@ -184,6 +191,27 @@ describe("ObjectStoragePort S3-compatible", () => {
     const session = scanner.start({ format: "xlsx", contentType: "text/csv", contentLength: 3 });
     await session.accept(new TextEncoder().encode("a,b"));
     await expect(session.complete()).rejects.toBeInstanceOf(InvalidFormatError);
+  });
+
+  it("accepts the ZIP signature and binary bytes of a minimal XLSX stream", async () => {
+    const scanner = new FormatFileScanPort();
+    const session = scanner.start({
+      format: "xlsx",
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      contentLength: 5,
+    });
+    await session.accept(Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x00]));
+    await expect(session.complete()).resolves.toMatchObject({
+      status: "format_valid",
+      format: "xlsx",
+    });
+  });
+
+  it("still rejects NUL bytes in CSV after format detection", async () => {
+    const scanner = new FormatFileScanPort();
+    const session = scanner.start({ format: "csv", contentType: "text/csv", contentLength: 3 });
+    await session.accept(Uint8Array.from([0x61, 0x00, 0x62]));
+    await expect(session.complete()).rejects.toBeInstanceOf(ScanRejectedError);
   });
 
   it("lets the deployment inject a malware scanner without making the adapter claim a clean verdict", async () => {
@@ -212,7 +240,7 @@ describe("ObjectStoragePort S3-compatible", () => {
 
     await expect(
       storage.put({
-        key: "prod/workspace/job/input.csv",
+        key: storageKey,
         body: [new TextEncoder().encode("a,b")],
         contentLength: 3,
         contentType: "text/csv",
@@ -224,8 +252,45 @@ describe("ObjectStoragePort S3-compatible", () => {
     expect(deleted).toBe(true);
   });
 
+  it("signals a retryable cleanup failure instead of swallowing DeleteObject errors", async () => {
+    const storage = new S3ObjectStorage(
+      fakeClient(async (command) => {
+        if (command.input.Body) {
+          for await (const _chunk of command.input.Body as AsyncIterable<Uint8Array>) {
+            // Consume the stream as S3 would, then simulate the failed upload response.
+          }
+          throw new Error("upload unavailable");
+        }
+        throw Object.assign(new Error("delete denied"), { name: "AccessDenied" });
+      }),
+      config,
+    );
+
+    const upload = storage.put({
+      key: storageKey,
+      body: [new TextEncoder().encode("a,b")],
+      contentLength: 3,
+      contentType: "text/csv",
+      format: "csv",
+      expiresAt: new Date(Date.now() + 60_000),
+      sha256: "1eb7c54d52831bbfe8942af0b1c56b7409523a59ed6ca99c1174fef7eb32c1b5",
+    });
+    await expect(upload).rejects.toBeInstanceOf(ObjectStorageCleanupError);
+    await expect(upload).rejects.toMatchObject({
+      code: "cleanup_failed",
+      retryable: true,
+      requiresReaper: true,
+    });
+  });
+
   it("requires explicit production storage configuration and rejects partial credentials", () => {
     expect(() => objectStorageConfigFromEnvironment({})).toThrow(/BUCKET/);
+    expect(() =>
+      objectStorageConfigFromEnvironment({
+        NODE_ENV: "production",
+        CASEI_OBJECT_STORAGE_BUCKET: "casei",
+      }),
+    ).toThrow(/REGION/);
     expect(() =>
       objectStorageConfigFromEnvironment({
         CASEI_OBJECT_STORAGE_BUCKET: "casei",
@@ -238,6 +303,27 @@ describe("ObjectStoragePort S3-compatible", () => {
         CASEI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
       }),
     ).toMatchObject({ bucket: "casei", region: "us-east-1", forcePathStyle: true });
+  });
+
+  it("generates and enforces an opaque namespace key", async () => {
+    expect(storageKey).toMatch(/^test\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.csv$/u);
+    expect(storageKey).not.toContain("@");
+    expect(() =>
+      createOpaqueStorageKey({
+        environment: "prod",
+        workspaceId: "household@example.com",
+        jobId: "0190f3c8-7b2d-4f64-8f4a-0b9a8d1c2e3f",
+        format: "csv",
+      }),
+    ).toThrow(InvalidObjectInputError);
+
+    const storage = new S3ObjectStorage(
+      fakeClient(async () => ({})),
+      config,
+    );
+    await expect(storage.get({ key: "prod/workspace/job/input.csv" })).rejects.toBeInstanceOf(
+      InvalidObjectInputError,
+    );
   });
 
   it("exposes storage failures without leaking provider response details", () => {
