@@ -174,6 +174,10 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 - [ ] **INSIGHT-002 Projeção 12 meses:** timeline de caixa com decomposição por eventos e desconhecidos explícitos.
 - [ ] **INSIGHT-003 Valor seguro:** fórmula de 30 dias, margem, déficit, cobertura de reservas e níveis de confiança.
 - [ ] **INSIGHT-004 Painel Hoje:** prioridade acionável, personalização, ocultar valores e deep links para origem.
+  O incremento web atual já consome os read models de finanças/valor seguro, compromissos e fatura
+  da janela de sete dias, metas e lista de compras; possui estados loading/error/offline/permission,
+  ocultação visual de valores por sessão e links para a origem. Permanecem a persistência da
+  personalização de cards e a composição de projeção/relatórios, que não fazem parte desta fatia.
 - [ ] **INSIGHT-005 Relatórios:** mensal/categorias com tabela equivalente, filtros compartilhados e reconciliação com export.
 - [ ] **INSIGHT-006 Simulações:** mudanças temporárias isoladas e aplicação explícita como planejamento.
 
