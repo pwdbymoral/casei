@@ -107,18 +107,20 @@ auditoria detalhada e concorrência de produção continuam pendentes para o Gat
 
 - [ ] **CARD-001 Cartão e ciclos:** cadastro, arquivamento, cálculo persistido de ciclos e limites de mês.
 - [ ] **CARD-002 Compra/cartão:** compra à vista/parcelada gera despesa/passivo e associação idempotente à fatura sugerida.
-- [ ] **CARD-003 Fatura:** abrir, fechar, reabrir com confirmação, ajuste pós-fechamento, total e estados.
+- [x] **CARD-003 Fatura:** abrir, fechar, reabrir com confirmação, ajuste pós-fechamento, total e estados.
 - [ ] **CARD-004 Pagamento:** total, parcial, excedente/crédito e cancelamento como transferência ledger.
-- [ ] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
+- [x] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
 - [ ] **CARD-006 UI cartões/fatura:** visão por ciclo, composição explicável, ações frequentes e correção de fatura.
 
 O mesmo PR entrega cadastro de cartão, compra, associação à fatura aberta, pagamento total/parcial,
 parcelamento exato e recorrência com bloqueio explícito de ocorrência variável não confirmada. Fechamento,
 reabertura, estorno em fatura fechada e as telas de cartão permanecem nas tarefas seguintes.
 
-Uma fatia posterior acrescenta a composição explicável por compras/pagamentos e a reabertura explícita,
-versionada e restrita a faturas fechadas sem pagamentos. `CARD-003` e `CARD-006` permanecem abertos até
-existirem ajuste pós-fechamento, correção de ciclo, estorno/tarifas e visão completa por ciclo.
+Uma fatia posterior acrescentou a composição explicável por compras/pagamentos e a reabertura explícita,
+versionada e restrita a faturas fechadas sem pagamentos. A fatia CARD-003/005 agora também registra
+ajustes pós-fechamento, tarifas/juros e estornos parciais ou totais vinculados à compra original,
+preservando o lançamento original e emitindo reversão assinada no ledger. `CARD-006` permanece aberto
+somente para a validação final de browser da visão completa por ciclo.
 
 **Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
 
@@ -131,7 +133,7 @@ Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam ser
 - [ ] **LOAN-003 UI empréstimos:** resumo de saldo, cronograma, registrar pagamento, histórico e previsão de quitação.
 - [x] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura (backend/API).
 - [x] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total (backend/API).
-- [ ] **GOAL-003 UI metas:** captura simples, progresso, ritmo, reserva descoberta e simulação de contribuição.
+- [x] **GOAL-003 UI metas:** captura simples, progresso, ritmo, reserva descoberta e simulação de contribuição.
 
 **Gate 5:** empréstimo nunca vira renda/despesa de principal; meta nunca altera saldo por reservar; gastos vinculados reconciliam atomicamente.
 
@@ -146,9 +148,9 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
   eventos append-only na migration `0007_stock_shopping`. A API exige idempotência + `If-Match` para
   concluir item e só cria entrada no estoque quando `addToStock: true` é confirmado por item. A PWA
   oferece chips Lista/Faltando/Todos, itens livres e revisão de quantidade antes da confirmação.
-  Follow-up separado **STOCK-003a** permanece para substituir os cursores atualmente aceitos pelos
-  endpoints de produtos/movimentações por cursor opaco assinado, com teste de continuidade, limite e
-  rejeição de cursor adulterado; esta fatia não altera a ordenação/contrato já publicado do STOCK-002.
+  A fatia **STOCK-003a** substitui a paginação efetivamente limitada dos endpoints de
+  produtos/movimentações por cursor opaco assinado, com teste de continuidade, limite e rejeição de
+  cursor adulterado; a ordenação e o envelope publicados permanecem compatíveis.
 - [x] **STOCK-004 Cadastro em lote:** parser de linhas/colagem, preview, modo válidas/tudo ou nada.
 - [x] **STOCK-005 UI estoque:** busca, filtro de arquivados, lista touch, quick actions, histórico e estados loading/error/permission responsivos; modo avançado em tabela permanece para STOCK-004.
 - [x] **STOCK-006 Concluir compra:** atualização explícita do estoque e vínculo opcional com despesa, sem automação oculta.

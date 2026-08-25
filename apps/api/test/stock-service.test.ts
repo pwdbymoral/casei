@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { decodeCursor } from "../src/http/cursor.js";
 import { StockConflictError, StockPermissionError, StockService } from "../src/stock-service.js";
 
 function poolFor(options: {
@@ -552,7 +553,11 @@ describe("StockService membership revalidation", () => {
     const harness = poolFor({ role: "viewer" });
     const service = new StockService(harness.pool as never);
 
-    await expect(service.listProducts(scope)).resolves.toEqual([]);
+    await expect(service.listProducts(scope)).resolves.toMatchObject({
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+    });
     const lockQueries = harness.statements.filter((sql) => sql.includes("FOR UPDATE"));
     expect(lockQueries[0]).toMatch(/FROM membership/);
     expect(lockQueries[1]).toMatch(/FROM workspace/);
@@ -911,5 +916,162 @@ describe("StockService membership revalidation", () => {
     expect(productLock).toBeGreaterThanOrEqual(0);
     expect(itemLock).toBeGreaterThanOrEqual(0);
     expect(productLock).toBeLessThan(itemLock);
+  });
+});
+
+describe("StockService signed cursors", () => {
+  const cursorSecret = "stock-cursor-secret-long-enough";
+  const firstProduct = {
+    id: "0190f3c8-2a10-7abc-8def-1234567890ac",
+    workspace_id: scope.workspaceId,
+    name: "Arroz",
+    unit: "unit",
+    unit_label: null,
+    quantity_milli: "0",
+    minimum_milli: "1",
+    marked_missing: true,
+    shopping_auto: true,
+    category: null,
+    location: null,
+    note: null,
+    archived: false,
+    version: 0,
+  };
+  const secondProduct = {
+    ...firstProduct,
+    id: "0190f3c8-2a10-7abc-8def-1234567890ad",
+    name: "Feijão",
+    marked_missing: false,
+    quantity_milli: "2",
+    minimum_milli: "1",
+  };
+
+  it("continues products after the complete ordering position and honors the limit", async () => {
+    let rows = [firstProduct, secondProduct];
+    const statements: string[] = [];
+    const client = {
+      async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+        statements.push(sql);
+        if (sql.includes("FROM membership"))
+          return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+        if (sql.includes("FROM workspace"))
+          return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+        if (sql.includes("FROM stock_product") && sql.includes("ORDER BY archived ASC"))
+          return { rows: rows as T[], rowCount: rows.length };
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const service = new StockService({ connect: async () => client } as never, {
+      cursorSecret,
+    });
+
+    const first = await service.listProducts(scope, { limit: 1 });
+
+    expect(first.items).toHaveLength(1);
+    expect(first.items[0]?.id).toBe(firstProduct.id);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeTruthy();
+    expect(decodeCursor(first.nextCursor as string, cursorSecret)).toEqual({
+      ordering: "archived,state_rank,lower_name,id",
+      position: [false, 0, "arroz", firstProduct.id],
+    });
+
+    rows = [secondProduct];
+    const second = await service.listProducts(scope, {
+      limit: 1,
+      cursor: first.nextCursor as string,
+    });
+
+    expect(second.items[0]?.id).toBe(secondProduct.id);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeNull();
+    const resumedQuery = statements.filter((sql) => sql.includes("FROM stock_product")).at(-1);
+    expect(resumedQuery).toContain("state_rank");
+    expect(resumedQuery).toContain("lower(name) >");
+    expect(resumedQuery).toContain("id >");
+  });
+
+  it("rejects an adulterated product cursor", async () => {
+    const client = {
+      async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+        if (sql.includes("FROM membership"))
+          return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+        if (sql.includes("FROM workspace"))
+          return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+        if (sql.includes("FROM stock_product") && sql.includes("ORDER BY archived ASC"))
+          return { rows: [firstProduct] as T[], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const service = new StockService({ connect: async () => client } as never, {
+      cursorSecret,
+    });
+    const first = await service.listProducts(scope, { limit: 1 });
+    const cursor = `${first.nextCursor?.slice(0, -1)}${first.nextCursor?.endsWith("a") ? "b" : "a"}`;
+
+    await expect(service.listProducts(scope, { cursor })).rejects.toMatchObject({
+      name: "InvalidCursorError",
+    });
+  });
+
+  it("continues movements using occurred timestamp and id as the descending position", async () => {
+    const firstMovement = {
+      id: "0190f3c8-2a10-7abc-8def-1234567890af",
+      workspace_id: scope.workspaceId,
+      product_id: firstProduct.id,
+      kind: "entry" as const,
+      quantity_milli: "1",
+      before_milli: "0",
+      after_milli: "1",
+      reason: null,
+      author_id: "user-1",
+      occurred_at: new Date("2026-08-25T12:01:00.000Z"),
+    };
+    const secondMovement = {
+      ...firstMovement,
+      id: "0190f3c8-2a10-7abc-8def-1234567890ae",
+    };
+    let rows = [firstMovement, secondMovement];
+    const statements: string[] = [];
+    const client = {
+      async query<T>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+        statements.push(sql);
+        if (sql.includes("FROM membership"))
+          return { rows: [{ role: "member", status: "active" }] as T[], rowCount: 1 };
+        if (sql.includes("FROM workspace"))
+          return { rows: [{ status: "active" }] as T[], rowCount: 1 };
+        if (sql.includes("SELECT id FROM stock_product"))
+          return { rows: [{ id: firstProduct.id }] as T[], rowCount: 1 };
+        if (sql.includes("FROM stock_movement"))
+          return { rows: rows as T[], rowCount: rows.length };
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const service = new StockService({ connect: async () => client } as never, {
+      cursorSecret,
+    });
+
+    const first = await service.listMovements(scope, firstProduct.id, { limit: 1 });
+
+    expect(first.items[0]?.id).toBe(firstMovement.id);
+    expect(first.hasMore).toBe(true);
+    expect(decodeCursor(first.nextCursor as string, cursorSecret)).toEqual({
+      ordering: "occurred_at,id",
+      position: ["2026-08-25T12:01:00.000Z", firstMovement.id],
+    });
+
+    rows = [secondMovement];
+    const second = await service.listMovements(scope, firstProduct.id, {
+      limit: 1,
+      cursor: first.nextCursor as string,
+    });
+    expect(second.items[0]?.id).toBe(secondMovement.id);
+    expect(second.nextCursor).toBeNull();
+    expect(statements.filter((sql) => sql.includes("FROM stock_movement")).at(-1)).toMatch(
+      /occurred_at < .*id < /s,
+    );
   });
 });

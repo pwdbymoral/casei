@@ -130,6 +130,81 @@ export function goalProgressPercent(goal: Pick<Goal, "target" | "reserved">): nu
   return Number((bounded * BigInt(100)) / target);
 }
 
+export type GoalPace = {
+  status: "complete" | "no_deadline" | "overdue" | "on_track" | "unavailable";
+  periods: number | null;
+  monthlyMinor: string | null;
+};
+
+/**
+ * Converts the API's deterministic planning fields into a small presentation model.
+ * The API remains the source of truth for the number of periods and monthly amount.
+ */
+export function goalPace(
+  goal: Pick<Goal, "remaining" | "contributionPeriodsRemaining" | "requiredContribution">,
+): GoalPace {
+  if (BigInt(goal.remaining.minor) <= BigInt(0)) {
+    return { status: "complete", periods: goal.contributionPeriodsRemaining, monthlyMinor: null };
+  }
+  if (goal.contributionPeriodsRemaining === null) {
+    return { status: "no_deadline", periods: null, monthlyMinor: null };
+  }
+  if (goal.contributionPeriodsRemaining === 0) {
+    return { status: "overdue", periods: 0, monthlyMinor: null };
+  }
+  if (!goal.requiredContribution) {
+    return {
+      status: "unavailable",
+      periods: goal.contributionPeriodsRemaining,
+      monthlyMinor: null,
+    };
+  }
+  return {
+    status: "on_track",
+    periods: goal.contributionPeriodsRemaining,
+    monthlyMinor: goal.requiredContribution.minor,
+  };
+}
+
+export type GoalContributionSimulation = {
+  periodsToTarget: bigint | null;
+  reachesByDeadline: boolean | null;
+  deadlinePeriods: number | null;
+};
+
+/** Calculates a local, non-persistent contribution scenario in minor units. */
+export function simulateGoalContribution(
+  goal: Pick<Goal, "remaining" | "contributionPeriodsRemaining">,
+  contributionMinor: string,
+): GoalContributionSimulation {
+  const contribution = BigInt(contributionMinor || "0");
+  const remaining = BigInt(goal.remaining.minor);
+  if (remaining <= BigInt(0)) {
+    return {
+      periodsToTarget: BigInt(0),
+      reachesByDeadline:
+        goal.contributionPeriodsRemaining === null ? null : 0 <= goal.contributionPeriodsRemaining,
+      deadlinePeriods: goal.contributionPeriodsRemaining,
+    };
+  }
+  if (contribution <= BigInt(0)) {
+    return {
+      periodsToTarget: null,
+      reachesByDeadline: null,
+      deadlinePeriods: goal.contributionPeriodsRemaining,
+    };
+  }
+  const periodsToTarget = (remaining + contribution - BigInt(1)) / contribution;
+  return {
+    periodsToTarget,
+    reachesByDeadline:
+      goal.contributionPeriodsRemaining === null
+        ? null
+        : periodsToTarget <= BigInt(goal.contributionPeriodsRemaining),
+    deadlinePeriods: goal.contributionPeriodsRemaining,
+  };
+}
+
 export function canWriteGoals(role: WorkspaceRole): boolean {
   return role !== "viewer";
 }
