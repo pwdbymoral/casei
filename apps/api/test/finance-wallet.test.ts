@@ -160,9 +160,22 @@ describe("wallet reconciliation", () => {
       .filter((query) => query.sql.includes("INSERT INTO ledger_entry"))
       .map((query) => query.values?.at(-1));
     expect(ledgerValues).toEqual([-250n, 250n]);
-    expect(
-      queries.find((query) => query.sql.includes("INSERT INTO audit_event"))?.values,
-    ).toContain("Dinheiro contado em espécie");
+    const auditValues = queries.find((query) =>
+      query.sql.includes("INSERT INTO audit_event"),
+    )?.values;
+    expect(auditValues).toContain("Dinheiro contado em espécie");
+    expect(JSON.parse(String(auditValues?.[5]))).toMatchObject({
+      kind: "adjustment",
+      state: "posted",
+      version: 0,
+      walletVersion: 3,
+    });
+    expect(JSON.parse(String(auditValues?.[6]))).toMatchObject({
+      kind: "adjustment",
+      state: "posted",
+      version: 0,
+      walletVersion: 4,
+    });
     expect(queries.some((query) => /income|expense/.test(query.sql))).toBe(false);
   });
 
@@ -222,6 +235,18 @@ describe("wallet reconciliation", () => {
     });
     expect(preview.status).toBe(200);
     expect(preview.headers.get("etag")).toBe('"v3"');
+
+    const outOfRangePreview = await app.request(
+      `/v1/workspaces/${workspaceId}/wallet/adjustments/preview`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          observedBalance: { currency: "BRL", minor: "-1000000000000000" },
+        }),
+      },
+    );
+    expect(outOfRangePreview.status).toBe(422);
 
     const missingHeaders = await app.request(`/v1/workspaces/${workspaceId}/wallet/adjustments`, {
       method: "POST",

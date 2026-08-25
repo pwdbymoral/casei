@@ -184,6 +184,11 @@ describe("finance contracts", () => {
       }),
     ).toEqual({ observedBalance: { currency: "BRL", minor: "-250" } });
     expect(() =>
+      walletAdjustmentPreviewInputSchema.parse({
+        observedBalance: { currency: "BRL", minor: "-1000000000000000" },
+      }),
+    ).toThrow("minor is outside the supported range");
+    expect(() =>
       walletAdjustmentInputSchema.parse({
         observedBalance: { currency: "BRL", minor: "1000" },
         reason: "   ",

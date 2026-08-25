@@ -13,6 +13,60 @@ const integrationIt = adminUrl ? it : it.skip;
 
 describe("FIN-002 wallet PostgreSQL", () => {
   integrationIt(
+    "blocks currency changes after zero-balance onboarding creates the wallet",
+    async () => {
+      const fixture = await createFixture();
+      try {
+        const identity = new IdentityService(fixture.pool);
+        const onboarding = await identity.createOnboarding(
+          { userId: fixture.actorId, email: fixture.email },
+          {
+            displayName: "Owner zero",
+            workspaceName: "Casa carteira zero",
+            currency: "BRL",
+            timeZone: "America/Fortaleza",
+            includeInitialBalance: false,
+            initialBalanceMinor: "0",
+          },
+          "wallet-onboarding-zero-001",
+          "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        );
+        const scope = {
+          workspaceId: onboarding.workspace.id,
+          actorId: fixture.actorId,
+          role: "owner" as const,
+          correlationId: "01ARZ3NDEKTSV4RRQ69G5FB0",
+        };
+        const identityScope = {
+          workspaceId: onboarding.workspace.id,
+          actor: { userId: fixture.actorId, email: fixture.email },
+          role: "owner" as const,
+          correlationId: "01ARZ3NDEKTSV4RRQ69G5FB0",
+        };
+        const finance = new FinanceService(fixture.pool, { cursorSecret: "wallet-zero-secret" });
+        await expect(finance.getWallet(scope)).resolves.toMatchObject({
+          balance: { currency: "BRL", minor: "0" },
+        });
+        const preferences = await identity.getWorkspacePreferences(identityScope);
+        await expect(
+          identity.updateWorkspacePreferences(
+            identityScope,
+            {
+              name: "Casa carteira zero",
+              currency: "USD",
+              timeZone: "America/Fortaleza",
+              safetyMarginMinor: "0",
+            },
+            preferences.version,
+          ),
+        ).rejects.toMatchObject({ name: "IdentityConflictError" });
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  integrationIt(
     "materializes onboarding immediately and serializes concurrent reconciliations",
     async () => {
       const fixture = await createFixture();
@@ -36,6 +90,12 @@ describe("FIN-002 wallet PostgreSQL", () => {
         const scope = {
           workspaceId: onboarding.workspace.id,
           actorId: fixture.actorId,
+          role: "owner" as const,
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        };
+        const identityScope = {
+          workspaceId: onboarding.workspace.id,
+          actor: { userId: fixture.actorId, email: fixture.email },
           role: "owner" as const,
           correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FB0",
         };
@@ -65,6 +125,20 @@ describe("FIN-002 wallet PostgreSQL", () => {
         expect(opening.rows).toEqual([
           { event_type: "wallet.opening_balance.v1", transaction_count: "1" },
         ]);
+
+        const preferences = await identity.getWorkspacePreferences(identityScope);
+        await expect(
+          identity.updateWorkspacePreferences(
+            identityScope,
+            {
+              name: "Casa carteira",
+              currency: "USD",
+              timeZone: "America/Fortaleza",
+              safetyMarginMinor: "0",
+            },
+            preferences.version,
+          ),
+        ).rejects.toMatchObject({ name: "IdentityConflictError" });
 
         const preview = await finance.previewWalletAdjustment(scope, {
           observedBalance: { currency: "BRL", minor: "750" },
@@ -151,14 +225,32 @@ describe("FIN-002 wallet PostgreSQL", () => {
         expect(effects.rows.flatMap((event) => event.kinds)).not.toContain("income");
         expect(effects.rows.flatMap((event) => event.kinds)).not.toContain("expense");
         expect(effects.rows.at(-1)?.kinds).toEqual(["adjustment", "wallet"]);
-        const audit = await fixture.pool.query<{ reason: string }>(
-          `SELECT reason FROM audit_event
+        const audit = await fixture.pool.query<{
+          reason: string;
+          target_type: string;
+          before_redacted: Record<string, unknown>;
+          after_redacted: Record<string, unknown>;
+        }>(
+          `SELECT reason, target_type, before_redacted, after_redacted FROM audit_event
             WHERE workspace_id = $1 AND action = 'wallet.adjusted'`,
           [onboarding.workspace.id],
         );
         expect(audit.rows).toEqual([
           {
             reason: winner.adjustment.observedBalance.minor === "750" ? "Contagem A" : "Contagem B",
+            target_type: "finance_transaction",
+            before_redacted: {
+              kind: "adjustment",
+              state: "posted",
+              version: 0,
+              walletVersion: 1,
+            },
+            after_redacted: {
+              kind: "adjustment",
+              state: "posted",
+              version: 0,
+              walletVersion: 2,
+            },
           },
         ]);
       } finally {

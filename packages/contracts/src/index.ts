@@ -418,7 +418,8 @@ const minorAmountSchema = z
   .regex(/^-?(0|[1-9][0-9]*)$/, "minor must be a canonical decimal integer")
   .refine((value) => {
     try {
-      return (value.startsWith("-") ? -BigInt(value.slice(1)) : BigInt(value)) <= 999999999999999n;
+      const minor = BigInt(value);
+      return minor >= -999999999999999n && minor <= 999999999999999n;
     } catch {
       return false;
     }

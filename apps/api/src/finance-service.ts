@@ -518,6 +518,7 @@ export class FinanceService {
             })),
             occurredOn,
           );
+          const nextWallet = await this.readWallet(client, scope.workspaceId, "update");
           await client.query(
             `INSERT INTO audit_event
               (category, action, actor_id, workspace_id, target_type, target_id, origin,
@@ -530,15 +531,20 @@ export class FinanceService {
               transactionRow.id,
               scope.correlationId,
               parsed.reason,
-              JSON.stringify({ kind: "adjustment", state: "posted", version: expectedVersion }),
               JSON.stringify({
                 kind: "adjustment",
                 state: "posted",
-                version: expectedVersion + 1,
+                version: transactionRow.version,
+                walletVersion: wallet.version,
+              }),
+              JSON.stringify({
+                kind: "adjustment",
+                state: "posted",
+                version: transactionRow.version,
+                walletVersion: nextWallet.version,
               }),
             ],
           );
-          const nextWallet = await this.readWallet(client, scope.workspaceId, "update");
           const adjustment: WalletAdjustmentResultView = {
             wallet: nextWallet,
             observedBalance: parsed.observedBalance,

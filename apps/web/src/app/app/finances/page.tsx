@@ -1406,18 +1406,11 @@ function FinanceDashboard({
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       walletAdjustmentCommandKey.current = null;
       setWallet(result.wallet);
-      setTransactions((current) => [
-        result.transaction,
-        ...current.filter((transaction) => transaction.id !== result.transaction.id),
-      ]);
-      setWalletTransactions((current) => [
-        result.transaction,
-        ...current.filter((transaction) => transaction.id !== result.transaction.id),
-      ]);
       setWalletAdjustmentOpen(false);
       setWalletAdjustmentPreview(null);
       setWalletAdjustmentReason("");
       setWalletAdjustmentConfirmed(true);
+      await load();
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       if (cause instanceof FinanceAdapterError && cause.status === 412) {

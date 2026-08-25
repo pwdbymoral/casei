@@ -157,6 +157,8 @@ não vazio, `Idempotency-Key` e `If-Match: "v<version>"`, e recalcula a diferen�
 carteira mudou desde a prévia, responde conflito de versão sem publicar nada; diferença zero é
 rejeitada como ajuste desnecessário. O evento publicado movimenta somente `wallet` contra
 `adjustment equity`, preserva o motivo na auditoria e não entra em renda ou despesa.
+O evento de auditoria usa `finance_transaction` como alvo: `version` é a versão da transação
+ajustada e `walletVersion` registra separadamente a versão da carteira antes/depois.
 
 ### Edição e cancelamento
 
