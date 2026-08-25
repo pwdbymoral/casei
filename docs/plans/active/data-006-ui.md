@@ -1,6 +1,6 @@
 # Plano: DATA-006 — UI de importação e exportação
 
-- Status: incremento parcial intencional; aplicação durável depende de DATA-001/DATA-004.
+- Status: jornada web implementada; integração de upload/preflight e exportação server-side permanece uma fronteira explícita de API.
 - Spec associada: [intercâmbio de dados](../../specs/intercambio-de-dados.md)
 - Planos relacionados: [DATA-002/003](data-002-003.md) e [DATA-005](data-005-export.md)
 
@@ -14,11 +14,14 @@ completas.
 ## Fronteira desta fatia
 
 `DataExchangeAdapter` é o port tipado entre a PWA e os jobs DATA-001/DATA-004.
-O adapter HTTP envia `multipart/form-data` para os endpoints previstos e não
-fabrica sucesso quando o backend ainda não estiver disponível. O adapter de
-fixtures exercita a jornada completa em desenvolvimento e testes sem gravar
-dados reais. A prévia CSV local é somente um fallback de UX para poder revisar
-um arquivo antes da aplicação; a validação canônica continua no servidor.
+Para as rotas de importação já disponíveis, o adapter HTTP usa o contrato
+`/v1/workspaces/:workspaceId/imports`, incluindo cancelamento com
+`Idempotency-Key` e consulta paginada dos resultados por linha. Ele não fabrica
+sucesso quando a rota de upload/prévia ou de exportação ainda não estiver
+disponível. O adapter de fixtures exercita a jornada completa em desenvolvimento
+e testes sem gravar dados reais. A prévia CSV local é somente um fallback de UX
+para poder revisar um arquivo antes da aplicação; a validação canônica continua
+no servidor.
 Quando não há conexão, o adapter autenticado usa esse fallback somente para
 CSV; XLSX continua exigindo o servidor. A confirmação e o envio permanecem
 bloqueados offline.
@@ -44,9 +47,11 @@ disponível.
 
 ## Limitações conhecidas
 
-Os endpoints DATA-001/DATA-004 ainda não existem na API deste branch. Em
-ambiente autenticado a UI mostra a indisponibilidade do boundary e preserva o
-arquivo/configuração para retry; nenhum sucesso simulado é exibido.
+As rotas de upload/preflight e exportação server-side ainda não estão expostas
+na API deste branch. Em ambiente autenticado a UI mostra a indisponibilidade do
+boundary e preserva o arquivo/configuração para retry; nenhum sucesso simulado
+é exibido. O status, cancelamento e resultados por linha usam as rotas de
+importação DATA-004 já expostas.
 O fallback local respeita o limite de 50 mil linhas e bloqueia a confirmação
 quando o arquivo excede esse limite. O relatório de erros prefixa células com
 caracteres de fórmula para não transformar mensagens retornadas pelo job em
