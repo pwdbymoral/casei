@@ -459,6 +459,54 @@ describe("finance adapter", () => {
     ).resolves.toMatchObject({ id: created.id, state: "canceled" });
   });
 
+  it("resolves a transaction deep link even when it is outside the first timeline page", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";
+    const oldest = await adapter.createTransaction(workspaceId, {
+      kind: "expense",
+      amount: { currency: "BRL", minor: "100" },
+      description: "Lançamento antigo",
+    });
+    for (let index = 0; index < 50; index += 1) {
+      await adapter.createTransaction(workspaceId, {
+        kind: "expense",
+        amount: { currency: "BRL", minor: "100" },
+      });
+    }
+
+    const page = await adapter.listTransactions(workspaceId, { limit: 50 });
+    expect(page.items.some((item) => item.id === oldest.id)).toBe(false);
+    await expect(adapter.getTransaction(workspaceId, oldest.id)).resolves.toMatchObject({
+      id: oldest.id,
+      description: "Lançamento antigo",
+    });
+  });
+
+  it("fetches a statement deep link directly by id", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      expect(input).toBe("/v1/workspaces/workspace/statements/statement-1");
+      return Response.json({
+        id: "statement-1",
+        workspaceId: "workspace",
+        cardId: "card-1",
+        periodStart: "2026-08-11",
+        closingOn: "2026-09-10",
+        dueOn: "2026-09-17",
+        state: "open",
+        total: { currency: "BRL", minor: "1000" },
+        paid: { currency: "BRL", minor: "0" },
+        openAmount: { currency: "BRL", minor: "1000" },
+        version: 0,
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+
+    await expect(adapter.getStatement("workspace", "statement-1")).resolves.toMatchObject({
+      id: "statement-1",
+      openAmount: { minor: "1000" },
+    });
+  });
+
   it("preserves omitted card fields and enforces fixture archive conflicts", async () => {
     const adapter = createFixtureFinanceAdapter();
     const workspaceId = "019b5d9e-3c12-7a01-8d47-7b5b5dd7a201";

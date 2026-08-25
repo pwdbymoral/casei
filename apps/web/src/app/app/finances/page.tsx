@@ -183,6 +183,8 @@ function FinanceDashboard({
   const [transactionAuditRequest] = useState(createRequestGuard);
   const [transactionAuditDetailRequest] = useState(createRequestGuard);
   const [timelineRequest] = useState(createRequestGuard);
+  const [transactionDeepLinkRequest] = useState(createRequestGuard);
+  const [statementDeepLinkRequest] = useState(createRequestGuard);
   const [workspaceRequests] = useState(() => createWorkspaceGenerationGuard(workspaceId));
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineFrom, setTimelineFrom] = useState("");
@@ -275,6 +277,8 @@ function FinanceDashboard({
   useEffect(() => {
     workspaceRequests.switchWorkspace(workspaceId);
     timelineRequest.invalidate();
+    transactionDeepLinkRequest.invalidate();
+    statementDeepLinkRequest.invalidate();
     statementItemsRequest.invalidate();
     transactionAuditRequest.invalidate();
     transactionAuditDetailRequest.invalidate();
@@ -339,7 +343,9 @@ function FinanceDashboard({
     setSavingInstallment(false);
     settlementCommandKey.current = null;
   }, [
+    statementDeepLinkRequest,
     statementItemsRequest,
+    transactionDeepLinkRequest,
     timelineRequest,
     transactionAuditDetailRequest,
     transactionAuditRequest,
@@ -374,14 +380,65 @@ function FinanceDashboard({
     const target = [...walletTransactions, ...transactions].find(
       (transaction) => transaction.id === transactionTargetId,
     );
-    if (target) setViewingTransaction(target);
-  }, [transactionTargetId, transactions, walletTransactions, workspaceDataReady]);
+    const request = transactionDeepLinkRequest.begin();
+    if (target) {
+      setViewingTransaction(target);
+      return () => transactionDeepLinkRequest.invalidate();
+    }
+    void adapter
+      .getTransaction(workspaceId, transactionTargetId)
+      .then((resolved) => {
+        if (transactionDeepLinkRequest.isCurrent(request) && workspaceDataReady) {
+          setViewingTransaction(resolved);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!transactionDeepLinkRequest.isCurrent(request) || !workspaceDataReady) return;
+        setViewingTransaction(null);
+        if (cause instanceof FinanceAdapterError && cause.status === 404) return;
+        setError(cause instanceof Error ? cause.message : "Não foi possível abrir o lançamento.");
+      });
+    return () => transactionDeepLinkRequest.invalidate();
+  }, [
+    adapter,
+    transactionDeepLinkRequest,
+    transactionTargetId,
+    transactions,
+    walletTransactions,
+    workspaceDataReady,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (!workspaceDataReady || !statementTargetId) return;
     const target = statements.find((statement) => statement.id === statementTargetId);
-    if (target) setViewingStatement(target);
-  }, [statementTargetId, statements, workspaceDataReady]);
+    const request = statementDeepLinkRequest.begin();
+    if (target) {
+      setViewingStatement(target);
+      return () => statementDeepLinkRequest.invalidate();
+    }
+    void adapter
+      .getStatement(workspaceId, statementTargetId)
+      .then((resolved) => {
+        if (statementDeepLinkRequest.isCurrent(request) && workspaceDataReady) {
+          setViewingStatement(resolved);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!statementDeepLinkRequest.isCurrent(request) || !workspaceDataReady) return;
+        setViewingStatement(null);
+        if (cause instanceof FinanceAdapterError && cause.status === 404) return;
+        setError(cause instanceof Error ? cause.message : "Não foi possível abrir a fatura.");
+      });
+    return () => statementDeepLinkRequest.invalidate();
+  }, [
+    adapter,
+    statementDeepLinkRequest,
+    statementTargetId,
+    statements,
+    workspaceDataReady,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
