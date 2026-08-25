@@ -79,12 +79,37 @@ export const platformAuditEvent = pgTable(
     occurredAt: instant("occurred_at").defaultNow().notNull(),
     origin: text("origin").notNull(),
     correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    ipAddress: text("ip_address"),
+    endpoint: text("endpoint"),
     result: text("result").notNull(),
     reason: text("reason").notNull(),
   },
   (table) => [
     index("platform_audit_actor_occurred_idx").on(table.actorId, table.occurredAt),
     index("platform_audit_target_occurred_idx").on(table.targetId, table.occurredAt),
+  ],
+);
+
+/** Short-lived, one-use proof that a platform actor completed step-up auth. */
+export const adminStepUpChallenge = pgTable(
+  "admin_step_up_challenge",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    method: text("method").notNull(),
+    issuedAt: instant("issued_at").defaultNow().notNull(),
+    expiresAt: instant("expires_at").notNull(),
+    consumedAt: instant("consumed_at"),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("admin_step_up_token_hash_unique").on(table.tokenHash),
+    index("admin_step_up_user_expiry_idx").on(table.userId, table.expiresAt),
+    check("admin_step_up_method_check", sql`${table.method} in ('totp', 'backup_code')`),
+    check("admin_step_up_expiry_check", sql`${table.expiresAt} > ${table.issuedAt}`),
   ],
 );
 

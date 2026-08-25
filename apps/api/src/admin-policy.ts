@@ -8,7 +8,11 @@ export type PlatformAdminAction =
   | "auth:resend"
   | "platform-role:change";
 
-type AdminPolicyCode = "permission_denied" | "recent_auth_required" | "last_platform_admin";
+type AdminPolicyCode =
+  | "permission_denied"
+  | "recent_auth_required"
+  | "last_platform_admin"
+  | "step_up_required";
 
 export class AdminPolicyError extends Error {
   readonly code: AdminPolicyCode;

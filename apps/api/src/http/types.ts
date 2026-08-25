@@ -7,6 +7,11 @@ export interface RequestActor {
   email?: string;
   displayName?: string;
   recentAuthentication?: boolean;
+  /** One-use server-issued proof for mutating platform commands. */
+  stepUpToken?: string;
+  /** Request provenance retained for administrative audit, never authorization. */
+  ipAddress?: string | null;
+  endpoint?: string | null;
   /** Platform role is separate from workspace membership and is absent for ordinary users. */
   platformRole?: PlatformRole | null;
 }

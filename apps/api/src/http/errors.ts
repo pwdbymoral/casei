@@ -13,6 +13,7 @@ const DEFAULT_MESSAGES: Record<ErrorCode, string> = {
   malformed_request: "A requisição não pôde ser lida.",
   validation_failed: "Revise os campos indicados.",
   unauthenticated: "Autentique-se para continuar.",
+  step_up_required: "Confirme o segundo fator para continuar.",
   not_found: "Recurso não encontrado.",
   permission_denied: "Você não tem permissão para esta ação.",
   precondition_required: "A requisição precisa informar a versão atual.",
@@ -163,6 +164,13 @@ function normalizeError(error: unknown): {
       status: 401,
       code: "unauthenticated",
       message: "Confirme sua identidade novamente para continuar.",
+    };
+  }
+  if (hasCode(error, "step_up_required")) {
+    return {
+      status: 401,
+      code: "step_up_required",
+      message: "Confirme o segundo fator para continuar.",
     };
   }
   if (hasCode(error, "rate_limited")) {

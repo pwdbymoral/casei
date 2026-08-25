@@ -498,6 +498,7 @@ export const errorCodeSchema = z.enum([
   "malformed_request",
   "validation_failed",
   "unauthenticated",
+  "step_up_required",
   "not_found",
   "permission_denied",
   "precondition_required",

@@ -48,14 +48,25 @@ export interface AdminAccountStore {
     key: string,
     request: unknown,
     run: () => Promise<T>,
+    actorId?: string,
+    stepUpToken?: string,
   ): Promise<{ replayed: boolean; result: T }>;
+  /** Establishes the database actor context before any platform query. */
+  withActor?<T>(actorId: string, run: () => Promise<T>): Promise<T>;
   recordAudit?(input: {
     actorId: string;
     targetId: string;
     action: string;
     reason: string;
     correlationId: string;
+    ipAddress?: string | null;
+    endpoint?: string | null;
   }): Promise<void>;
+  issueStepUpChallenge?(input: {
+    userId: string;
+    method: "totp" | "backup_code";
+    correlationId: string;
+  }): Promise<string>;
   resolvePlatformActor?(userId: string): Promise<{
     role: PlatformRole | null;
     suspended: boolean;
@@ -65,6 +76,11 @@ export interface AdminAccountStore {
 export interface AdminAuthPort {
   sendVerificationEmail(email: string): Promise<void>;
   sendPasswordReset(email: string): Promise<void>;
+  verifyStepUp?(input: {
+    method: "totp" | "backup_code";
+    code: string;
+    headers: Headers;
+  }): Promise<void>;
 }
 
 type CommandResult<T> = { replayed: boolean; result: T };
@@ -80,12 +96,28 @@ export class AdminService {
     input: AdminAccountSearchQuery,
   ): Promise<AdminAccountList> {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
-    return this.store.searchAccounts({ ...input, query: normalizeAdminAccountSearch(input.query) });
+    return this.withActor(actor, () =>
+      this.store.searchAccounts({ ...input, query: normalizeAdminAccountSearch(input.query) }),
+    );
   }
 
   async getAccount(actor: AdminActor, userId: string): Promise<AdminAccountDetail> {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
-    return this.requireAccount(userId);
+    return this.withActor(actor, () => this.requireAccount(userId));
+  }
+
+  getPlatformSession(actor: AdminActor): {
+    userId: string;
+    displayName: string;
+    role: PlatformRole;
+  } {
+    assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    if (!actor.platformRole) throw new AdminPolicyError("permission_denied");
+    return {
+      userId: actor.userId,
+      displayName: actor.displayName ?? "",
+      role: actor.platformRole,
+    };
   }
 
   async suspendAccount(
@@ -222,6 +254,25 @@ export class AdminService {
     );
   }
 
+  async completeStepUp(
+    actor: AdminActor,
+    input: { method: "totp" | "backup_code"; code: string },
+    headers: Headers,
+    correlationId: string,
+  ): Promise<{ token: string; expiresInSeconds: number }> {
+    assertCanPerformPlatformAction(actor.platformRole, "account:read");
+    if (!this.auth.verifyStepUp || !this.store.issueStepUpChallenge) {
+      throw new AdminPolicyError("step_up_required");
+    }
+    await this.auth.verifyStepUp({ ...input, headers });
+    const token = await this.store.issueStepUpChallenge({
+      userId: actor.userId,
+      method: input.method,
+      correlationId,
+    });
+    return { token, expiresInSeconds: 300 };
+  }
+
   private async accountStatusCommand(
     actor: AdminActor,
     userId: string,
@@ -265,7 +316,9 @@ export class AdminService {
     return this.store.executeIdempotent(
       `${actor.userId}:platform:${action}:${targetId}`,
       idempotencyKey,
-      { action, targetId, input, correlationId },
+      // Correlation IDs identify attempts for audit/tracing; they must not
+      // change the idempotency fingerprint of the same client command.
+      { action, targetId, input },
       async () => {
         const result = await run();
         if (this.store.recordAudit) {
@@ -279,11 +332,19 @@ export class AdminService {
             action,
             reason,
             correlationId,
+            ipAddress: actor.ipAddress,
+            endpoint: actor.endpoint,
           });
         }
         return result;
       },
+      actor.userId,
+      actor.stepUpToken,
     );
+  }
+
+  private withActor<T>(actor: AdminActor, run: () => Promise<T>): Promise<T> {
+    return this.store.withActor?.(actor.userId, run) ?? run();
   }
 
   private async requireAccount(userId: string): Promise<AdminAccountDetail> {

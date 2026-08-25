@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type {
   AdminAccountDetail,
   AdminAccountList,
@@ -54,7 +54,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
 
   constructor(
     private readonly pool: Pool,
-    private readonly applicationRole?: string,
+    private readonly applicationRole = "casei_app",
   ) {}
 
   async searchAccounts(input: AdminAccountSearchQuery): Promise<AdminAccountList> {
@@ -95,53 +95,57 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     return this.fetchAccount(userId);
   }
 
+  async withActor<T>(actorId: string, run: () => Promise<T>): Promise<T> {
+    const existing = this.transaction.getStore();
+    if (existing) {
+      await this.configureClient(existing, actorId);
+      return run();
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.configureClient(client, actorId);
+      const result = await this.transaction.run(client, run);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async resolvePlatformActor(userId: string): Promise<{
     role: PlatformRole | null;
     suspended: boolean;
   }> {
-    const result = await this.query<{ role: string | null; status: string | null }>(
-      `SELECT role, status FROM platform_account WHERE user_id = $1`,
-      [userId],
-    );
-    const row = result.rows[0];
-    return {
-      role: row?.role === "platform_admin" || row?.role === "platform_support" ? row.role : null,
-      suspended: row?.status === "suspended",
-    };
+    return this.withActor(userId, async () => {
+      const result = await this.query<{ role: string | null; status: string | null }>(
+        `SELECT role, status FROM platform_account WHERE user_id = $1`,
+        [userId],
+      );
+      const row = result.rows[0];
+      return {
+        role: row?.role === "platform_admin" || row?.role === "platform_support" ? row.role : null,
+        suspended: row?.status === "suspended",
+      };
+    });
   }
 
   async claimFirstPlatformAdmin(userId: string): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      if (this.applicationRole) {
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(this.applicationRole)) {
-          throw new Error("Invalid PostgreSQL role identifier");
-        }
-        const quotedRole = this.applicationRole.replaceAll('"', '""');
-        await client.query(`SET LOCAL ROLE "${quotedRole}"`);
-      }
-      const admins = await client.query<{ user_id: string }>(
-        `SELECT user_id
-           FROM platform_account
-          WHERE role = 'platform_admin' AND status = 'active'
-          ORDER BY user_id
-          FOR UPDATE`,
-      );
-      if (admins.rowCount !== 0) throw new PlatformBootstrapAlreadyCompletedError();
-      const user = await client.query(`SELECT 1 FROM "user" WHERE id = $1`, [userId]);
-      if (user.rowCount !== 1) throw new AdminNotFoundError();
-      await client.query(
-        `INSERT INTO platform_account (user_id, role, status, version)
-         VALUES ($1, 'platform_admin', 'active', 1)
-         ON CONFLICT (user_id) DO UPDATE
-           SET role = 'platform_admin', status = 'active', version = platform_account.version + 1,
-               updated_at = now()`,
-        [userId],
-      );
+      await this.configureClient(client, userId);
+      await client.query(`SELECT app.claim_first_platform_admin($1)`, [userId]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
+      if ((error as { code?: string }).code === "55000") {
+        throw new PlatformBootstrapAlreadyCompletedError();
+      }
+      if ((error as { code?: string }).code === "P0002") throw new AdminNotFoundError();
       throw error;
     } finally {
       client.release();
@@ -191,7 +195,10 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     if (role !== "platform_admin") await this.lockAndProtectLastAdmin(userId);
     await this.query(
       `INSERT INTO platform_account (user_id, role, status, role_change_reason, version)
-       VALUES ($1, $2, 'active', $3, 1)
+       SELECT $1, $2, COALESCE(p.status, 'active'), $3, 1
+         FROM "user" u
+         LEFT JOIN platform_account p ON p.user_id = u.id
+        WHERE u.id = $1
        ON CONFLICT (user_id) DO UPDATE
          SET role = EXCLUDED.role,
              role_change_reason = EXCLUDED.role_change_reason,
@@ -218,13 +225,41 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     action: string;
     reason: string;
     correlationId: string;
+    ipAddress?: string | null;
+    endpoint?: string | null;
   }): Promise<void> {
     await this.query(
       `INSERT INTO platform_audit_event
-        (actor_id, target_id, action, occurred_at, origin, correlation_id, result, reason)
-       VALUES ($1, $2, $3, now(), 'admin_console', $4, 'success', $5)`,
-      [input.actorId, input.targetId, input.action, input.correlationId, input.reason],
+        (actor_id, target_id, action, occurred_at, origin, correlation_id, ip_address, endpoint, result, reason)
+       VALUES ($1, $2, $3, now(), 'admin_console', $4, $5, $6, 'success', $7)`,
+      [
+        input.actorId,
+        input.targetId,
+        input.action,
+        input.correlationId,
+        input.ipAddress ?? null,
+        input.endpoint ?? null,
+        input.reason,
+      ],
     );
+  }
+
+  async issueStepUpChallenge(input: {
+    userId: string;
+    method: "totp" | "backup_code";
+    correlationId: string;
+  }): Promise<string> {
+    const token = randomBytes(32).toString("base64url");
+    const tokenHash = hashStepUpToken(token);
+    await this.withActor(input.userId, async () => {
+      await this.query(
+        `INSERT INTO admin_step_up_challenge
+          (user_id, token_hash, method, issued_at, expires_at, correlation_id)
+         VALUES ($1, $2, $3, now(), now() + interval '5 minutes', $4)`,
+        [input.userId, tokenHash, input.method, input.correlationId],
+      );
+    });
+    return token;
   }
 
   async executeIdempotent<T>(
@@ -232,17 +267,13 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     key: string,
     request: unknown,
     run: () => Promise<T>,
+    actorId?: string,
+    stepUpToken?: string,
   ): Promise<{ replayed: boolean; result: T }> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      if (this.applicationRole) {
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(this.applicationRole)) {
-          throw new Error("Invalid PostgreSQL role identifier");
-        }
-        const quotedRole = this.applicationRole.replaceAll('"', '""');
-        await client.query(`SET LOCAL ROLE "${quotedRole}"`);
-      }
+      await this.configureClient(client, actorId);
       const requestHash = createHash("sha256").update(canonicalJson(request)).digest("hex");
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO idempotency_key (scope, key, request_hash, expires_at)
@@ -271,6 +302,18 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
         await client.query("COMMIT");
         return { replayed: true, result: row.response };
       }
+      if (!actorId || !stepUpToken) throw new AdminPolicyError("step_up_required");
+      const consumed = await client.query(
+        `UPDATE admin_step_up_challenge
+            SET consumed_at = now()
+          WHERE user_id = $1
+            AND token_hash = $2
+            AND consumed_at IS NULL
+            AND expires_at > now()
+          RETURNING id`,
+        [actorId, hashStepUpToken(stepUpToken)],
+      );
+      if (consumed.rowCount !== 1) throw new AdminPolicyError("step_up_required");
       const result = await this.transaction.run(client, run);
       await client.query(
         `UPDATE idempotency_key
@@ -362,8 +405,24 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
 
   private async query<T extends QueryResultRow>(text: string, values: unknown[] = []) {
     const client = this.transaction.getStore();
-    return client ? client.query<T>(text, values) : this.pool.query<T>(text, values);
+    if (!client) throw new Error("Admin store query requires an actor transaction");
+    return client.query<T>(text, values);
   }
+
+  private async configureClient(client: PoolClient, actorId?: string): Promise<void> {
+    if (this.applicationRole) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(this.applicationRole)) {
+        throw new Error("Invalid PostgreSQL role identifier");
+      }
+      const quotedRole = this.applicationRole.replaceAll('"', '""');
+      await client.query(`SET LOCAL ROLE "${quotedRole}"`);
+    }
+    await client.query(`SELECT set_config('app.actor_id', $1, true)`, [actorId ?? ""]);
+  }
+}
+
+function hashStepUpToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function toAccountSummary(row: AccountRow): AdminAccountSummary {

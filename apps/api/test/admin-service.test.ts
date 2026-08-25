@@ -180,6 +180,28 @@ describe("ADMIN-001/002 service", () => {
     expect(store.audits).toEqual([{ action: "account:active", reason: "reviewed" }]);
   });
 
+  it("keeps correlation IDs out of the command fingerprint", async () => {
+    const store = new MemoryAdminStore();
+    const service = new AdminService(store, new MemoryAuthPort());
+    const first = await service.reactivateAccount(
+      actor("platform_support"),
+      "target-user",
+      { reason: "same command" },
+      "reactivate-key-correlation",
+      "01J00000000000000000000001",
+    );
+    const replay = await service.reactivateAccount(
+      actor("platform_support"),
+      "target-user",
+      { reason: "same command" },
+      "reactivate-key-correlation",
+      "01J00000000000000000000002",
+    );
+    expect(first.replayed).toBe(false);
+    expect(replay.replayed).toBe(true);
+    expect(store.calls).toBe(1);
+  });
+
   it("revokes sessions and delegates verification/recovery to Better Auth flows", async () => {
     const store = new MemoryAdminStore();
     const auth = new MemoryAuthPort();

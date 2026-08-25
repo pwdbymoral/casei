@@ -1,0 +1,13 @@
+DROP POLICY IF EXISTS "admin_step_up_challenge_scope" ON "admin_step_up_challenge";
+DROP POLICY IF EXISTS "platform_audit_event_scope" ON "platform_audit_event";
+DROP POLICY IF EXISTS "platform_account_read_scope" ON "platform_account";
+DROP FUNCTION IF EXISTS "app"."platform_role_for_user"(text);
+DROP FUNCTION IF EXISTS "app"."platform_status_for_user"(text);
+DROP FUNCTION IF EXISTS "app"."current_platform_role"();
+DROP FUNCTION IF EXISTS "app"."claim_first_platform_admin"(text);
+DROP TABLE IF EXISTS "admin_step_up_challenge";
+DROP TABLE IF EXISTS "platform_audit_event";
+DROP TABLE IF EXISTS "platform_account";
+DROP INDEX IF EXISTS "twoFactor_userId_idx";
+DROP TABLE IF EXISTS "twoFactor";
+ALTER TABLE "user" DROP COLUMN IF EXISTS "two_factor_enabled";
