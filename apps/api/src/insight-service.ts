@@ -1,4 +1,8 @@
-import { insightWindowQuerySchema, safeToSpendQuerySchema } from "@casei/contracts";
+import {
+  insightReportQuerySchema,
+  insightWindowQuerySchema,
+  safeToSpendQuerySchema,
+} from "@casei/contracts";
 import type { Pool, PoolClient } from "@casei/database";
 import { withUnitOfWork } from "@casei/database";
 import { addLocalDateDays, calculateSafeToSpend, parseLocalDate } from "@casei/domain";
@@ -79,6 +83,53 @@ export interface SafeToSpendView {
   };
 }
 
+export interface InsightReportPeriod {
+  month: string;
+  income: InsightMoney;
+  expense: InsightMoney;
+  net: InsightMoney;
+  transactionCount: number;
+}
+
+export interface InsightReportCategory {
+  categoryId: string | null;
+  categoryName: string;
+  income: InsightMoney;
+  expense: InsightMoney;
+  net: InsightMoney;
+  transactionCount: number;
+}
+
+export interface InsightReportView {
+  asOf: string;
+  from: string;
+  to: string;
+  currency: string;
+  filters: { kind: "all" | "income" | "expense"; categoryId: string | null };
+  totals: {
+    income: InsightMoney;
+    expense: InsightMoney;
+    net: InsightMoney;
+    transactionCount: number;
+  };
+  monthly: InsightReportPeriod[];
+  categories: InsightReportCategory[];
+  reconciliation: {
+    source: "published_ledger";
+    transactionCount: number;
+    income: InsightMoney;
+    expense: InsightMoney;
+    export: {
+      domain: "transactions";
+      format: "csv";
+      from: string;
+      to: string;
+      kind: "all" | "income" | "expense";
+      categoryId: string | null;
+    };
+  };
+}
+
 export interface SafeToSpendCalculationInput {
   balance: bigint;
   plannedIncome: bigint;
@@ -103,6 +154,24 @@ export function resolveInsightWindow(input: { asOf: string; from?: string; to?: 
     from: parsed.from ?? input.asOf,
     to: parsed.to ?? input.asOf,
   };
+}
+
+export function resolveReportWindow(input: { asOf: string; from?: string; to?: string }): {
+  from: string;
+  to: string;
+} {
+  const parsed = insightReportQuerySchema.parse(input);
+  const from = parsed.from ?? `${input.asOf.slice(0, 7)}-01`;
+  const to = parsed.to ?? input.asOf;
+  if (from > to) throw new FinanceConflictError("O período do relatório é inválido.");
+  return { from, to };
+}
+
+function reportFilters(input: { kind?: "all" | "income" | "expense"; categoryId?: string }): {
+  kind: "all" | "income" | "expense";
+  categoryId: string | null;
+} {
+  return { kind: input.kind ?? "all", categoryId: input.categoryId ?? null };
 }
 
 interface WorkspaceConfig {
@@ -160,6 +229,15 @@ interface InsightNumericRow {
   low_count?: string | bigint | null;
 }
 
+interface InsightReportRow {
+  month?: string | null;
+  category_id?: string | null;
+  category_name?: string | null;
+  income_minor?: string | bigint | null;
+  expense_minor?: string | bigint | null;
+  transaction_count?: string | bigint | null;
+}
+
 /**
  * Rebuilds insight values from canonical ledger and domain tables on each
  * request. There is intentionally no persisted snapshot to invalidate.
@@ -205,6 +283,87 @@ export class InsightService {
         to,
       });
       return toSafeToSpendView(snapshot, parsed.horizonDays);
+    });
+  }
+
+  async getReport(scope: FinanceScope, input: unknown = {}): Promise<InsightReportView> {
+    const parsed = insightReportQuerySchema.parse(input);
+    return this.withScopedClient(scope, async (client) => {
+      const config = await this.workspaceConfig(client, scope.workspaceId);
+      const asOf = parsed.asOf ?? this.today(config.timezone);
+      const { from, to } = resolveReportWindow({ ...parsed, asOf });
+      const filters = reportFilters(parsed);
+      const where = [
+        "ft.workspace_id = $1",
+        "ft.currency_code = $2",
+        "ev.status = 'published'",
+        "fa.kind IN ('income', 'expense')",
+        "ft.occurred_on BETWEEN $3::date AND $4::date",
+        "ft.kind IN ('income', 'expense')",
+      ];
+      const values: unknown[] = [scope.workspaceId, config.currency, from, to];
+      if (filters.kind !== "all") {
+        values.push(filters.kind);
+        where.push(`ft.kind = $${values.length}`);
+      }
+      if (filters.categoryId) {
+        values.push(filters.categoryId);
+        where.push(`ft.category_id = $${values.length}`);
+      }
+      const baseFrom = `
+        FROM finance_transaction ft
+        JOIN ledger_event ev
+          ON ev.workspace_id = ft.workspace_id AND ev.transaction_id = ft.id
+        JOIN ledger_entry le
+          ON le.workspace_id = ev.workspace_id AND le.event_id = ev.id
+        JOIN financial_account fa
+          ON fa.workspace_id = le.workspace_id AND fa.id = le.account_id`;
+      const whereSql = `WHERE ${where.join(" AND ")}`;
+      const [monthly, categories, totals] = await Promise.all([
+        client.query<InsightReportRow>(
+          `SELECT to_char(ft.occurred_on, 'YYYY-MM') AS month,
+                  COALESCE(SUM(CASE WHEN fa.kind = 'income' THEN -le.amount_minor ELSE 0 END), 0) AS income_minor,
+                  COALESCE(SUM(CASE WHEN fa.kind = 'expense' THEN le.amount_minor ELSE 0 END), 0) AS expense_minor,
+                  COUNT(DISTINCT ft.id) AS transaction_count
+             ${baseFrom}
+             ${whereSql}
+            GROUP BY to_char(ft.occurred_on, 'YYYY-MM')
+            ORDER BY month`,
+          values,
+        ),
+        client.query<InsightReportRow>(
+          `SELECT fc.id AS category_id,
+                  COALESCE(fc.name, 'Sem categoria') AS category_name,
+                  COALESCE(SUM(CASE WHEN fa.kind = 'income' THEN -le.amount_minor ELSE 0 END), 0) AS income_minor,
+                  COALESCE(SUM(CASE WHEN fa.kind = 'expense' THEN le.amount_minor ELSE 0 END), 0) AS expense_minor,
+                  COUNT(DISTINCT ft.id) AS transaction_count
+             ${baseFrom}
+             LEFT JOIN finance_category fc
+               ON fc.workspace_id = ft.workspace_id AND fc.id = ft.category_id
+             ${whereSql}
+            GROUP BY fc.id, fc.name
+            ORDER BY category_name`,
+          values,
+        ),
+        client.query<InsightReportRow>(
+          `SELECT COALESCE(SUM(CASE WHEN fa.kind = 'income' THEN -le.amount_minor ELSE 0 END), 0) AS income_minor,
+                  COALESCE(SUM(CASE WHEN fa.kind = 'expense' THEN le.amount_minor ELSE 0 END), 0) AS expense_minor,
+                  COUNT(DISTINCT ft.id) AS transaction_count
+             ${baseFrom}
+             ${whereSql}`,
+          values,
+        ),
+      ]);
+      return toInsightReportView({
+        asOf,
+        from,
+        to,
+        currency: config.currency,
+        filters,
+        monthly: monthly.rows,
+        categories: categories.rows,
+        totals: totals.rows[0],
+      });
     });
   }
 
@@ -454,6 +613,73 @@ function toFinancialReadModel(snapshot: Snapshot): FinancialReadModel {
     },
     stock: { missingCount: snapshot.missingStockCount, lowCount: snapshot.lowStockCount },
     confidence,
+  };
+}
+
+function toInsightReportView(input: {
+  asOf: string;
+  from: string;
+  to: string;
+  currency: string;
+  filters: { kind: "all" | "income" | "expense"; categoryId: string | null };
+  monthly: InsightReportRow[];
+  categories: InsightReportRow[];
+  totals: InsightReportRow | undefined;
+}): InsightReportView {
+  const toPeriod = (row: InsightReportRow): InsightReportPeriod => {
+    const income = toBigInt(row.income_minor);
+    const expense = toBigInt(row.expense_minor);
+    return {
+      month: row.month ?? "0000-00",
+      income: money(input.currency, income),
+      expense: money(input.currency, expense),
+      net: money(input.currency, income - expense),
+      transactionCount: Number(toBigInt(row.transaction_count)),
+    };
+  };
+  const toCategory = (row: InsightReportRow): InsightReportCategory => {
+    const income = toBigInt(row.income_minor);
+    const expense = toBigInt(row.expense_minor);
+    return {
+      categoryId: row.category_id ?? null,
+      categoryName: row.category_name ?? "Sem categoria",
+      income: money(input.currency, income),
+      expense: money(input.currency, expense),
+      net: money(input.currency, income - expense),
+      transactionCount: Number(toBigInt(row.transaction_count)),
+    };
+  };
+  const income = toBigInt(input.totals?.income_minor);
+  const expense = toBigInt(input.totals?.expense_minor);
+  const totals = {
+    income: money(input.currency, income),
+    expense: money(input.currency, expense),
+    net: money(input.currency, income - expense),
+    transactionCount: Number(toBigInt(input.totals?.transaction_count)),
+  };
+  return {
+    asOf: input.asOf,
+    from: input.from,
+    to: input.to,
+    currency: input.currency,
+    filters: input.filters,
+    totals,
+    monthly: input.monthly.map(toPeriod),
+    categories: input.categories.map(toCategory),
+    reconciliation: {
+      source: "published_ledger",
+      transactionCount: totals.transactionCount,
+      income: totals.income,
+      expense: totals.expense,
+      export: {
+        domain: "transactions",
+        format: "csv",
+        from: input.from,
+        to: input.to,
+        kind: input.filters.kind,
+        categoryId: input.filters.categoryId,
+      },
+    },
   };
 }
 
