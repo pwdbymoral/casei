@@ -10,10 +10,26 @@ import {
   settleTransactionSchema,
   transactionListQuerySchema,
   updateCreditCardSchema,
+  updateTransactionSchema,
 } from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 
 describe("finance contracts", () => {
+  it("requires at least one editable field and accepts nullable due dates", () => {
+    expect(() => updateTransactionSchema.parse({})).toThrow("ao menos um campo");
+    expect(
+      updateTransactionSchema.parse({
+        amount: { currency: "BRL", minor: "250" },
+        dueOn: null,
+        description: "Feira",
+      }),
+    ).toEqual({
+      amount: { currency: "BRL", minor: "250" },
+      dueOn: null,
+      description: "Feira",
+    });
+  });
+
   it("rejects impossible civil dates before opening a command", () => {
     expect(() =>
       createTransactionSchema.parse({

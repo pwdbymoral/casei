@@ -174,6 +174,139 @@ describe("finance command guards", () => {
     ).rejects.toThrow("Ajustes exigem o comando de conferência");
   });
 
+  it("edits a planned wallet transaction with optimistic concurrency and audit", async () => {
+    const transactionId = "0190f3c8-2a10-7abc-8def-1234567890ac";
+    const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
+    const current = {
+      id: transactionId,
+      workspace_id: workspaceId,
+      kind: "expense",
+      state: "planned",
+      amount_minor: "1000",
+      settled_minor: "0",
+      currency_code: "BRL",
+      occurred_on: "2028-02-01",
+      due_on: "2028-02-05",
+      posted_on: null,
+      description: "Mercado",
+      category_id: null,
+      card_id: null,
+      statement_id: null,
+      recurrence_id: null,
+      version: 0,
+    };
+    const updated = {
+      ...current,
+      amount_minor: "1250",
+      occurred_on: "2028-02-02",
+      due_on: null,
+      description: "Feira",
+      version: 1,
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM finance_transaction") && sql.includes("FOR UPDATE"))
+          return { rows: [current] };
+        if (sql.includes("FROM workspace_preference p"))
+          return { rows: [{ currency_code: "BRL" }] };
+        if (sql.startsWith("UPDATE finance_transaction")) return { rows: [updated] };
+        if (sql.includes("INSERT INTO audit_event")) return { rows: [] };
+        if (sql.includes('UPDATE "idempotency_key"')) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const result = await service.updateTransaction(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "member",
+      },
+      transactionId,
+      {
+        amount: { currency: "BRL", minor: "1250" },
+        occurredOn: "2028-02-02",
+        dueOn: null,
+        description: "Feira",
+      },
+      "transaction-edit-service-001",
+      0,
+    );
+
+    expect(result).toEqual({
+      replayed: false,
+      transaction: expect.objectContaining({
+        id: transactionId,
+        amount: { currency: "BRL", minor: "1250" },
+        occurredOn: "2028-02-02",
+        dueOn: null,
+        description: "Feira",
+        version: 1,
+      }),
+    });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO audit_event"),
+      expect.arrayContaining(["transaction.updated"]),
+    );
+  });
+
+  it("rejects economic edits after a transaction has published", async () => {
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"')) return { rowCount: 1, rows: [] };
+        if (sql.includes("FROM finance_transaction") && sql.includes("FOR UPDATE"))
+          return {
+            rows: [
+              {
+                id: "0190f3c8-2a10-7abc-8def-1234567890ac",
+                workspace_id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+                kind: "expense",
+                state: "posted",
+                amount_minor: "1000",
+                settled_minor: "1000",
+                currency_code: "BRL",
+                occurred_on: "2028-02-01",
+                due_on: null,
+                posted_on: "2028-02-01T12:00:00.000Z",
+                description: "Mercado",
+                category_id: null,
+                card_id: null,
+                statement_id: null,
+                recurrence_id: null,
+                version: 2,
+              },
+            ],
+          };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    await expect(
+      service.updateTransaction(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "member",
+        },
+        "0190f3c8-2a10-7abc-8def-1234567890ac",
+        { amount: { currency: "BRL", minor: "1100" } },
+        "transaction-edit-posted-001",
+        2,
+      ),
+    ).rejects.toThrow("só podem");
+  });
+
   it("only reopens a closed statement that has no payments", () => {
     expect(() => assertStatementCanReopen({ state: "closed", paidMinor: 0n })).not.toThrow();
     expect(() => assertStatementCanReopen({ state: "partially_paid", paidMinor: 100n })).toThrow(

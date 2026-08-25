@@ -14,6 +14,7 @@ import {
   type TransactionListQuery,
   updateCategorySchema,
   updateCreditCardSchema,
+  updateTransactionSchema,
 } from "@casei/contracts";
 import type { PoolClient as PgPoolClient, Pool } from "@casei/database";
 import {
@@ -619,6 +620,137 @@ export class FinanceService {
         },
       });
     });
+    return {
+      replayed: result.replayed,
+      transaction: result.response as unknown as TransactionView,
+    };
+  }
+
+  async updateTransaction(
+    scope: FinanceScope,
+    id: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; transaction: TransactionView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = updateTransactionSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/transactions/${id}`,
+        key: idempotencyKey,
+        request: { id, expectedVersion, ...parsed },
+        execute: async () => {
+          const currentResult = await client.query<TransactionRow>(
+            `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                    occurred_on, due_on, posted_on, description, category_id, card_id, statement_id,
+                    recurrence_id, version
+               FROM finance_transaction
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, id],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
+          if (current.recurrence_id) {
+            throw new FinanceConflictError(
+              "Edite a série de recorrência pelo comando de série, não pela ocorrência.",
+            );
+          }
+          if (current.card_id || current.statement_id) {
+            throw new FinanceConflictError(
+              "Compras de cartão devem ser corrigidas pela fatura; a edição direta ainda não é permitida.",
+            );
+          }
+          const changesEconomicFields =
+            parsed.amount !== undefined ||
+            parsed.occurredOn !== undefined ||
+            parsed.dueOn !== undefined;
+          if (changesEconomicFields && current.state !== "planned") {
+            throw new FinanceConflictError(
+              "Valor e datas só podem ser alterados enquanto o compromisso estiver planejado.",
+            );
+          }
+
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          const nextAmount = parsed.amount?.minor ?? current.amount_minor.toString();
+          if (parsed.amount && parsed.amount.currency !== currency) {
+            throw new FinanceConflictError("A moeda da transação difere da moeda do espaço.");
+          }
+          const nextOccurredOn = parsed.occurredOn ?? current.occurred_on;
+          const nextDueOn = parsed.dueOn === undefined ? current.due_on : parsed.dueOn;
+          if (!parseLocalDate(nextOccurredOn).ok || (nextDueOn && !parseLocalDate(nextDueOn).ok)) {
+            throw new FinanceConflictError("A data civil informada não existe.");
+          }
+          const nextDescription = parsed.description ?? current.description;
+          const nextCategoryId =
+            parsed.categoryId === undefined ? current.category_id : parsed.categoryId;
+          if (nextCategoryId) {
+            const category = await client.query<{
+              kind: "income" | "expense" | "both";
+              archived: boolean;
+            }>(
+              `SELECT kind, archived
+                 FROM finance_category
+                WHERE workspace_id = $1 AND id = $2
+                FOR SHARE`,
+              [scope.workspaceId, nextCategoryId],
+            );
+            const categoryRow = category.rows[0];
+            if (!categoryRow || categoryRow.archived) {
+              throw new FinanceConflictError(
+                "A categoria não está disponível para novos lançamentos.",
+              );
+            }
+            if (
+              (current.kind === "income" && !["income", "both"].includes(categoryRow.kind)) ||
+              (current.kind === "expense" && !["expense", "both"].includes(categoryRow.kind))
+            ) {
+              throw new FinanceConflictError(
+                "A categoria não é compatível com o tipo da transação.",
+              );
+            }
+          }
+
+          const updated = await client.query<TransactionRow>(
+            `UPDATE finance_transaction
+                SET amount_minor = $3,
+                    occurred_on = $4,
+                    due_on = $5,
+                    description = $6,
+                    category_id = $7,
+                    version = version + 1,
+                    updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $8
+              RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                        occurred_on, due_on, posted_on, description, category_id, card_id, statement_id,
+                        recurrence_id, version`,
+            [
+              scope.workspaceId,
+              id,
+              BigInt(nextAmount),
+              nextOccurredOn,
+              nextDueOn,
+              nextDescription,
+              nextCategoryId,
+              expectedVersion,
+            ],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          await this.recordTransactionAudit(
+            client,
+            scope,
+            id,
+            "transaction.updated",
+            transactionAuditSnapshot(current),
+            transactionAuditSnapshot(row),
+          );
+          return { statusCode: 200, response: toTransactionView(row) as unknown as JsonValue };
+        },
+      }),
+    );
     return {
       replayed: result.replayed,
       transaction: result.response as unknown as TransactionView,
