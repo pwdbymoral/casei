@@ -116,6 +116,21 @@ export interface VersionedCsvExport {
   readonly manifestSha256: Promise<string>;
 }
 
+export interface VersionedZipExportOptions extends VersionedCsvExportOptions {
+  /** Archive name; the CSV entry keeps `fileName` from the base options. */
+  readonly zipFileName?: string;
+}
+
+export interface VersionedZipExport {
+  readonly stream: ReadableStream<Uint8Array>;
+  readonly fileName: string;
+  readonly contentType: "application/zip";
+  /** Resolves after the CSV entry has been consumed to EOF. */
+  readonly manifest: Promise<ExportManifest>;
+  readonly manifestJson: Promise<string>;
+  readonly manifestSha256: Promise<string>;
+}
+
 interface ExportConfig {
   readonly domain: string;
   readonly schemaVersion: string;
@@ -576,5 +591,296 @@ export function createVersionedCsvExport(options: VersionedCsvExportOptions): Ve
     manifest,
     manifestJson,
     manifestSha256,
+  };
+}
+
+const ZIP_LOCAL_SIGNATURE = 0x04034b50;
+const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
+const ZIP_DESCRIPTOR_SIGNATURE = 0x08074b50;
+const ZIP_END_SIGNATURE = 0x06054b50;
+const ZIP_DATA_DESCRIPTOR_FLAGS = 0x0808;
+const ZIP_MAX_UINT32 = 0xffffffff;
+
+interface ZipEntryStats {
+  readonly name: Uint8Array;
+  readonly crc32: number;
+  readonly size: number;
+  readonly localOffset: number;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) === 0 ? value >>> 1 : (value >>> 1) ^ 0xedb88320;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function updateCrc32(crc: number, bytes: Uint8Array): number {
+  let value = crc;
+  for (const byte of bytes) value = (CRC32_TABLE[(value ^ byte) & 0xff] ?? 0) ^ (value >>> 8);
+  return value >>> 0;
+}
+
+function finishCrc32(crc: number): number {
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeZipU16(view: DataView, offset: number, value: number): void {
+  view.setUint16(offset, value, true);
+}
+
+function writeZipU32(view: DataView, offset: number, value: number): void {
+  view.setUint32(offset, value >>> 0, true);
+}
+
+function validateZipFileName(value: string): string {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.zip$/.test(value) ||
+    value.includes("..")
+  ) {
+    throw new CsvExportError("invalid_file_name", "O nome do arquivo de exportação é inválido.");
+  }
+  return value;
+}
+
+function ensureZip32(value: number): void {
+  if (!Number.isSafeInteger(value) || value > ZIP_MAX_UINT32) {
+    throw new CsvExportError("file_too_large", "O arquivo ZIP excede o limite do formato.");
+  }
+}
+
+function zipLocalHeader(name: Uint8Array): Uint8Array {
+  if (name.byteLength > 0xffff) {
+    throw new CsvExportError("invalid_file_name", "O nome de uma entrada ZIP é inválido.");
+  }
+  const bytes = new Uint8Array(30 + name.byteLength);
+  const view = new DataView(bytes.buffer);
+  writeZipU32(view, 0, ZIP_LOCAL_SIGNATURE);
+  writeZipU16(view, 4, 20);
+  writeZipU16(view, 6, ZIP_DATA_DESCRIPTOR_FLAGS);
+  writeZipU16(view, 8, 0);
+  writeZipU16(view, 26, name.byteLength);
+  bytes.set(name, 30);
+  return bytes;
+}
+
+function zipDataDescriptor(stats: ZipEntryStats): Uint8Array {
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  writeZipU32(view, 0, ZIP_DESCRIPTOR_SIGNATURE);
+  writeZipU32(view, 4, stats.crc32);
+  writeZipU32(view, 8, stats.size);
+  writeZipU32(view, 12, stats.size);
+  return bytes;
+}
+
+function zipCentralEntry(stats: ZipEntryStats): Uint8Array {
+  if (stats.name.byteLength > 0xffff) {
+    throw new CsvExportError("invalid_file_name", "O nome de uma entrada ZIP é inválido.");
+  }
+  const bytes = new Uint8Array(46 + stats.name.byteLength);
+  const view = new DataView(bytes.buffer);
+  writeZipU32(view, 0, ZIP_CENTRAL_SIGNATURE);
+  writeZipU16(view, 4, 20);
+  writeZipU16(view, 6, 20);
+  writeZipU16(view, 8, ZIP_DATA_DESCRIPTOR_FLAGS);
+  writeZipU16(view, 10, 0);
+  writeZipU16(view, 28, stats.name.byteLength);
+  writeZipU32(view, 16, stats.crc32);
+  writeZipU32(view, 20, stats.size);
+  writeZipU32(view, 24, stats.size);
+  writeZipU32(view, 42, stats.localOffset);
+  bytes.set(stats.name, 46);
+  return bytes;
+}
+
+function zipEndOfCentralDirectory(
+  entryCount: number,
+  centralSize: number,
+  centralOffset: number,
+): Uint8Array {
+  ensureZip32(centralSize);
+  ensureZip32(centralOffset);
+  const bytes = new Uint8Array(22);
+  const view = new DataView(bytes.buffer);
+  writeZipU32(view, 0, ZIP_END_SIGNATURE);
+  writeZipU16(view, 8, entryCount);
+  writeZipU16(view, 10, entryCount);
+  writeZipU32(view, 12, centralSize);
+  writeZipU32(view, 16, centralOffset);
+  return bytes;
+}
+
+async function* versionedZipChunks(
+  csvExport: VersionedCsvExport,
+  csvReader: ReadableStreamDefaultReader<Uint8Array>,
+  cancelCsv: () => Promise<void>,
+  releaseCsvReader: () => void,
+  markStarted: () => void,
+): AsyncGenerator<Uint8Array, void, undefined> {
+  markStarted();
+  const encoder = new TextEncoder();
+  const csvName = encoder.encode(csvExport.fileName);
+  const manifestName = encoder.encode("manifest.json");
+  const entries: ZipEntryStats[] = [];
+  let archiveOffset = 0;
+  let csvDone = false;
+
+  try {
+    const csvHeader = zipLocalHeader(csvName);
+    entries.push({ name: csvName, crc32: 0, size: 0, localOffset: archiveOffset });
+    yield csvHeader;
+    archiveOffset += csvHeader.byteLength;
+
+    let csvCrc = 0xffffffff;
+    let csvSize = 0;
+    while (true) {
+      const next = await csvReader.read();
+      if (next.done) break;
+      const chunk = next.value;
+      ensureZip32(csvSize + chunk.byteLength);
+      ensureZip32(archiveOffset + chunk.byteLength);
+      csvSize += chunk.byteLength;
+      archiveOffset += chunk.byteLength;
+      csvCrc = updateCrc32(csvCrc, chunk);
+      yield chunk;
+    }
+    csvDone = true;
+    const csvStats: ZipEntryStats = {
+      name: csvName,
+      crc32: finishCrc32(csvCrc),
+      size: csvSize,
+      localOffset: entries[0]?.localOffset ?? 0,
+    };
+    entries[0] = csvStats;
+    const csvDescriptor = zipDataDescriptor(csvStats);
+    ensureZip32(archiveOffset + csvDescriptor.byteLength);
+    archiveOffset += csvDescriptor.byteLength;
+    yield csvDescriptor;
+
+    const manifestJson = await csvExport.manifestJson;
+    const manifestBytes = encoder.encode(manifestJson);
+    const manifestHeader = zipLocalHeader(manifestName);
+    ensureZip32(archiveOffset + manifestHeader.byteLength);
+    entries.push({ name: manifestName, crc32: 0, size: 0, localOffset: archiveOffset });
+    yield manifestHeader;
+    archiveOffset += manifestHeader.byteLength;
+
+    const manifestStats: ZipEntryStats = {
+      name: manifestName,
+      crc32: finishCrc32(updateCrc32(0xffffffff, manifestBytes)),
+      size: manifestBytes.byteLength,
+      localOffset: entries[1]?.localOffset ?? 0,
+    };
+    ensureZip32(archiveOffset + manifestBytes.byteLength);
+    archiveOffset += manifestBytes.byteLength;
+    yield manifestBytes;
+    const manifestDescriptor = zipDataDescriptor(manifestStats);
+    ensureZip32(archiveOffset + manifestDescriptor.byteLength);
+    archiveOffset += manifestDescriptor.byteLength;
+    yield manifestDescriptor;
+    entries[1] = manifestStats;
+
+    const centralOffset = archiveOffset;
+    const centralEntries = entries.map(zipCentralEntry);
+    const centralSize = centralEntries.reduce((total, entry) => total + entry.byteLength, 0);
+    ensureZip32(centralOffset + centralSize + 22);
+    for (const entry of centralEntries) {
+      archiveOffset += entry.byteLength;
+      yield entry;
+    }
+    const end = zipEndOfCentralDirectory(entries.length, centralSize, centralOffset);
+    archiveOffset += end.byteLength;
+    yield end;
+  } finally {
+    if (!csvDone) await cancelCsv();
+    releaseCsvReader();
+  }
+}
+
+/**
+ * Creates a stored ZIP stream containing one versioned CSV and its manifest.
+ * The CSV is consumed once and is never accumulated in memory; data
+ * descriptors let the archive emit each entry before its final checksum is
+ * known. Multi-domain bundles can compose this primitive at the application
+ * job boundary.
+ */
+export function createVersionedZipExport(options: VersionedZipExportOptions): VersionedZipExport {
+  const csvExport = createVersionedCsvExport(options);
+  const fileName = validateZipFileName(options.zipFileName ?? `${options.domain}.zip`);
+  // Acquire the CSV reader before the ZIP generator starts. An async
+  // generator's `return()` does not execute its `finally` block when it has
+  // never been started, so the wrapper must still be able to cancel the CSV
+  // stream when a client cancels the ZIP before its first pull.
+  const csvReader = csvExport.stream.getReader();
+  let csvCancelled = false;
+  let csvReaderReleased = false;
+  let generatorStarted = false;
+  const cancelCsv = async (): Promise<void> => {
+    if (csvCancelled) return;
+    csvCancelled = true;
+    try {
+      await csvReader.cancel("ZIP export cancelled");
+    } catch {
+      // Preserve the original stream error; cleanup is best effort.
+    }
+  };
+  const releaseCsvReader = (): void => {
+    if (csvReaderReleased) return;
+    csvReaderReleased = true;
+    csvReader.releaseLock();
+  };
+  const iterator = versionedZipChunks(csvExport, csvReader, cancelCsv, releaseCsvReader, () => {
+    generatorStarted = true;
+  });
+  const next = iterator.next.bind(iterator);
+  const returnIterator = iterator.return?.bind(iterator);
+  let reading = false;
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (reading) return;
+      reading = true;
+      try {
+        const result = await next();
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        controller.error(safeExportError(error));
+      } finally {
+        reading = false;
+      }
+    },
+    async cancel() {
+      try {
+        // Cancel the underlying CSV first. This also rejects its manifest if
+        // the ZIP generator has not started (or is waiting on a CSV pull).
+        await cancelCsv();
+        await returnIterator?.();
+      } catch {
+        // The stream is already cancelled; preserve the cancellation result.
+      } finally {
+        // An unstarted async generator does not run `finally`; release its
+        // reader explicitly in that only case. A started generator releases
+        // it from versionedZipChunks' finally block.
+        if (!generatorStarted) releaseCsvReader();
+      }
+    },
+  });
+  void csvExport.manifest.catch(() => undefined);
+  void csvExport.manifestJson.catch(() => undefined);
+  void csvExport.manifestSha256.catch(() => undefined);
+  return {
+    stream,
+    fileName,
+    contentType: "application/zip",
+    manifest: csvExport.manifest,
+    manifestJson: csvExport.manifestJson,
+    manifestSha256: csvExport.manifestSha256,
   };
 }

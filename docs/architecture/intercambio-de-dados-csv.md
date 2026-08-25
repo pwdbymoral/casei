@@ -101,6 +101,15 @@ O núcleo rejeita linhas sem `casei_id`, campos não declarados, valores que nã
 sejam strings/nulos, excesso de linhas/bytes/células e cancelamento do stream.
 `createVersionedCsvExport` aplica essa proteção sempre; não há opt-out na API
 pública, para que nenhum consumidor produza uma planilha executável por
-configuração acidental.
-Jobs, autorização no momento do download, proxy autenticado, ZIP completo e
-armazenamento temporário permanecem fora do pacote.
+configuração acidental. `createVersionedZipExport` compõe o CSV versionado e
+`manifest.json` em um ZIP armazenado (sem compressão), usando data descriptors,
+CRC-32 e diretório central para continuar emitindo o arquivo sem acumular o
+CSV. O manifesto é o mesmo objeto versionado e contém o checksum do CSV; o
+primitivo de pacote cobre um domínio por vez e o boundary de job pode compor
+vários domínios.
+
+Jobs, autorização no momento do download, proxy autenticado e armazenamento
+temporário permanecem fora do pacote. O download sensível usa o proxy
+autorizado descrito na decisão de armazenamento, revalidando sessão,
+membership, capacidade, espaço e estado do job a cada requisição; URL
+presignada bearer não é usada.

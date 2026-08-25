@@ -70,6 +70,11 @@ Templates possuem linha de exemplo separada ou documentação adjacente; dados d
 - CSV protege contra formula injection prefixando valores perigosos conforme política documentada, sem perder o valor lógico no manifesto.
 - Export completo inclui versão de schema, fuso, moeda, horário, filtros e checksums no manifesto.
 
+O núcleo `@casei/data` oferece CSV versionado e um ZIP streaming com o CSV e
+`manifest.json`; o ZIP usa checksums CRC-32 para as entradas e o manifesto
+registra SHA-256 do CSV. A composição de múltiplos domínios, jobs, storage e o
+proxy que revalida autorização pertencem à aplicação, não ao pacote puro.
+
 ## Privacidade e operação
 
 - Arquivo temporário é criptografado em trânsito e repouso, não vai para logs e expira automaticamente em até 24 horas.
