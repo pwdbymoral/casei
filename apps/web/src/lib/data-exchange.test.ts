@@ -178,6 +178,46 @@ describe("data exchange UI ports", () => {
     expect(exportState).toEqual({ pending: false, key: null });
   });
 
+  it("preserva a chave após falha, mas gera outra quando uma nova prévia muda o payload", async () => {
+    let rejectImport!: (reason?: unknown) => void;
+    const failedImport = new Promise<string>((_, reject) => {
+      rejectImport = reject;
+    });
+    const importAdapter = { startImport: vi.fn((_key: string) => failedImport) };
+    const importState = { pending: false, key: null as string | null };
+    const failedOperation = beginDataExchangeOperation(
+      importState,
+      "import",
+      () => "first-import",
+      (key) => importAdapter.startImport(key),
+    );
+
+    if (!failedOperation.started) throw new Error("import operation did not start");
+    rejectImport(new Error("network uncertainty"));
+    await expect(failedOperation.promise).rejects.toThrow("network uncertainty");
+    expect(importState.key).toBe("import-first-import");
+
+    // A successful new preview/mapping/policy change invalidates the old payload.
+    importState.key = null;
+    let resolveNewImport!: (value: string) => void;
+    const newImport = new Promise<string>((resolve) => {
+      resolveNewImport = resolve;
+    });
+    importAdapter.startImport.mockReturnValueOnce(newImport);
+    const nextOperation = beginDataExchangeOperation(
+      importState,
+      "import",
+      () => "second-import",
+      (key) => importAdapter.startImport(key),
+    );
+
+    if (!nextOperation.started) throw new Error("new import operation did not start");
+    expect(nextOperation.key).toBe("import-second-import");
+    expect(importAdapter.startImport).toHaveBeenCalledTimes(2);
+    resolveNewImport("imported");
+    await expect(nextOperation.promise).resolves.toBe("imported");
+  });
+
   it("exige uma nova prévia server-backed depois de revisar CSV offline", async () => {
     vi.stubGlobal("navigator", { onLine: false });
     try {

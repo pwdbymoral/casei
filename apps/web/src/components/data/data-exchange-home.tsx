@@ -186,6 +186,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [applyMode, setApplyMode] = useState<ImportApplyMode>("valid_only");
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importPending, setImportPending] = useState(false);
   const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
@@ -196,7 +197,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [exportFrom, setExportFrom] = useState("");
   const [exportTo, setExportTo] = useState("");
   const [activeExport, setActiveExport] = useState<ExportJob | null>(null);
-  const importIdempotencyKey = useRef<string | null>(null);
+  const importOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
 
@@ -280,7 +281,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setPreviewError(null);
     setImportJob(null);
     setImportError(null);
-    importIdempotencyKey.current = null;
+    importOperation.current.key = null;
     retryOperation.current.key = null;
   }
 
@@ -293,6 +294,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       setPreview(next);
       setMapping({ ...next.mapping });
       setMappingDirty(false);
+      importOperation.current.key = null;
       setPreviewStatus("success");
     } catch (error) {
       setPreviewStatus(errorStatus(error));
@@ -302,26 +304,34 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
 
   function changeMapping(field: string, value: string) {
     setMapping((current) => ({ ...current, [field]: value }));
+    importOperation.current.key = null;
     setMappingDirty(true);
     setPreviewStatus("success");
   }
 
   async function startImport() {
     if (!file || !preview || !canConfirmImport || !importAllowed || !online) return;
-    setImportError(null);
-    setImportJob(null);
-    const key = importIdempotencyKey.current ?? `import-${crypto.randomUUID()}`;
-    importIdempotencyKey.current = key;
-    try {
-      setImportJob(
-        await adapter.startImport(
+    const operation = beginDataExchangeOperation(
+      importOperation.current,
+      "import",
+      () => crypto.randomUUID(),
+      (key) =>
+        adapter.startImport(
           workspaceId,
           { preview, file, mapping, duplicatePolicy, applyMode },
           key,
         ),
-      );
+    );
+    if (!operation.started) return;
+    setImportPending(true);
+    setImportError(null);
+    setImportJob(null);
+    try {
+      setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
+    } finally {
+      setImportPending(false);
     }
   }
 
@@ -480,11 +490,11 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   id="import-domain"
                   className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                   value={domain}
-                  disabled={!importAllowed || importJob?.status === "processing"}
+                  disabled={!importAllowed || importPending || importJob?.status === "processing"}
                   onChange={(event) => {
                     setDomain(event.target.value as typeof domain);
                     setPreview(null);
-                    importIdempotencyKey.current = null;
+                    importOperation.current.key = null;
                   }}
                 >
                   <option value="transactions">Transações</option>
@@ -498,7 +508,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   type="file"
                   accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="min-h-11 cursor-pointer py-2"
-                  disabled={!importAllowed || importJob?.status === "processing"}
+                  disabled={!importAllowed || importPending || importJob?.status === "processing"}
                   onChange={chooseFile}
                 />
                 <FieldDescription>
@@ -520,7 +530,8 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       setFile(null);
                       setPreview(null);
                       setPreviewStatus("idle");
-                      importIdempotencyKey.current = null;
+                      importOperation.current.key = null;
+                      retryOperation.current.key = null;
                     }}
                   >
                     <XIcon data-icon="inline-start" aria-hidden="true" /> Remover
@@ -538,7 +549,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     onChange={(event) => {
                       setLocale(event.target.value as ImportLocale);
                       setPreview(null);
-                      importIdempotencyKey.current = null;
+                      importOperation.current.key = null;
                     }}
                   >
                     <option value="pt-BR">Brasil (dd/mm/aaaa)</option>
@@ -549,7 +560,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   <Button
                     type="button"
                     className="min-h-11 w-full"
-                    disabled={!file || !importAllowed || previewStatus === "loading"}
+                    disabled={
+                      !file || !importAllowed || importPending || previewStatus === "loading"
+                    }
                     onClick={() => void previewFile()}
                   >
                     {previewStatus === "loading" ? (
@@ -722,9 +735,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       id="duplicate-policy"
                       className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       value={duplicatePolicy}
-                      onChange={(event) =>
-                        setDuplicatePolicy(event.target.value as DuplicatePolicy)
-                      }
+                      onChange={(event) => {
+                        setDuplicatePolicy(event.target.value as DuplicatePolicy);
+                        importOperation.current.key = null;
+                      }}
                     >
                       <option value="ignore">Ignorar e registrar</option>
                       <option value="import">Importar mesmo assim</option>
@@ -737,7 +751,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       id="import-mode"
                       className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       value={applyMode}
-                      onChange={(event) => setApplyMode(event.target.value as ImportApplyMode)}
+                      onChange={(event) => {
+                        setApplyMode(event.target.value as ImportApplyMode);
+                        importOperation.current.key = null;
+                      }}
                     >
                       <option value="valid_only">Importar somente válidas</option>
                       <option value="all_or_nothing">Tudo ou nada</option>
@@ -751,6 +768,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     disabled={
                       !canConfirmImport ||
                       !importAllowed ||
+                      importPending ||
                       !online ||
                       Boolean(importJob && !terminalImport(importJob))
                     }
