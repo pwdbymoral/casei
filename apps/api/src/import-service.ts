@@ -229,6 +229,13 @@ export class ImportApplication {
     ) {
       throw new ImportConflictError("As contagens da prévia não conferem.");
     }
+    const duplicateLines = input.request.acceptedDuplicateLines;
+    if (
+      new Set(duplicateLines).size !== duplicateLines.length ||
+      duplicateLines.some((line) => line < 2 || line > input.request.totalRows + 1)
+    ) {
+      throw new ImportConflictError("As linhas de duplicata confirmadas são inválidas.");
+    }
     if (
       input.request.duplicatePolicy === "review" &&
       input.request.acceptedDuplicateLines.length === 0
@@ -493,6 +500,7 @@ export class PostgresImportStore implements ImportStore {
               total_rows, valid_rows, duplicate_rows, invalid_rows, batch_size, expires_at, correlation_id)
            VALUES ($1, $2, 'import', $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
                    $12, $13, $14, $15, $16, $17, $18)
+           ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
            RETURNING id`,
           [
             input.workspaceId,
@@ -515,6 +523,14 @@ export class PostgresImportStore implements ImportStore {
             input.correlationId,
           ],
         );
+        if (!created.rows[0]) {
+          const concurrent = await client.query<ImportJobRow>(
+            `SELECT * FROM "import_job"
+             WHERE workspace_id = $1 AND idempotency_key = $2`,
+            [input.workspaceId, input.idempotencyKey],
+          );
+          if (concurrent.rows[0]) return mapImportJob(concurrent.rows[0]);
+        }
         const importJobId = created.rows[0]?.id;
         if (!importJobId) throw new Error("Import job was not created.");
         const queued = await client.query<{ id: string }>(
@@ -541,6 +557,23 @@ export class PostgresImportStore implements ImportStore {
         );
         const row = linked.rows[0];
         if (!row) throw new Error("Import job link was not persisted.");
+        await client.query(
+          `INSERT INTO audit_event
+             (category, action, actor_id, workspace_id, target_type, target_id, origin,
+              correlation_id, result, after_redacted)
+           VALUES ('data', 'import.created', $1, $2, 'import_job', $3, 'api', $4, 'success', $5::jsonb)`,
+          [
+            input.actorId,
+            input.workspaceId,
+            importJobId,
+            input.correlationId,
+            JSON.stringify({
+              domain: input.request.domain,
+              totalRows: input.request.totalRows,
+              sourceHash: input.request.sourceHash,
+            }),
+          ],
+        );
         return mapImportJob(row);
       },
     );
@@ -650,6 +683,13 @@ export class PostgresImportStore implements ImportStore {
                 WHERE id = $1 AND workspace_id = $2 AND state IN ('queued', 'running', 'failed')`,
               [job.id, job.workspaceId],
             );
+            await client.query(
+              `INSERT INTO audit_event
+                 (category, action, actor_id, workspace_id, target_type, target_id, origin,
+                  correlation_id, result)
+               VALUES ('data', 'import.reversed', $1, $2, 'import_job', $3, 'worker', $4, 'success')`,
+              [job.actorId, job.workspaceId, job.id, job.correlationId],
+            );
           },
         };
         return callback(context);
@@ -757,6 +797,19 @@ export class PostgresImportStore implements ImportStore {
           if (!current.rows[0]) throw new ImportConflictError("Importação não encontrada.");
           return mapImportJob(current.rows[0]);
         }
+        await client.query(
+          `INSERT INTO audit_event
+             (category, action, actor_id, workspace_id, target_type, target_id, origin,
+              correlation_id, result)
+           VALUES ('data', $1, $2, $3, 'import_job', $4, 'api', $5, 'success')`,
+          [
+            state === "cancel_requested" ? "import.cancel_requested" : "import.cancelled",
+            result.rows[0].actor_id,
+            result.rows[0].workspace_id,
+            result.rows[0].id,
+            result.rows[0].correlation_id,
+          ],
+        );
         return mapImportJob(result.rows[0]);
       },
     );
