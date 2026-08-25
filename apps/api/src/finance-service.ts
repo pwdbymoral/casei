@@ -1645,10 +1645,17 @@ export class FinanceService {
               state: string;
               description: string;
             }>(
-              `SELECT id, card_id, amount_minor, settled_minor, currency_code, kind, state, description
-                 FROM finance_transaction
-                WHERE workspace_id = $1 AND id = $2
-                FOR SHARE`,
+              `SELECT t.id, t.card_id, t.amount_minor, t.settled_minor, t.currency_code,
+                      t.kind, t.state, t.description
+                 FROM finance_transaction t
+                WHERE t.workspace_id = $1 AND t.id = $2
+                  AND NOT EXISTS (
+                    SELECT 1
+                      FROM card_statement_adjustment a
+                     WHERE a.workspace_id = t.workspace_id
+                       AND a.transaction_id = t.id
+                  )
+                FOR UPDATE`,
               [scope.workspaceId, input.sourceTransactionId],
             );
             source = sourceResult.rows[0] ?? null;
@@ -1908,6 +1915,17 @@ export class FinanceService {
       async (client, row) => {
         if (row.state !== "posted" && row.state !== "partially_settled") {
           throw new FinanceConflictError("A transação não está realizada.");
+        }
+        const statementAdjustment = await client.query<{ kind: string }>(
+          `SELECT kind
+             FROM card_statement_adjustment
+            WHERE workspace_id = $1 AND transaction_id = $2`,
+          [scope.workspaceId, id],
+        );
+        if (statementAdjustment.rows[0]) {
+          throw new FinanceConflictError(
+            "Este lançamento é um ajuste da fatura; abra a fatura e registre a correção correspondente.",
+          );
         }
         const original = await client.query<{
           id: string;

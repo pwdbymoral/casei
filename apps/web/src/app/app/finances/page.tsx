@@ -191,6 +191,7 @@ function FinanceDashboard({
   const [statementAdjustmentDescription, setStatementAdjustmentDescription] = useState("");
   const [statementRefundSourceId, setStatementRefundSourceId] = useState<string | null>(null);
   const [savingStatementAdjustment, setSavingStatementAdjustment] = useState(false);
+  const [statementAdjustmentError, setStatementAdjustmentError] = useState<string | null>(null);
   const [statementItemsRequest] = useState(createRequestGuard);
   const [transactionAuditRequest] = useState(createRequestGuard);
   const [transactionAuditDetailRequest] = useState(createRequestGuard);
@@ -247,6 +248,7 @@ function FinanceDashboard({
   const recurrenceCommandKey = useRef<string | null>(null);
   const installmentCommandKey = useRef<string | null>(null);
   const walletAdjustmentCommandKey = useRef<string | null>(null);
+  const statementAdjustmentCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
   const writeAccess = canWriteFinance(role);
   const today = civilDateInTimeZone(new Date(), timeZone);
@@ -353,6 +355,7 @@ function FinanceDashboard({
     setArchivingCardId(null);
     setBusyStatementId(null);
     setPendingStatementAction(null);
+    setStatementAdjustmentError(null);
     setUndoableTransaction(null);
     setSettlingTransaction(null);
     setSettlementAmount("");
@@ -370,6 +373,7 @@ function FinanceDashboard({
     setSavingWalletAdjustment(false);
     setWalletAdjustmentConfirmed(false);
     walletAdjustmentCommandKey.current = null;
+    statementAdjustmentCommandKey.current = null;
     setSettling(false);
     setSavingRecurrence(false);
     setSavingInstallment(false);
@@ -1081,34 +1085,50 @@ function FinanceDashboard({
     if (!visibleViewingStatement || !statementAdjustmentMode || savingStatementAdjustment) return;
     const amountMinor = statementAdjustmentAmount.replace(/\D/g, "") || "0";
     if (BigInt(amountMinor) <= BigInt(0)) {
-      setError("Informe um valor positivo para o ajuste.");
+      setStatementAdjustmentError("Informe um valor positivo para o ajuste.");
       return;
     }
     if (statementAdjustmentMode === "adjustment" && !statementAdjustmentDescription.trim()) {
-      setError("Descreva a tarifa, juros ou cobrança para manter a origem explicável.");
+      setStatementAdjustmentError(
+        "Descreva a tarifa, juros ou cobrança para manter a origem explicável.",
+      );
       return;
     }
     if (statementAdjustmentMode === "refund" && !statementRefundSourceId) {
-      setError("Selecione a compra que originou o estorno.");
+      setStatementAdjustmentError("Selecione a compra que originou o estorno.");
       return;
     }
     setSavingStatementAdjustment(true);
-    setError(null);
+    setStatementAdjustmentError(null);
     const workspaceRequest = workspaceRequests.begin(workspaceId);
+    const commandKey =
+      statementAdjustmentCommandKey.current ?? `web-statement-adjustment-${crypto.randomUUID()}`;
+    statementAdjustmentCommandKey.current = commandKey;
     try {
       const result =
         statementAdjustmentMode === "adjustment"
-          ? await adapter.createStatementAdjustment(workspaceId, visibleViewingStatement, {
-              kind: statementAdjustmentKind,
-              amount: { currency, minor: amountMinor },
-              description: statementAdjustmentDescription.trim(),
-            })
-          : await adapter.createStatementRefund(workspaceId, visibleViewingStatement, {
-              sourceTransactionId: statementRefundSourceId as string,
-              amount: { currency, minor: amountMinor },
-              description: statementAdjustmentDescription.trim() || undefined,
-            });
+          ? await adapter.createStatementAdjustment(
+              workspaceId,
+              visibleViewingStatement,
+              {
+                kind: statementAdjustmentKind,
+                amount: { currency, minor: amountMinor },
+                description: statementAdjustmentDescription.trim(),
+              },
+              commandKey,
+            )
+          : await adapter.createStatementRefund(
+              workspaceId,
+              visibleViewingStatement,
+              {
+                sourceTransactionId: statementRefundSourceId as string,
+                amount: { currency, minor: amountMinor },
+                description: statementAdjustmentDescription.trim() || undefined,
+              },
+              commandKey,
+            );
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+      statementAdjustmentCommandKey.current = null;
       setStatements((current) =>
         current.map((item) => (item.id === result.statement.id ? result.statement : item)),
       );
@@ -1117,6 +1137,7 @@ function FinanceDashboard({
       setStatementRefundSourceId(null);
       setStatementAdjustmentAmount("0");
       setStatementAdjustmentDescription("");
+      setStatementAdjustmentError(null);
       setNotice(
         statementAdjustmentMode === "refund"
           ? "Estorno registrado na fatura."
@@ -1125,7 +1146,10 @@ function FinanceDashboard({
       void loadStatementItems(result.statement.id, undefined, false);
     } catch (cause) {
       if (!workspaceRequests.isCurrent(workspaceRequest)) return;
-      setError(cause instanceof Error ? cause.message : "Não foi possível registrar o ajuste.");
+      if (!shouldRetryIdempotentCommand(cause)) statementAdjustmentCommandKey.current = null;
+      setStatementAdjustmentError(
+        cause instanceof Error ? cause.message : "Não foi possível registrar o ajuste.",
+      );
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingStatementAdjustment(false);
     }
@@ -3008,11 +3032,13 @@ function FinanceDashboard({
             setViewingStatement(null);
             setStatementAdjustmentMode(null);
             setStatementRefundSourceId(null);
+            setStatementAdjustmentError(null);
+            statementAdjustmentCommandKey.current = null;
             clearDeepLinkParam("statement");
           }
         }}
       >
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Composição da fatura</DialogTitle>
             <DialogDescription>
@@ -3109,6 +3135,8 @@ function FinanceDashboard({
                               size="sm"
                               className="ml-2"
                               onClick={() => {
+                                statementAdjustmentCommandKey.current = null;
+                                setStatementAdjustmentError(null);
                                 setStatementRefundSourceId(item.transactionId);
                                 setStatementAdjustmentAmount(item.amount.minor);
                                 setStatementAdjustmentDescription("");
@@ -3131,6 +3159,8 @@ function FinanceDashboard({
                     variant="outline"
                     size="sm"
                     onClick={() => {
+                      statementAdjustmentCommandKey.current = null;
+                      setStatementAdjustmentError(null);
                       setStatementAdjustmentMode("adjustment");
                       setStatementRefundSourceId(null);
                     }}
@@ -3149,6 +3179,12 @@ function FinanceDashboard({
                       ? "Registrar estorno"
                       : "Adicionar ajuste"}
                   </p>
+                  {statementAdjustmentError ? (
+                    <Alert variant="destructive" role="alert">
+                      <AlertTitle>Não foi possível concluir</AlertTitle>
+                      <AlertDescription>{statementAdjustmentError}</AlertDescription>
+                    </Alert>
+                  ) : null}
                   {statementAdjustmentMode === "adjustment" ? (
                     <Field>
                       <FieldLabel htmlFor="statement-adjustment-kind">Tipo</FieldLabel>
@@ -3198,7 +3234,11 @@ function FinanceDashboard({
                     <Button
                       type="button"
                       variant="ghost"
-                      onClick={() => setStatementAdjustmentMode(null)}
+                      onClick={() => {
+                        setStatementAdjustmentMode(null);
+                        setStatementAdjustmentError(null);
+                        statementAdjustmentCommandKey.current = null;
+                      }}
                     >
                       Cancelar
                     </Button>

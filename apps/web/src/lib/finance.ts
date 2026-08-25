@@ -1352,6 +1352,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           return previous.transaction;
         }
       }
+      if (state.statementAdjustments.has(current.id)) {
+        throw new FinanceAdapterError(
+          "Este lançamento é um ajuste da fatura; abra a fatura e registre a correção correspondente.",
+          409,
+        );
+      }
       if (current.state === "canceled") return current;
       const value = { ...current, state: "canceled" as const, version: current.version + 1 };
       state.transactions[state.transactions.indexOf(current)] = value;
@@ -1672,13 +1678,6 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.statements.find(({ id }) => id === statement.id);
       if (!current) throw new FinanceAdapterError("Fatura não encontrada.", 404);
-      if (current.version !== statement.version) {
-        throw new FinanceAdapterError(
-          "A fatura foi alterada por outra pessoa.",
-          412,
-          current.version,
-        );
-      }
       const fingerprint = JSON.stringify({ statementId: statement.id, input });
       if (commandKey) {
         const previous = state.statementAdjustmentCommands.get(commandKey);
@@ -1688,6 +1687,13 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           }
           return previous.response;
         }
+      }
+      if (current.version !== statement.version) {
+        throw new FinanceAdapterError(
+          "A fatura foi alterada por outra pessoa.",
+          412,
+          current.version,
+        );
       }
       if (input.amount.currency !== current.total.currency) {
         throw new FinanceAdapterError("A moeda do ajuste não corresponde à fatura.", 422);
@@ -1741,9 +1747,18 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     },
     createStatementRefund: async (workspaceId, statement, input, commandKey) => {
       const state = stateFor(workspaceId);
-      const source = state.transactions.find((item) => item.id === input.sourceTransactionId);
       const current = state.statements.find(({ id }) => id === statement.id);
       if (!current) throw new FinanceAdapterError("Fatura não encontrada.", 404);
+      const fingerprint = JSON.stringify({ statementId: statement.id, input });
+      if (commandKey) {
+        const previous = state.statementAdjustmentCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro estorno.", 409);
+          }
+          return previous.response;
+        }
+      }
       if (current.version !== statement.version) {
         throw new FinanceAdapterError(
           "A fatura foi alterada por outra pessoa.",
@@ -1751,7 +1766,14 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           current.version,
         );
       }
-      if (!source || source.cardId !== current.cardId || source.kind !== "expense") {
+      const source = state.transactions.find((item) => item.id === input.sourceTransactionId);
+      if (
+        !source ||
+        state.statementAdjustments.has(source.id) ||
+        source.cardId !== current.cardId ||
+        source.kind !== "expense" ||
+        (source.state !== "posted" && source.state !== "partially_settled")
+      ) {
         throw new FinanceAdapterError("A compra original não pertence a este cartão.", 409);
       }
       const previousRefunds = [...state.statementAdjustments.entries()]
@@ -1765,16 +1787,6 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       }
       if (input.amount.currency !== current.total.currency) {
         throw new FinanceAdapterError("A moeda do estorno não corresponde à fatura.", 422);
-      }
-      const fingerprint = JSON.stringify({ statementId: statement.id, input });
-      if (commandKey) {
-        const previous = state.statementAdjustmentCommands.get(commandKey);
-        if (previous) {
-          if (previous.fingerprint !== fingerprint) {
-            throw new FinanceAdapterError("A chave já foi usada para outro estorno.", 409);
-          }
-          return previous.response;
-        }
       }
       const amountMinor = BigInt(input.amount.minor);
       const nextTotal = BigInt(current.total.minor) - amountMinor;

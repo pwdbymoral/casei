@@ -260,6 +260,153 @@ describe("FIN-002 wallet PostgreSQL", () => {
   );
 });
 
+describe("CARD-003 statement adjustment PostgreSQL", () => {
+  integrationIt(
+    "serializes concurrent partial refunds and rejects adjustment chaining/reversal",
+    async () => {
+      const fixture = await createFixture();
+      try {
+        const identity = new IdentityService(fixture.pool);
+        const onboarding = await identity.createOnboarding(
+          { userId: fixture.actorId, email: fixture.email },
+          {
+            displayName: "Card owner",
+            workspaceName: "Casa cartão",
+            currency: "BRL",
+            timeZone: "America/Fortaleza",
+            includeInitialBalance: false,
+            initialBalanceMinor: "0",
+          },
+          "card-onboarding-integration-001",
+          "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        );
+        const scope = {
+          workspaceId: onboarding.workspace.id,
+          actorId: fixture.actorId,
+          role: "owner" as const,
+          correlationId: "01ARZ3NDEKTSV4RRQ69G5FB0",
+        };
+        const finance = new FinanceService(fixture.pool, {
+          cursorSecret: "card-integration-secret",
+          clock: { now: () => new Date("2030-01-10T12:00:00.000Z") },
+        });
+        const cardResult = await finance.createCard(
+          scope,
+          { name: "Cartão principal", closingDay: 10, dueDay: 17 },
+          "card-create-integration-001",
+        );
+        const card = cardResult.response as unknown as { id: string };
+        const purchase = await finance.createCardPurchase(
+          scope,
+          {
+            amount: { currency: "BRL", minor: "1000" },
+            occurredOn: "2030-01-05",
+            description: "Compra original",
+            cardId: card.id,
+          },
+          "card-purchase-integration-001",
+        );
+        const firstStatement = (await finance.listStatements(scope, card.id))[0];
+        expect(firstStatement).toBeTruthy();
+        if (!firstStatement) throw new Error("expected an open statement");
+        await finance.createCardPurchase(
+          scope,
+          {
+            amount: { currency: "BRL", minor: "1000" },
+            occurredOn: "2030-01-11",
+            description: "Compra de outro ciclo",
+            cardId: card.id,
+          },
+          "card-purchase-integration-002",
+        );
+        const secondStatement = (await finance.listStatements(scope, card.id)).find(
+          (candidate) => candidate.id !== firstStatement.id,
+        );
+        expect(secondStatement).toBeTruthy();
+        if (!secondStatement) throw new Error("expected a second open statement");
+
+        const attempts = await Promise.allSettled([
+          finance.createStatementRefund(
+            scope,
+            firstStatement.id,
+            {
+              sourceTransactionId: purchase.transaction.id,
+              amount: { currency: "BRL", minor: "700" },
+            },
+            "card-refund-integration-a",
+            firstStatement.version,
+          ),
+          finance.createStatementRefund(
+            scope,
+            secondStatement.id,
+            {
+              sourceTransactionId: purchase.transaction.id,
+              amount: { currency: "BRL", minor: "700" },
+            },
+            "card-refund-integration-b",
+            secondStatement.version,
+          ),
+        ]);
+        const fulfilled = attempts.filter(
+          (
+            attempt,
+          ): attempt is PromiseFulfilledResult<
+            Awaited<ReturnType<FinanceService["createStatementRefund"]>>
+          > => attempt.status === "fulfilled",
+        );
+        const rejected = attempts.filter(
+          (attempt): attempt is PromiseRejectedResult => attempt.status === "rejected",
+        );
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0]?.reason).toMatchObject({
+          code: "conflict",
+          message: "O estorno excede o saldo ainda não estornado da compra.",
+        });
+        const winner = fulfilled[0]?.value;
+        if (!winner) throw new Error("one refund should win");
+        const refunds = await fixture.pool.query<{ count: string; total: string }>(
+          `SELECT count(*)::text AS count, COALESCE(SUM(-amount_minor), 0)::text AS total
+             FROM card_statement_adjustment
+            WHERE workspace_id = $1 AND source_transaction_id = $2 AND kind = 'refund'`,
+          [scope.workspaceId, purchase.transaction.id],
+        );
+        expect(refunds.rows).toEqual([{ count: "1", total: "700" }]);
+
+        await expect(
+          finance.createStatementRefund(
+            scope,
+            winner.response.statement.id,
+            {
+              sourceTransactionId: winner.response.transaction.id,
+              amount: { currency: "BRL", minor: "10" },
+            },
+            "card-refund-from-refund-integration-001",
+            winner.response.statement.version,
+          ),
+        ).rejects.toMatchObject({
+          name: "FinanceConflictError",
+          message: "O estorno precisa apontar para uma compra realizada deste cartão.",
+        });
+        await expect(
+          finance.reverseTransaction(
+            scope,
+            winner.response.transaction.id,
+            "card-reverse-adjustment-integration-001",
+            winner.response.transaction.version,
+          ),
+        ).rejects.toMatchObject({
+          name: "FinanceConflictError",
+          message:
+            "Este lançamento é um ajuste da fatura; abra a fatura e registre a correção correspondente.",
+        });
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+});
+
 async function createFixture() {
   if (!adminUrl) throw new Error("DATABASE_URL_TEST is required");
   const adminPool = getDatabasePool({ connectionString: adminUrl });
