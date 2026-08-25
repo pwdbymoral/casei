@@ -192,6 +192,47 @@ export function createHttpLoansAdapter(
 
 type FixtureLoansAdapter = LoansAdapter;
 
+type FixtureCommand = {
+  fingerprint: string;
+  result: Loan | LoanPaymentResponse;
+};
+
+function createLoanFingerprint(input: CreateLoanInput): string {
+  return JSON.stringify({
+    direction: input.direction,
+    counterparty: input.counterparty.trim(),
+    principal: {
+      currency: input.principal.currency,
+      minor: input.principal.minor,
+    },
+    occurredOn: input.occurredOn ?? null,
+    dueOn: input.dueOn ?? null,
+  });
+}
+
+function paymentFingerprint(loan: Loan, input: LoanPaymentInput): string {
+  return JSON.stringify({
+    loanId: loan.id,
+    amount: {
+      currency: input.amount.currency,
+      minor: input.amount.minor,
+    },
+    occurredOn: input.occurredOn ?? null,
+  });
+}
+
+function idempotencyConflict(): LoansAdapterError {
+  return new LoansAdapterError("A chave de idempotência já foi usada com dados diferentes.", 409);
+}
+
+function compareLoanPayments(left: LoanPayment, right: LoanPayment): number {
+  return right.occurredOn.localeCompare(left.occurredOn) || right.id.localeCompare(left.id);
+}
+
+export function upsertLoanPayment(history: LoanPayment[], payment: LoanPayment): LoanPayment[] {
+  return [...history.filter((item) => item.id !== payment.id), payment].sort(compareLoanPayments);
+}
+
 export async function listAllLoanPayments(
   adapter: Pick<LoansAdapter, "listPayments">,
   workspaceId: string,
@@ -264,7 +305,7 @@ function fixtureLoan(workspaceId: string, id: string, values: Partial<Loan> = {}
 export function createFixtureLoansAdapter(): FixtureLoansAdapter {
   const loans = new Map<string, Loan[]>();
   const payments = new Map<string, LoanPayment[]>();
-  const commands = new Map<string, Loan | LoanPaymentResponse>();
+  const commands = new Map<string, FixtureCommand>();
   let sequence = 0;
 
   const list = (workspaceId: string): Loan[] => {
@@ -321,8 +362,15 @@ export function createFixtureLoansAdapter(): FixtureLoansAdapter {
     },
     async createLoan(workspaceId, input, commandKey) {
       if (commandKey) {
-        const replay = commands.get(`create:${workspaceId}:${commandKey}`);
-        if (replay && "direction" in replay) return copyLoan(replay);
+        const commandId = `create:${workspaceId}:${commandKey}`;
+        const replay = commands.get(commandId);
+        if (replay) {
+          if (replay.fingerprint !== createLoanFingerprint(input)) {
+            throw idempotencyConflict();
+          }
+          if ("direction" in replay.result) return copyLoan(replay.result);
+          throw idempotencyConflict();
+        }
       }
       const principalMinor = BigInt(input.principal.minor);
       if (principalMinor <= BigInt(0)) {
@@ -345,15 +393,30 @@ export function createFixtureLoansAdapter(): FixtureLoansAdapter {
         dueOn: input.dueOn ?? null,
       });
       list(workspaceId).push(created);
-      if (commandKey) commands.set(`create:${workspaceId}:${commandKey}`, created);
+      if (commandKey) {
+        commands.set(`create:${workspaceId}:${commandKey}`, {
+          fingerprint: createLoanFingerprint(input),
+          result: created,
+        });
+      }
       return copyLoan(created);
     },
     async payLoan(workspaceId, loan, input, commandKey) {
       const commandId = commandKey ? `payment:${workspaceId}:${commandKey}` : null;
       if (commandId) {
         const replay = commands.get(commandId);
-        if (replay && "payment" in replay)
-          return { loan: copyLoan(replay.loan), payment: copyPayment(replay.payment) };
+        if (replay) {
+          if (replay.fingerprint !== paymentFingerprint(loan, input)) {
+            throw idempotencyConflict();
+          }
+          if ("payment" in replay.result) {
+            return {
+              loan: copyLoan(replay.result.loan),
+              payment: copyPayment(replay.result.payment),
+            };
+          }
+          throw idempotencyConflict();
+        }
       }
       const current = assertLoan(workspaceId, loan.id);
       if (current.version !== loan.version) {
@@ -401,16 +464,17 @@ export function createFixtureLoansAdapter(): FixtureLoansAdapter {
       const index = list(workspaceId).findIndex((item) => item.id === current.id);
       list(workspaceId)[index] = next;
       const historyKey = `${workspaceId}:${current.id}`;
-      payments.set(historyKey, [...(payments.get(historyKey) ?? []), payment]);
+      payments.set(historyKey, upsertLoanPayment(payments.get(historyKey) ?? [], payment));
       const response = { loan: next, payment };
-      if (commandId) commands.set(commandId, response);
+      if (commandId) {
+        commands.set(commandId, { fingerprint: paymentFingerprint(loan, input), result: response });
+      }
       return { loan: copyLoan(next), payment: copyPayment(payment) };
     },
     async listPayments(workspaceId, loanId, query = {}) {
       assertLoan(workspaceId, loanId);
       const ordered = [...(payments.get(`${workspaceId}:${loanId}`) ?? [])].sort(
-        (left, right) =>
-          right.occurredOn.localeCompare(left.occurredOn) || right.id.localeCompare(left.id),
+        compareLoanPayments,
       );
       const start = query.cursor
         ? ordered.findIndex((payment) => payment.id === query.cursor) + 1

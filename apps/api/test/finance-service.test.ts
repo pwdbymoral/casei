@@ -6,7 +6,7 @@ import {
   FinanceConflictError,
   FinanceService,
 } from "../src/finance-service.js";
-import { decodeCursor } from "../src/http/cursor.js";
+import { decodeCursor, InvalidCursorError } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
   it("paginates loan payments with a signed cursor inside the workspace", async () => {
@@ -17,8 +17,8 @@ describe("finance command guards", () => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
         if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
         if (sql.includes("SELECT id FROM loan_contract")) {
-          expect(values).toEqual([workspaceId, loanId]);
-          return { rows: [{ id: loanId }] };
+          expect(values?.[1]).toBeTruthy();
+          return { rows: [{ id: values?.[1] as string }] };
         }
         if (sql.includes("FROM loan_payment")) {
           expect(sql).toContain("workspace_id = $1 AND loan_id = $2");
@@ -76,8 +76,32 @@ describe("finance command guards", () => {
     if (!nextCursor) throw new Error("expected a next cursor");
     expect(decodeCursor(nextCursor, "loan-payment-test-secret")).toEqual({
       ordering: "occurred_on,id:desc",
-      position: ["2026-08-22", "0190f3c8-2a10-7abc-8def-1234567890b2"],
+      position: [workspaceId, loanId, "2026-08-22", "0190f3c8-2a10-7abc-8def-1234567890b2"],
     });
+    await expect(
+      service.listLoanPayments(
+        {
+          workspaceId,
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "viewer",
+        },
+        "0190f3c8-2a10-7abc-8def-1234567890ad",
+        { cursor: nextCursor, limit: 2 },
+      ),
+    ).rejects.toBeInstanceOf(InvalidCursorError);
+    await expect(
+      service.listLoanPayments(
+        {
+          workspaceId: "0190f3c8-2a10-7abc-8def-1234567890ae",
+          actorId: "user-1",
+          correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          role: "viewer",
+        },
+        loanId,
+        { cursor: nextCursor, limit: 2 },
+      ),
+    ).rejects.toBeInstanceOf(InvalidCursorError);
   });
 
   it("turns a concurrent active category name collision into a recoverable conflict", async () => {

@@ -508,7 +508,7 @@ export class FinanceService {
 
       const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
       const cursor = options.cursor
-        ? decodeLoanPaymentCursor(options.cursor, this.cursorSecret)
+        ? decodeLoanPaymentCursor(options.cursor, this.cursorSecret, scope.workspaceId, loanId)
         : null;
       const values: unknown[] = [scope.workspaceId, loanId];
       const conditions = ["workspace_id = $1", "loan_id = $2"];
@@ -535,7 +535,7 @@ export class FinanceService {
             ? encodeCursor(
                 {
                   ordering: loanPaymentCursorOrdering,
-                  position: [last.occurred_on, last.id],
+                  position: [scope.workspaceId, loanId, last.occurred_on, last.id],
                 },
                 this.cursorSecret,
               )
@@ -3222,19 +3222,32 @@ function decodeFinanceAuditCursor(cursor: string, secret: string): FinanceAuditC
   return [occurredAt, id];
 }
 
-function decodeLoanPaymentCursor(cursor: string, secret: string): LoanPaymentCursorPosition {
+function decodeLoanPaymentCursor(
+  cursor: string,
+  secret: string,
+  workspaceId: string,
+  loanId: string,
+): LoanPaymentCursorPosition {
   const payload = decodeCursor(cursor, secret);
   const position = payload.position;
   if (
     payload.ordering !== loanPaymentCursorOrdering ||
     !Array.isArray(position) ||
-    position.length !== 2 ||
+    position.length !== 4 ||
     position.some((value) => typeof value !== "string")
   ) {
     throw new InvalidCursorError();
   }
-  const [occurredOn, id] = position as [string, string];
+  const [cursorWorkspaceId, cursorLoanId, occurredOn, id] = position as [
+    string,
+    string,
+    string,
+    string,
+  ];
   if (!parseLocalDate(occurredOn).ok || !domainIdSchema.safeParse(id).success) {
+    throw new InvalidCursorError();
+  }
+  if (cursorWorkspaceId !== workspaceId || cursorLoanId !== loanId) {
     throw new InvalidCursorError();
   }
   return [occurredOn, id];

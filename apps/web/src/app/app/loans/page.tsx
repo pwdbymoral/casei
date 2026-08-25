@@ -42,6 +42,7 @@ import {
   loanProgressPercent,
   loanStatusLabel,
   loansAdapterForEnvironment,
+  upsertLoanPayment,
 } from "@/lib/loans";
 import { formatMoneyMinor } from "@/lib/money";
 
@@ -424,10 +425,7 @@ export default function LoansPage() {
       );
       setPayments((current) => ({
         ...current,
-        [result.loan.id]: [
-          result.payment,
-          ...(current[result.loan.id] ?? []).filter((payment) => payment.id !== result.payment.id),
-        ],
+        [result.loan.id]: upsertLoanPayment(current[result.loan.id] ?? [], result.payment),
       }));
       setPayingLoan(null);
       setNotice(

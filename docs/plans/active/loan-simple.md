@@ -69,8 +69,9 @@ O incremento web foi implementado na rota `/app/loans` com:
   tratamento de conflito, erro, offline, permissão e espaço vazio;
 - cronograma baseado somente no vencimento informado e previsão explícita sem
   presumir parcelas, juros ou tarifas;
-- histórico visual do contrato e dos pagamentos carregados pelo fixture ou
-  registrados na sessão atual.
+- histórico visual do contrato e dos pagamentos carregado pela leitura
+  persistente do contrato; o fixture implementa o mesmo contrato para o
+  desenvolvimento local.
 
 ### Histórico persistente de pagamentos
 
@@ -79,15 +80,18 @@ O incremento web foi implementado na rota `/app/loans` com:
   ID decrescentes.
 - Serviço, rota e adapter validam contrato e workspace antes da leitura; um ID
   pertencente a outro espaço se comporta como não encontrado.
-- A UI carrega as páginas do histórico real ao abrir o espaço e mantém o novo
-  pagamento na sessão sem duplicá-lo sob retry.
+- A UI carrega todas as páginas do histórico real ao abrir o espaço e mantém o
+  novo pagamento na ordem civil canônica, sem duplicá-lo sob retry.
 - Testes cobrem paginação, cursor inválido, isolamento entre espaços, contrato
   inexistente e mapeamento HTTP/fixture.
 
 Validação local desta extensão: o ciclo Red confirmou ausência de schema,
-serviço e rota; depois do Green, as suítes da API (129 testes) e web (101
+serviço e rota; depois do Green, as suítes da API (129 testes) e web (103
 testes), typecheck de API/web/contracts e builds de API/web passaram. A rota
 `/app/loans` foi validada no navegador com fixtures após recarregamento, em
 390 px e 1440 px, sem overflow horizontal nem erro de console. Os testes
 PostgreSQL de paginação e isolamento ficam condicionados a `DATABASE_URL_TEST`
-e foram coletados, mas pulados no ambiente local sem esse serviço.
+e foram coletados, mas pulados no ambiente local sem esse serviço. A
+revalidação browser desta correção ficou indisponível porque a sessão
+Playwright compartilhada estava em uso; a ordenação retroativa foi coberta
+pela suíte unitária do adapter.

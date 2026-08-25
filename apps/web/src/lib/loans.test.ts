@@ -7,6 +7,7 @@ import {
   listAllLoanPayments,
   loanProgressPercent,
   loansAdapterForEnvironment,
+  upsertLoanPayment,
 } from "./loans";
 
 afterEach(() => {
@@ -248,10 +249,40 @@ describe("loans adapter", () => {
       adapter.payLoan(
         workspaceId,
         partial.loan,
-        { amount: { currency: "BRL", minor: "4000" } },
+        { amount: { currency: "BRL", minor: "4000" }, occurredOn: "2026-08-21" },
         "fixture-payment-1",
       ),
     ).resolves.toEqual(partial);
+  });
+
+  it("rejects idempotency-key reuse with a different create payload or payment", async () => {
+    const adapter = createFixtureLoansAdapter();
+    const workspaceId = "loan-fingerprint-workspace";
+    const input = {
+      direction: "lent" as const,
+      counterparty: "Rafa",
+      principal: { currency: "BRL", minor: "10000" },
+      occurredOn: "2026-08-20",
+    };
+    const created = await adapter.createLoan(workspaceId, input, "same-create-key");
+    await expect(
+      adapter.createLoan(workspaceId, { ...input, counterparty: "Ana" }, "same-create-key"),
+    ).rejects.toMatchObject({ status: 409 });
+
+    await adapter.payLoan(
+      workspaceId,
+      created,
+      { amount: { currency: "BRL", minor: "2500" }, occurredOn: "2026-08-21" },
+      "same-payment-key",
+    );
+    await expect(
+      adapter.payLoan(
+        workspaceId,
+        created,
+        { amount: { currency: "BRL", minor: "3000" }, occurredOn: "2026-08-21" },
+        "same-payment-key",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });
 
@@ -259,5 +290,33 @@ describe("loan presentation helpers", () => {
   it("calculates progress without floating point or exceeding 100%", () => {
     expect(loanProgressPercent(loan)).toBe(25);
     expect(loanProgressPercent({ ...loan, paid: { currency: "BRL", minor: "100000" } })).toBe(100);
+  });
+
+  it("inserts a retroactive payment into the canonical descending history order", async () => {
+    const history = [
+      {
+        id: "payment-later",
+        loanId: "loan-1",
+        amount: { currency: "BRL", minor: "100" },
+        occurredOn: "2026-08-24",
+      },
+      {
+        id: "payment-earlier",
+        loanId: "loan-1",
+        amount: { currency: "BRL", minor: "200" },
+        occurredOn: "2026-08-20",
+      },
+    ];
+    const next = upsertLoanPayment(history, {
+      id: "payment-retroactive",
+      loanId: "loan-1",
+      amount: { currency: "BRL", minor: "150" },
+      occurredOn: "2026-08-22",
+    });
+    expect(next.map((payment) => payment.id)).toEqual([
+      "payment-later",
+      "payment-retroactive",
+      "payment-earlier",
+    ]);
   });
 });

@@ -68,6 +68,23 @@ describe("LOAN-001/002 simple IOU PostgreSQL", () => {
         }),
       ).rejects.toBeInstanceOf(InvalidCursorError);
 
+      const otherLoan = await service.createLoan(
+        fixture.scope,
+        {
+          direction: "lent",
+          counterparty: "Outra pessoa",
+          principal: { currency: "BRL", minor: "100" },
+          occurredOn: "2030-01-10",
+        },
+        "loan-history-other-contract-001",
+      );
+      await expect(
+        service.listLoanPayments(fixture.scope, otherLoan.loan.id, {
+          cursor: nextCursor,
+          limit: 1,
+        }),
+      ).rejects.toBeInstanceOf(InvalidCursorError);
+
       const otherWorkspace = await fixture.pool.query<{ id: string }>(
         `INSERT INTO workspace (name) VALUES ('Outra casa') RETURNING id`,
       );
@@ -96,6 +113,13 @@ describe("LOAN-001/002 simple IOU PostgreSQL", () => {
       await expect(
         service.listLoanPayments(fixture.scope, foreign.loan.id, { limit: 10 }),
       ).rejects.toMatchObject({ code: "not_found" });
+      await expect(
+        service.listLoanPayments(
+          { ...fixture.scope, workspaceId: otherWorkspaceId },
+          foreign.loan.id,
+          { cursor: nextCursor, limit: 1 },
+        ),
+      ).rejects.toBeInstanceOf(InvalidCursorError);
     } finally {
       await fixture.close();
     }
