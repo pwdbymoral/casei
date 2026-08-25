@@ -222,6 +222,116 @@ export function mergeTransactionPage(
   return append ? [...current, ...page.items] : page.items;
 }
 
+export function commitmentRemainingMinor(
+  transaction: Pick<Transaction, "amount" | "settledAmount">,
+): string {
+  const remaining = BigInt(transaction.amount.minor) - BigInt(transaction.settledAmount.minor);
+  return (remaining > BigInt(0) ? remaining : BigInt(0)).toString();
+}
+
+/**
+ * Returns the canonical wallet delta represented by the transaction's
+ * published settlement. Card purchases affect the card liability, not cash;
+ * invoice payments are transfers out of the wallet and are identified by the
+ * statement link. Planned facts have no published cash delta yet.
+ */
+export function walletDeltaMinor(
+  transaction: Pick<Transaction, "kind" | "state" | "cardId" | "statementId" | "settledAmount">,
+): string {
+  if (transaction.state !== "posted" && transaction.state !== "partially_settled") return "0";
+  if (transaction.cardId) return "0";
+  const settled = BigInt(transaction.settledAmount.minor);
+  if (settled <= BigInt(0)) return "0";
+  if (transaction.kind === "income") return settled.toString();
+  if (transaction.kind === "expense") return `-${settled.toString()}`;
+  if (transaction.kind === "transfer" && transaction.statementId) return `-${settled.toString()}`;
+  return "0";
+}
+
+/**
+ * Sums the wallet effects represented by a transaction snapshot.
+ *
+ * A timeline page and the unfiltered commitment read can overlap, so the
+ * calculation is keyed by transaction ID before summing. This keeps a
+ * partially settled fact and its refreshed copy from changing the balance
+ * twice while still accounting for statement-payment transfers.
+ */
+export function walletTotalMinor(
+  transactions: ReadonlyArray<
+    Pick<Transaction, "id" | "kind" | "state" | "cardId" | "statementId" | "settledAmount">
+  >,
+): string {
+  const unique = new Map(transactions.map((transaction) => [transaction.id, transaction]));
+  return [...unique.values()]
+    .reduce((total, transaction) => total + BigInt(walletDeltaMinor(transaction)), BigInt(0))
+    .toString();
+}
+
+export function commitmentBucket(
+  transaction: Pick<Transaction, "state" | "dueOn">,
+  today: string,
+): "upcoming" | "overdue" | null {
+  if (
+    (transaction.state !== "planned" && transaction.state !== "partially_settled") ||
+    transaction.dueOn === null
+  )
+    return null;
+  return transaction.dueOn < today ? "overdue" : "upcoming";
+}
+
+/** Deterministic cent distribution used for the local preflight before submit. */
+export function previewInstallmentMinor(totalMinor: string, count: number): string[] {
+  let total: bigint;
+  try {
+    total = BigInt(totalMinor);
+  } catch {
+    return [];
+  }
+  if (total <= BigInt(0) || !Number.isSafeInteger(count) || count < 2 || count > 999) return [];
+  const base = total / BigInt(count);
+  const remainder = total % BigInt(count);
+  return Array.from({ length: count }, (_, index) =>
+    (base + (BigInt(index) < remainder ? BigInt(1) : BigInt(0))).toString(),
+  );
+}
+
+export function previewInstallmentDates(firstDueOn: string, count: number): string[] {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(firstDueOn);
+  if (!match || !Number.isSafeInteger(count) || count < 2 || count > 999) return [];
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return [];
+  return Array.from({ length: count }, (_, index) => {
+    const absoluteMonth = month - 1 + index;
+    const targetYear = year + Math.floor(absoluteMonth / 12);
+    const targetMonth = absoluteMonth % 12;
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Math.min(day, lastDay);
+    return `${targetYear.toString().padStart(4, "0")}-${(targetMonth + 1).toString().padStart(2, "0")}-${targetDay.toString().padStart(2, "0")}`;
+  });
+}
+
+/** Formats a civil calendar date in the workspace IANA timezone. */
+export function civilDateInTimeZone(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const values = new Map(
+    parts
+      .filter((part) => part.type === "year" || part.type === "month" || part.type === "day")
+      .map((part) => [part.type, part.value]),
+  );
+  const year = values.get("year");
+  const month = values.get("month");
+  const day = values.get("day");
+  if (!year || !month || !day) throw new Error("Não foi possível determinar a data do espaço.");
+  return `${year}-${month}-${day}`;
+}
+
 export type Category = {
   id: string;
   workspaceId: string;
@@ -242,6 +352,11 @@ export type CreateTransactionInput = {
   cardId?: string | null;
 };
 
+export type SettlementInput = {
+  amount?: Money;
+  occurredOn?: string;
+};
+
 export type UpdateCategoryInput = { name?: string; kind?: Category["kind"] };
 
 export type FinanceAdapter = {
@@ -259,6 +374,12 @@ export type FinanceAdapter = {
   createTransaction(
     workspaceId: string,
     input: CreateTransactionInput,
+    idempotencyKey?: string,
+  ): Promise<Transaction>;
+  postTransaction(
+    workspaceId: string,
+    transaction: Transaction,
+    input?: SettlementInput,
     idempotencyKey?: string,
   ): Promise<Transaction>;
   reverseTransaction(
@@ -308,6 +429,7 @@ export type FinanceAdapter = {
     workspaceId: string,
     statement: Statement,
     amount?: Money,
+    idempotencyKey?: string,
   ): Promise<{ statementId: string; transactionId: string; amount: Money }>;
   createRecurrence(
     workspaceId: string,
@@ -323,10 +445,12 @@ export type FinanceAdapter = {
       estimatedAmount?: Money | null;
       description?: string;
     },
+    idempotencyKey?: string,
   ): Promise<{ id: string; occurrences: string[] }>;
   createInstallmentPlan(
     workspaceId: string,
     input: { total: Money; count: number; firstDueOn: string; description?: string },
+    idempotencyKey?: string,
   ): Promise<{
     id: string;
     total: Money;
@@ -334,6 +458,37 @@ export type FinanceAdapter = {
     installments: Array<{ id: string; number: number; amount: Money; dueOn: string }>;
   }>;
 };
+
+/**
+ * Reads every page for an unfiltered client-side read model. The UI uses this
+ * only for wallet/commitment facts until the API exposes an aggregate balance
+ * endpoint; keeping the cursor loop here prevents timeline filters from
+ * changing the wallet total and ensures commitments beyond the first page are
+ * not silently omitted.
+ */
+export async function listAllTransactions(
+  adapter: FinanceAdapter,
+  workspaceId: string,
+  query: Omit<TransactionQuery, "cursor" | "limit"> = {},
+): Promise<Transaction[]> {
+  const items: Transaction[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await adapter.listTransactions(workspaceId, {
+      ...query,
+      cursor,
+      limit: 100,
+    });
+    items.push(...page.items);
+    if (!page.hasMore) return items;
+    if (!page.nextCursor || seenCursors.has(page.nextCursor)) {
+      throw new Error("A paginação financeira retornou um cursor inválido.");
+    }
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+}
 
 export class FinanceAdapterError extends Error {
   constructor(
@@ -359,6 +514,7 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   listTransactionAudit: unavailableFinanceOperation,
   getTransactionAudit: unavailableFinanceOperation,
   createTransaction: unavailableFinanceOperation,
+  postTransaction: unavailableFinanceOperation,
   reverseTransaction: unavailableFinanceOperation,
   listCategories: unavailableFinanceOperation,
   createCategory: unavailableFinanceOperation,
@@ -464,6 +620,15 @@ export function createHttpFinanceAdapter(
         headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
+    postTransaction: (workspaceId, transaction, input = {}, commandKey) =>
+      call<Transaction>(`/workspaces/${workspaceId}/transactions/${transaction.id}/post`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": commandKey ?? idempotencyKey(),
+          "If-Match": `"v${transaction.version}"`,
+        },
+        body: JSON.stringify(input),
+      }),
     reverseTransaction: (workspaceId, transaction, commandKey) =>
       call<Transaction>(`/workspaces/${workspaceId}/transactions/${transaction.id}/reverse`, {
         method: "POST",
@@ -565,29 +730,29 @@ export function createHttpFinanceAdapter(
         },
         body: JSON.stringify({ confirm: true }),
       }),
-    payStatement: async (workspaceId, statement, amount) =>
+    payStatement: async (workspaceId, statement, amount, commandKey) =>
       call<{ statementId: string; transactionId: string; amount: Money }>(
         `/workspaces/${workspaceId}/statements/${statement.id}/payments`,
         {
           method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey() },
+          headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
           body: JSON.stringify({ amount }),
         },
       ),
-    createRecurrence: (workspaceId, input) =>
+    createRecurrence: (workspaceId, input, commandKey) =>
       call<{ id: string; occurrences: string[] }>(`/workspaces/${workspaceId}/recurrences`, {
         method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
+        headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
-    createInstallmentPlan: (workspaceId, input) =>
+    createInstallmentPlan: (workspaceId, input, commandKey) =>
       call<
         FinanceAdapter["createInstallmentPlan"] extends (...args: never[]) => Promise<infer T>
           ? T
           : never
       >(`/workspaces/${workspaceId}/installments`, {
         method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
+        headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
   };
@@ -611,6 +776,56 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     statements: Statement[];
     transactionAudit: Map<string, FinanceAuditEvent[]>;
     transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
+    settlementCommands: Map<
+      string,
+      { transactionId: string; fingerprint: string; transaction: Transaction }
+    >;
+    statementPaymentCommands: Map<
+      string,
+      {
+        fingerprint: string;
+        response: { statementId: string; transactionId: string; amount: Money };
+      }
+    >;
+    recurrences: Map<string, { input: unknown; value: { id: string; occurrences: string[] } }>;
+    recurrenceCommands: Map<
+      string,
+      { fingerprint: string; value: { id: string; occurrences: string[] } }
+    >;
+    installmentPlans: Map<
+      string,
+      {
+        input: unknown;
+        value: {
+          id: string;
+          total: Money;
+          count: number;
+          installments: Array<{
+            id: string;
+            number: number;
+            amount: Money;
+            dueOn: string;
+          }>;
+        };
+      }
+    >;
+    installmentCommands: Map<
+      string,
+      {
+        fingerprint: string;
+        value: {
+          id: string;
+          total: Money;
+          count: number;
+          installments: Array<{
+            id: string;
+            number: number;
+            amount: Money;
+            dueOn: string;
+          }>;
+        };
+      }
+    >;
     reverseCommands: Map<
       string,
       { transactionId: string; fingerprint: string; transaction: Transaction }
@@ -662,6 +877,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       statements,
       transactionAudit: new Map(),
       transactionCommands: new Map(),
+      settlementCommands: new Map(),
+      statementPaymentCommands: new Map(),
+      recurrences: new Map(),
+      recurrenceCommands: new Map(),
+      installmentPlans: new Map(),
+      installmentCommands: new Map(),
       reverseCommands: new Map(),
     };
   };
@@ -784,6 +1005,83 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       event.after = { ...event.after, statementId: value.statementId };
       if (commandKey)
         state.transactionCommands.set(commandKey, { fingerprint, transaction: value });
+      return value;
+    },
+    postTransaction: async (workspaceId, transaction, input = {}, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.transactions.find((value) => value.id === transaction.id);
+      if (!current) throw new FinanceAdapterError("Compromisso não encontrado.", 404);
+      const fingerprint = JSON.stringify({ transactionId: transaction.id, input });
+      if (commandKey) {
+        const previous = state.settlementCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outra liquidação.", 409);
+          }
+          return previous.transaction;
+        }
+      }
+      if (current.version !== transaction.version) {
+        throw new FinanceAdapterError(
+          "O compromisso foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      if (current.state !== "planned" && current.state !== "partially_settled") {
+        throw new FinanceAdapterError("O compromisso não está pendente.", 409);
+      }
+      const remaining = BigInt(current.amount.minor) - BigInt(current.settledAmount.minor);
+      const amount = input.amount ? BigInt(input.amount.minor) : remaining;
+      if (!input.amount && remaining <= BigInt(0)) {
+        throw new FinanceAdapterError("O compromisso já foi liquidado.", 409);
+      }
+      if (input.amount && input.amount.currency !== current.amount.currency) {
+        throw new FinanceAdapterError("A moeda da liquidação não corresponde ao espaço.", 422);
+      }
+      if (amount <= BigInt(0) || amount > remaining) {
+        throw new FinanceAdapterError(
+          "A liquidação deve estar entre zero e o saldo restante.",
+          422,
+        );
+      }
+      const settledMinor = BigInt(current.settledAmount.minor) + amount;
+      const value: Transaction = {
+        ...current,
+        settledAmount: { ...current.settledAmount, minor: settledMinor.toString() },
+        state: settledMinor === BigInt(current.amount.minor) ? "posted" : "partially_settled",
+        occurredOn: input.occurredOn ?? current.occurredOn,
+        postedOn: new Date().toISOString(),
+        version: current.version + 1,
+      };
+      state.transactions[state.transactions.indexOf(current)] = value;
+      const events = state.transactionAudit.get(value.id) ?? [];
+      events.unshift({
+        id: fixtureId(50 + state.transactionAudit.size + events.length),
+        transactionId: value.id,
+        category: "finance",
+        action: value.state === "posted" ? "transaction.posted" : "transaction.partially_settled",
+        actorId: "fixture-user",
+        occurredAt: new Date().toISOString(),
+        origin: "fixture",
+        correlationId: "fixture-correlation",
+        result: "success",
+        reason: null,
+        before: {
+          state: current.state,
+          settledAmount: current.settledAmount,
+          version: current.version,
+        },
+        after: { state: value.state, settledAmount: value.settledAmount, version: value.version },
+      });
+      state.transactionAudit.set(value.id, events);
+      if (commandKey) {
+        state.settlementCommands.set(commandKey, {
+          transactionId: value.id,
+          fingerprint,
+          transaction: value,
+        });
+      }
       return value;
     },
     reverseTransaction: async (workspaceId, transaction, commandKey) => {
@@ -1018,30 +1316,134 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       if (index >= 0) state.statements[index] = value;
       return value;
     },
-    payStatement: async (workspaceId, statement, amount) => {
+    payStatement: async (workspaceId, statement, amount, commandKey) => {
       const state = stateFor(workspaceId);
-      const paid = amount ?? statement.openAmount;
-      const nextPaid = BigInt(statement.paid.minor) + BigInt(paid.minor);
-      const nextOpen = BigInt(statement.total.minor) - nextPaid;
-      const index = state.statements.findIndex(({ id }) => id === statement.id);
-      if (index >= 0) {
-        state.statements[index] = {
-          ...statement,
-          paid: { ...paid, minor: nextPaid.toString() },
-          openAmount: { ...paid, minor: nextOpen.toString() },
-          state: nextOpen <= BigInt(0) ? "paid" : "partially_paid",
-          version: statement.version + 1,
-        };
+      const current = state.statements.find(({ id }) => id === statement.id);
+      if (!current) throw new FinanceAdapterError("Fatura não encontrada.", 404);
+      const fingerprint = JSON.stringify({ statementId: statement.id, amount });
+      if (commandKey) {
+        const previous = state.statementPaymentCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro pagamento.", 409);
+          }
+          return previous.response;
+        }
       }
-      return { statementId: statement.id, transactionId: fixtureId(80), amount: paid };
+      const paid = amount ?? current.openAmount;
+      if (paid.currency !== current.openAmount.currency) {
+        throw new FinanceAdapterError("A moeda do pagamento não corresponde à fatura.", 422);
+      }
+      const open = BigInt(current.openAmount.minor);
+      const paidMinor = BigInt(paid.minor);
+      if (paidMinor <= BigInt(0) || paidMinor > open) {
+        throw new FinanceAdapterError("O pagamento excede o valor em aberto.", 422);
+      }
+      const nextPaid = BigInt(current.paid.minor) + paidMinor;
+      const nextOpen = BigInt(current.total.minor) - nextPaid;
+      const transaction: Transaction = {
+        id: fixtureId(80 + state.transactions.length),
+        workspaceId,
+        kind: "transfer",
+        state: "posted",
+        amount: { ...paid, minor: paidMinor.toString() },
+        settledAmount: { ...paid, minor: paidMinor.toString() },
+        occurredOn: new Date().toISOString().slice(0, 10),
+        dueOn: null,
+        postedOn: new Date().toISOString(),
+        description: "Pagamento de fatura",
+        categoryId: null,
+        cardId: null,
+        statementId: current.id,
+        version: 0,
+      };
+      state.transactions.unshift(transaction);
+      state.transactionAudit.set(transaction.id, [
+        {
+          id: fixtureId(150 + state.transactionAudit.size),
+          transactionId: transaction.id,
+          category: "finance",
+          action: "transaction.created",
+          actorId: "fixture-user",
+          occurredAt: new Date().toISOString(),
+          origin: "fixture",
+          correlationId: "fixture-correlation",
+          result: "success",
+          reason: null,
+          before: null,
+          after: {
+            kind: transaction.kind,
+            state: transaction.state,
+            statementId: transaction.statementId,
+            settledAmount: transaction.settledAmount,
+            version: transaction.version,
+          },
+        },
+      ]);
+      const response = {
+        statementId: current.id,
+        transactionId: transaction.id,
+        amount: transaction.amount,
+      };
+      state.statements[state.statements.indexOf(current)] = {
+        ...current,
+        paid: { ...current.paid, minor: nextPaid.toString() },
+        openAmount: { ...current.openAmount, minor: nextOpen.toString() },
+        state: nextOpen <= BigInt(0) ? "paid" : "partially_paid",
+        version: current.version + 1,
+      };
+      if (commandKey) state.statementPaymentCommands.set(commandKey, { fingerprint, response });
+      return response;
     },
-    createRecurrence: async () => ({ id: fixtureId(90), occurrences: [] }),
-    createInstallmentPlan: async (_workspaceId, input) => ({
-      id: fixtureId(91),
-      total: input.total,
-      count: input.count,
-      installments: [],
-    }),
+    createRecurrence: async (workspaceId, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const fingerprint = JSON.stringify(input);
+      if (commandKey) {
+        const previous = state.recurrenceCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outra recorrência.", 409);
+          }
+          return previous.value;
+        }
+      }
+      const value = { id: fixtureId(90 + state.recurrences.size), occurrences: [] };
+      state.recurrences.set(value.id, { input, value });
+      if (commandKey) state.recurrenceCommands.set(commandKey, { fingerprint, value });
+      return value;
+    },
+    createInstallmentPlan: async (workspaceId, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const fingerprint = JSON.stringify(input);
+      if (commandKey) {
+        const previous = state.installmentCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro parcelamento.", 409);
+          }
+          return previous.value;
+        }
+      }
+      const amounts = previewInstallmentMinor(input.total.minor, input.count);
+      const dates = previewInstallmentDates(input.firstDueOn, input.count);
+      if (amounts.length === 0 || dates.length !== amounts.length) {
+        throw new FinanceAdapterError("O parcelamento não é válido.", 422);
+      }
+      const value = {
+        id: fixtureId(91 + state.installmentPlans.size),
+        total: input.total,
+        count: input.count,
+        installments: amounts.map((minor, index) => ({
+          id: fixtureId(110 + state.installmentPlans.size * input.count + index),
+          number: index + 1,
+          amount: { ...input.total, minor },
+          dueOn: dates[index] as string,
+        })),
+      };
+      state.installmentPlans.set(value.id, { input, value });
+      if (commandKey) state.installmentCommands.set(commandKey, { fingerprint, value });
+      return value;
+    },
   };
 }
 
