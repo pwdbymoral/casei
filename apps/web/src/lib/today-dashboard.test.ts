@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 
+import { createWorkspaceGenerationGuard } from "./finance";
 import { buildTodayCommitments, goalsRequiringAttention } from "./today-dashboard";
 
 const money = (minor: string) => ({ currency: "BRL", minor });
 
 describe("today dashboard transformations", () => {
+  it("invalidates a pending dashboard load when the active workspace changes", () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    const pending = guard.begin("workspace-a");
+    guard.switchWorkspace("workspace-b");
+
+    expect(guard.isCurrent(pending)).toBe(false);
+    expect(guard.isCurrent(guard.begin("workspace-b"))).toBe(true);
+  });
+
   it("prioritizes overdue commitments and includes only the next seven days", () => {
     const transactions = [
       {
@@ -67,6 +77,30 @@ describe("today dashboard transformations", () => {
     });
     expect(result).toEqual([
       expect.objectContaining({ id: "statement-statement-1", amountMinor: "5000" }),
+    ]);
+  });
+
+  it("keeps an open overdue invoice as an actionable overdue commitment", () => {
+    const result = buildTodayCommitments({
+      transactions: [],
+      statements: [
+        {
+          id: "statement-overdue",
+          dueOn: "2026-08-20",
+          state: "closed",
+          openAmount: money("1500"),
+        },
+      ],
+      asOf: "2026-08-24",
+      currency: "BRL",
+    });
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: "statement-statement-overdue",
+        bucket: "overdue",
+        amountMinor: "1500",
+      }),
     ]);
   });
 

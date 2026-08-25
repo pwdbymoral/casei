@@ -19,12 +19,19 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   civilDateInTimeZone,
+  createRequestGuard,
+  createWorkspaceGenerationGuard,
   type FinanceAdapter,
   FinanceAdapterError,
   financeAdapterForEnvironment,
   listAllTransactions,
 } from "@/lib/finance";
-import { type Goal, type GoalsAdapter, goalsAdapterForEnvironment } from "@/lib/goals";
+import {
+  type Goal,
+  type GoalsAdapter,
+  GoalsAdapterError,
+  goalsAdapterForEnvironment,
+} from "@/lib/goals";
 import {
   confidenceLabel,
   type FinancialReadModel,
@@ -35,7 +42,12 @@ import {
   type SafeToSpendView,
 } from "@/lib/insights";
 import { formatMoneyMinor } from "@/lib/money";
-import { type StockAdapter, type StockShoppingItem, stockAdapterForEnvironment } from "@/lib/stock";
+import {
+  type StockAdapter,
+  StockAdapterError,
+  type StockShoppingItem,
+  stockAdapterForEnvironment,
+} from "@/lib/stock";
 import {
   buildTodayCommitments,
   goalsRequiringAttention,
@@ -75,14 +87,24 @@ type DashboardData = {
 };
 
 function errorStatus(error: unknown): DashboardStatus {
+  const adapterError =
+    error instanceof InsightAdapterError ||
+    error instanceof FinanceAdapterError ||
+    error instanceof GoalsAdapterError ||
+    error instanceof StockAdapterError;
   if (
-    (error instanceof InsightAdapterError || error instanceof FinanceAdapterError) &&
-    error.status === 403
+    adapterError &&
+    (error instanceof InsightAdapterError ||
+      error instanceof FinanceAdapterError ||
+      error instanceof GoalsAdapterError ||
+      error instanceof StockAdapterError) &&
+    (error.status === 401 || error.status === 403)
   )
     return "permission";
   if (
-    (error instanceof InsightAdapterError || error instanceof FinanceAdapterError) &&
-    error.status === undefined
+    adapterError &&
+    ((error instanceof StockAdapterError && error.code === "offline_required") ||
+      error.status === undefined)
   )
     return "offline";
   return "error";
@@ -460,6 +482,8 @@ export default function TodayPage() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
   const [hidden, setHidden] = useState(false);
+  const [loadRequest] = useState(createRequestGuard);
+  const [workspaceRequests] = useState(() => createWorkspaceGenerationGuard(workspaceId));
   const insightAdapter = useMemo<InsightAdapter>(
     () => insightAdapterForEnvironment({ fixtures: fixtureMode }),
     [fixtureMode],
@@ -478,6 +502,8 @@ export default function TodayPage() {
   );
 
   const load = useCallback(async () => {
+    const request = loadRequest.begin();
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     setStatus("loading");
     setError(null);
     try {
@@ -491,6 +517,7 @@ export default function TodayPage() {
           goalsAdapter.listGoals(workspaceId, { limit: 100 }),
           stockAdapter.listShoppingItems(workspaceId),
         ]);
+      if (!loadRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest)) return;
       setData({
         financial,
         safeToSpend,
@@ -505,15 +532,28 @@ export default function TodayPage() {
       });
       setStatus("success");
     } catch (cause) {
+      if (!loadRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest)) return;
       setData(null);
       setError(errorMessage(cause));
       setStatus(errorStatus(cause));
     }
-  }, [financeAdapter, goalsAdapter, insightAdapter, stockAdapter, timeZone, workspaceId]);
+  }, [
+    financeAdapter,
+    goalsAdapter,
+    insightAdapter,
+    loadRequest,
+    stockAdapter,
+    timeZone,
+    workspaceId,
+    workspaceRequests,
+  ]);
 
   useEffect(() => {
+    workspaceRequests.switchWorkspace(workspaceId);
+    loadRequest.invalidate();
     void load();
-  }, [load]);
+    return () => loadRequest.invalidate();
+  }, [load, loadRequest, workspaceId, workspaceRequests]);
 
   return (
     <AsyncState

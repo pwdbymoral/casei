@@ -366,6 +366,23 @@ function FinanceDashboard({
   const visibleEditingCard = workspaceDataReady ? editingCard : null;
   const visiblePendingCardArchive = workspaceDataReady ? pendingCardArchive : null;
 
+  const transactionTargetId = searchParams.get("transaction");
+  const statementTargetId = searchParams.get("statement");
+
+  useEffect(() => {
+    if (!transactionTargetId) return;
+    const target = [...walletTransactions, ...transactions].find(
+      (transaction) => transaction.id === transactionTargetId,
+    );
+    if (target) setViewingTransaction(target);
+  }, [transactionTargetId, transactions, walletTransactions]);
+
+  useEffect(() => {
+    if (!statementTargetId) return;
+    const target = statements.find((statement) => statement.id === statementTargetId);
+    if (target) setViewingStatement(target);
+  }, [statementTargetId, statements]);
+
   useEffect(() => {
     if (transactionCommandWorkspace.current === workspaceId) return;
     transactionCommandWorkspace.current = workspaceId;
@@ -1280,7 +1297,7 @@ function FinanceDashboard({
             A linha do tempo é paginada; aplique filtros ou carregue mais para revisar os dados.
           </CardContent>
         </Card>
-        <Card>
+        <Card id="safe-to-spend">
           <CardHeader>
             <CardDescription>Valor seguro para gastar</CardDescription>
             <CardTitle className="text-2xl font-semibold">Ainda não calculado</CardTitle>

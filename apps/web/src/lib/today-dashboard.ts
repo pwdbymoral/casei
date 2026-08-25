@@ -89,10 +89,10 @@ export function buildTodayCommitments(input: {
         statement.state !== "closed" &&
         statement.state !== "partially_paid") ||
       statement.openAmount.minor === "0" ||
-      statement.dueOn < input.asOf ||
       statement.dueOn > end
     )
       return [];
+    const bucket = statement.dueOn < input.asOf ? "overdue" : "upcoming";
     return [
       {
         id: `statement-${statement.id}`,
@@ -100,7 +100,7 @@ export function buildTodayCommitments(input: {
         dueOn: statement.dueOn,
         amountMinor: statement.openAmount.minor,
         currency: statement.openAmount.currency || input.currency,
-        bucket: "upcoming" as const,
+        bucket: bucket as "overdue" | "upcoming",
         href: `/app/finances?statement=${encodeURIComponent(statement.id)}`,
       },
     ];
