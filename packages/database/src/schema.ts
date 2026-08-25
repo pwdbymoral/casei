@@ -113,6 +113,41 @@ export const adminStepUpChallenge = pgTable(
   ],
 );
 
+/** Durable delivery state for platform email commands. */
+export const adminEmailDelivery = pgTable(
+  "admin_email_delivery",
+  {
+    scope: text("scope").notNull(),
+    key: varchar("key", { length: 128 }).notNull(),
+    requestHash: text("request_hash").notNull(),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    targetId: text("target_id").notNull(),
+    action: text("action").notNull(),
+    email: text("email").notNull(),
+    reason: text("reason").notNull(),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    ipAddress: text("ip_address"),
+    endpoint: text("endpoint"),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+    sentAt: instant("sent_at"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scope, table.key], name: "admin_email_delivery_pkey" }),
+    index("admin_email_delivery_actor_updated_idx").on(table.actorId, table.updatedAt),
+    check(
+      "admin_email_delivery_status_check",
+      sql`${table.status} in ('pending', 'sent', 'failed')`,
+    ),
+    check("admin_email_delivery_attempts_check", sql`${table.attempts} >= 0`),
+  ],
+);
+
 export const userPreference = pgTable(
   "user_preference",
   {

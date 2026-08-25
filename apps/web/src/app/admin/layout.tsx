@@ -6,7 +6,11 @@ import { authenticatedPlatformAdminSessionPort } from "@/lib/platform-admin-sess
 
 export default async function AdminLayout({ children }: Readonly<{ children: ReactNode }>) {
   const session = await authenticatedPlatformAdminSessionPort.getSession();
-  if (session?.role !== "platform_admin") return <AdminAccessDeniedState />;
-  if (!session.twoFactorEnabled) return <AdminTwoFactorEnrollment />;
+  if (!session || !["platform_admin", "platform_support"].includes(session.role)) {
+    return <AdminAccessDeniedState />;
+  }
+  if (session.role === "platform_admin" && !session.twoFactorEnabled) {
+    return <AdminTwoFactorEnrollment />;
+  }
   return <AdminShell displayName={session.displayName}>{children}</AdminShell>;
 }

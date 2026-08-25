@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   type AdminAccountStore,
   type AdminAuthPort,
+  type AdminEmailCommand,
+  type AdminEmailDeliveryAudit,
   AdminNotFoundError,
   AdminService,
 } from "../src/admin-service.js";
@@ -112,6 +114,44 @@ class MemoryAuthPort implements AdminAuthPort {
     if (email !== account.email) throw new AdminNotFoundError();
     this.recovery += 1;
     if (idempotencyKey) this.recoveryKeys.push(idempotencyKey);
+  }
+}
+
+class PendingEmailStore extends MemoryAdminStore {
+  readonly deliveries = new Map<string, { status: "pending" | "sent" | "failed" }>();
+
+  async executeEmailIdempotent<T>(
+    scope: string,
+    key: string,
+    _request: unknown,
+    run: () => Promise<AdminEmailCommand<T>>,
+    send: (email: string) => Promise<void>,
+    audit: AdminEmailDeliveryAudit,
+  ): Promise<{ replayed: boolean; result: T }> {
+    const deliveryKey = `${scope}:${key}`;
+    let delivery = this.deliveries.get(deliveryKey);
+    const replayed = Boolean(delivery);
+    let command: AdminEmailCommand<T>;
+    if (!delivery) {
+      command = await run();
+      delivery = { status: "pending" };
+      this.deliveries.set(deliveryKey, delivery);
+    } else {
+      command = { email: account.email, result: null as T };
+    }
+    try {
+      await send(command.email);
+      delivery.status = "sent";
+      this.audits.push({ action: `${audit.action}:success`, reason: audit.reason });
+      return { replayed, result: command.result };
+    } catch (error) {
+      delivery.status = "failed";
+      this.audits.push({
+        action: `${audit.action}:failure`,
+        reason: error instanceof Error ? error.message : audit.reason,
+      });
+      throw error;
+    }
   }
 }
 
@@ -247,7 +287,7 @@ describe("ADMIN-001/002 service", () => {
     expect(auth.recovery).toBe(1);
   });
 
-  it("passes the command key to email delivery after the idempotent command", async () => {
+  it("derives an email dispatch key scoped to actor, action, target, and command", async () => {
     const store = new MemoryAdminStore();
     const auth = new MemoryAuthPort();
     const service = new AdminService(store, auth);
@@ -258,6 +298,54 @@ describe("ADMIN-001/002 service", () => {
       "verify-key-deterministic",
       "01J00000000000000000000000",
     );
-    expect(auth.verificationKeys).toEqual(["verify-key-deterministic"]);
+    expect(auth.verificationKeys[0]).toMatch(/^admin-email-[a-f0-9]{64}$/);
+    expect(auth.verificationKeys[0]).not.toBe("verify-key-deterministic");
+    await service.resendRecovery(
+      actor("platform_support"),
+      "target-user",
+      { reason: "requested" },
+      "verify-key-deterministic",
+      "01J00000000000000000000000",
+    );
+    expect(auth.recoveryKeys[0]).not.toBe(auth.verificationKeys[0]);
+  });
+
+  it("keeps email idempotency pending/failed until the auth boundary accepts it", async () => {
+    const store = new PendingEmailStore();
+    const auth = new MemoryAuthPort();
+    const originalSend = auth.sendVerificationEmail.bind(auth);
+    let fail = true;
+    auth.sendVerificationEmail = async (email, key) => {
+      if (fail) {
+        fail = false;
+        throw new Error("provider unavailable");
+      }
+      await originalSend(email, key);
+    };
+    const service = new AdminService(store, auth);
+    await expect(
+      service.resendVerification(
+        actor("platform_support"),
+        "target-user",
+        { reason: "requested" },
+        "verify-key-stateful",
+        "01J00000000000000000000000",
+      ),
+    ).rejects.toThrow("provider unavailable");
+    expect([...store.deliveries.values()][0]?.status).toBe("failed");
+    await expect(
+      service.resendVerification(
+        actor("platform_support"),
+        "target-user",
+        { reason: "requested" },
+        "verify-key-stateful",
+        "01J00000000000000000000001",
+      ),
+    ).resolves.toMatchObject({ replayed: true });
+    expect([...store.deliveries.values()][0]?.status).toBe("sent");
+    expect(store.audits.map((entry) => entry.action)).toEqual([
+      "auth:verification-resend:failure",
+      "auth:verification-resend:success",
+    ]);
   });
 });

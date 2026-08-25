@@ -83,7 +83,10 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
     return { totpURI: body.totpURI, backupCodes: body.backupCodes };
   }
 
-  async verifyTwoFactorEnrollment(input: { code: string; headers: Headers }): Promise<void> {
+  async verifyTwoFactorEnrollment(input: {
+    code: string;
+    headers: Headers;
+  }): Promise<{ setCookies: string[] }> {
     const headers = new Headers(input.headers);
     headers.set("content-type", "application/json");
     headers.set("origin", this.webOrigin);
@@ -95,6 +98,7 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
       }),
     );
     if (!response.ok) throw new AdminPolicyError("step_up_required");
+    return { setCookies: responseSetCookies(response) };
   }
 
   private async send(
@@ -116,4 +120,12 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
     );
     if (!response.ok) throw new Error("Better Auth email flow failed");
   }
+}
+
+function responseSetCookies(response: Response): string[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  const cookies = headers.getSetCookie?.();
+  if (cookies && cookies.length > 0) return cookies;
+  const combined = response.headers.get("set-cookie");
+  return combined ? [combined] : [];
 }

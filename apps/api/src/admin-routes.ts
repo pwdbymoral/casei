@@ -55,7 +55,12 @@ export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesO
       context,
       z.object({ code: z.string().trim().min(6).max(128) }),
     );
-    await service.verifyTwoFactorEnrollment(actorOf(context), input.code, context.req.raw.headers);
+    const result = await service.verifyTwoFactorEnrollment(
+      actorOf(context),
+      input.code,
+      context.req.raw.headers,
+    );
+    for (const cookie of result) context.header("Set-Cookie", cookie, { append: true });
     return context.body(null, 204);
   });
 

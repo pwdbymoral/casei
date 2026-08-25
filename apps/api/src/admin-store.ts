@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
+import { isIP } from "node:net";
 import type {
   AdminAccountDetail,
   AdminAccountList,
@@ -11,7 +12,12 @@ import type { Pool, PoolClient } from "@casei/database";
 import { canonicalJson } from "@casei/database";
 import { PlatformBootstrapAlreadyCompletedError } from "./admin-bootstrap.js";
 import { AdminPolicyError } from "./admin-policy.js";
-import { type AdminAccountStore, AdminNotFoundError } from "./admin-service.js";
+import {
+  type AdminAccountStore,
+  type AdminEmailCommand,
+  type AdminEmailDeliveryAudit,
+  AdminNotFoundError,
+} from "./admin-service.js";
 
 type QueryResultRow = Record<string, unknown>;
 type AccountRow = QueryResultRow & {
@@ -330,6 +336,205 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     }
   }
 
+  async executeEmailIdempotent<T>(
+    scope: string,
+    key: string,
+    request: unknown,
+    run: () => Promise<AdminEmailCommand<T>>,
+    send: (email: string) => Promise<void>,
+    audit: AdminEmailDeliveryAudit,
+    actorId?: string,
+    stepUpToken?: string,
+  ): Promise<{ replayed: boolean; result: T }> {
+    const client = await this.pool.connect();
+    let delivery: { email: string; result: T; status: string } | undefined;
+    let replayed = false;
+    try {
+      await client.query("BEGIN");
+      await this.configureClient(client, actorId);
+      const requestHash = createHash("sha256").update(canonicalJson(request)).digest("hex");
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO idempotency_key (scope, key, request_hash, expires_at)
+         VALUES ($1, $2, $3, now() + interval '24 hours')
+         ON CONFLICT (scope, key) DO NOTHING
+         RETURNING id`,
+        [scope, key, requestHash],
+      );
+      if (inserted.rowCount === 1) {
+        if (!actorId || !stepUpToken) throw new AdminPolicyError("step_up_required");
+        const consumed = await client.query(
+          `UPDATE admin_step_up_challenge
+              SET consumed_at = now()
+            WHERE user_id = $1
+              AND token_hash = $2
+              AND consumed_at IS NULL
+              AND expires_at > now()
+            RETURNING id`,
+          [actorId, hashStepUpToken(stepUpToken)],
+        );
+        if (consumed.rowCount !== 1) throw new AdminPolicyError("step_up_required");
+        const command = await this.transaction.run(client, run);
+        await client.query(
+          `INSERT INTO admin_email_delivery
+            (scope, key, request_hash, actor_id, target_id, action, email, reason,
+             correlation_id, ip_address, endpoint, status, attempts)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', 0)`,
+          [
+            scope,
+            key,
+            requestHash,
+            audit.actorId,
+            audit.targetId,
+            audit.action,
+            command.email,
+            audit.reason,
+            audit.correlationId,
+            truncateIp(audit.ipAddress ?? null),
+            audit.endpoint ?? null,
+          ],
+        );
+        await client.query(
+          `UPDATE idempotency_key
+              SET status_code = 202, response = $3
+            WHERE scope = $1 AND key = $2`,
+          [scope, key, command.result],
+        );
+        delivery = { email: command.email, result: command.result, status: "pending" };
+      } else {
+        const existing = await client.query<{
+          request_hash: string;
+          status_code: number | null;
+          response: T | null;
+        }>(
+          `SELECT request_hash, status_code, response
+             FROM idempotency_key
+            WHERE scope = $1 AND key = $2
+            FOR UPDATE`,
+          [scope, key],
+        );
+        const row = existing.rows[0];
+        if (!row || row.request_hash !== requestHash) throw new AdminIdempotencyConflictError();
+        if (row.status_code === null) throw new Error("Idempotent command is still in progress");
+        if (row.status_code === 200) {
+          await client.query("COMMIT");
+          return { replayed: true, result: row.response as T };
+        }
+        const pending = await client.query<{
+          actor_id: string;
+          email: string;
+          status: string;
+        }>(
+          `SELECT actor_id, email, status
+             FROM admin_email_delivery
+            WHERE scope = $1 AND key = $2
+            FOR UPDATE`,
+          [scope, key],
+        );
+        const outbox = pending.rows[0];
+        if (!outbox || outbox.actor_id !== actorId) throw new AdminIdempotencyConflictError();
+        if (outbox.status === "sent") {
+          await client.query(
+            `UPDATE idempotency_key SET status_code = 200 WHERE scope = $1 AND key = $2`,
+            [scope, key],
+          );
+          await client.query("COMMIT");
+          return { replayed: true, result: row.response as T };
+        }
+        delivery = { email: outbox.email, result: row.response as T, status: outbox.status };
+        replayed = true;
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (!delivery) throw new Error("Email delivery intent was not created");
+    try {
+      await send(delivery.email);
+      await this.finishEmailDelivery(scope, key, actorId, true);
+    } catch (error) {
+      await this.finishEmailDelivery(scope, key, actorId, false, error).catch(() => undefined);
+      throw error;
+    }
+    return { replayed, result: delivery.result };
+  }
+
+  private async finishEmailDelivery(
+    scope: string,
+    key: string,
+    actorId: string | undefined,
+    sent: boolean,
+    error?: unknown,
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.configureClient(client, actorId);
+      const delivery = await client.query<{
+        actor_id: string;
+        target_id: string;
+        action: string;
+        reason: string;
+        correlation_id: string;
+        ip_address: string | null;
+        endpoint: string | null;
+        status: string;
+      }>(
+        `SELECT actor_id, target_id, action, reason, correlation_id, ip_address, endpoint, status
+           FROM admin_email_delivery
+          WHERE scope = $1 AND key = $2
+          FOR UPDATE`,
+        [scope, key],
+      );
+      const row = delivery.rows[0];
+      if (!row) throw new Error("Email delivery intent not found");
+      if (row.status === "sent") {
+        await client.query("COMMIT");
+        return;
+      }
+      const message = error instanceof Error ? error.message.slice(0, 500) : null;
+      await client.query(
+        `UPDATE admin_email_delivery
+            SET status = $3,
+                attempts = attempts + 1,
+                last_error = $4,
+                sent_at = CASE WHEN $3 = 'sent' THEN now() ELSE sent_at END,
+                updated_at = now()
+          WHERE scope = $1 AND key = $2`,
+        [scope, key, sent ? "sent" : "failed", sent ? null : message],
+      );
+      if (sent) {
+        await client.query(
+          `UPDATE idempotency_key SET status_code = 200 WHERE scope = $1 AND key = $2`,
+          [scope, key],
+        );
+      }
+      await client.query(
+        `INSERT INTO platform_audit_event
+          (actor_id, target_id, action, occurred_at, origin, correlation_id, ip_address, endpoint, result, reason)
+         VALUES ($1, $2, $3, now(), 'admin_console', $4, $5, $6, $7, $8)`,
+        [
+          row.actor_id,
+          row.target_id,
+          row.action,
+          row.correlation_id,
+          row.ip_address,
+          row.endpoint,
+          sent ? "success" : "failure",
+          sent ? row.reason : `${row.reason} (${message ?? "email delivery failed"})`,
+        ],
+      );
+      await client.query("COMMIT");
+    } catch (finishError) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw finishError;
+    } finally {
+      client.release();
+    }
+  }
+
   private async fetchAccount(userId: string): Promise<AdminAccountDetail | null> {
     const result = await this.query<AccountRow>(
       `SELECT u.id AS user_id,
@@ -435,11 +640,28 @@ function toAccountSummary(row: AccountRow): AdminAccountSummary {
 }
 
 function truncateIp(value: string | null): string | null {
-  if (!value) return null;
-  if (value.includes(":")) {
-    const parts = value.split(":");
-    return `${parts.slice(0, 4).join(":")}::/64`;
+  const normalized = value?.trim().split("%", 1)[0];
+  if (!normalized) return null;
+  if (isIP(normalized) === 6) {
+    const separator = normalized.indexOf("::");
+    const head = separator >= 0 ? normalized.slice(0, separator) : normalized;
+    const tail = separator >= 0 ? normalized.slice(separator + 2) : "";
+    const headGroups = head ? head.split(":") : [];
+    const tailGroups = tail ? tail.split(":") : [];
+    const missing = 8 - headGroups.length - tailGroups.length;
+    if (missing < 0) return "redacted";
+    const groups = [...headGroups, ...Array.from({ length: missing }, () => "0"), ...tailGroups];
+    if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/i.test(group))) {
+      return "redacted";
+    }
+    return `${groups
+      .slice(0, 4)
+      .map((group) => Number.parseInt(group, 16).toString(16))
+      .join(":")}::/64`;
   }
-  const parts = value.split(".");
-  return parts.length === 4 ? `${parts.slice(0, 3).join(".")}.0/24` : "redacted";
+  if (isIP(normalized) === 4) {
+    const parts = normalized.split(".");
+    return `${parts.slice(0, 3).join(".")}.0/24`;
+  }
+  return "redacted";
 }

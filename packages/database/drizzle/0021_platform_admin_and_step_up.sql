@@ -77,6 +77,52 @@ CREATE UNIQUE INDEX "admin_step_up_token_hash_unique"
 CREATE INDEX "admin_step_up_user_expiry_idx"
   ON "admin_step_up_challenge" ("user_id", "expires_at");
 --> statement-breakpoint
+-- Durable state for administrative email commands. The command remains
+-- pending/failed until Better Auth accepts the delivery request, so a retry
+-- can safely resume the same deterministic auth-email outbox intent.
+CREATE TABLE "admin_email_delivery" (
+  "scope" text NOT NULL,
+  "key" varchar(128) NOT NULL,
+  "request_hash" text NOT NULL,
+  "actor_id" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+  "target_id" text NOT NULL,
+  "action" text NOT NULL,
+  "email" text NOT NULL,
+  "reason" text NOT NULL,
+  "correlation_id" varchar(26) NOT NULL,
+  "ip_address" text,
+  "endpoint" text,
+  "status" text DEFAULT 'pending' NOT NULL,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text,
+  "created_at" timestamptz DEFAULT now() NOT NULL,
+  "updated_at" timestamptz DEFAULT now() NOT NULL,
+  "sent_at" timestamptz,
+  PRIMARY KEY ("scope", "key"),
+  CONSTRAINT "admin_email_delivery_status_check"
+    CHECK ("status" IN ('pending', 'sent', 'failed')),
+  CONSTRAINT "admin_email_delivery_attempts_check"
+    CHECK ("attempts" >= 0)
+);
+--> statement-breakpoint
+CREATE INDEX "admin_email_delivery_actor_updated_idx"
+  ON "admin_email_delivery" ("actor_id", "updated_at");
+--> statement-breakpoint
+-- SECURITY DEFINER functions must not run as the migration owner. The
+-- boundary role is NOLOGIN/NOSUPERUSER/NOBYPASSRLS and receives only the
+-- narrow policies needed by the functions below.
+DO $$
+BEGIN
+  CREATE ROLE casei_platform_boundary NOLOGIN NOSUPERUSER NOBYPASSRLS;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+ALTER ROLE casei_platform_boundary NOLOGIN NOSUPERUSER NOBYPASSRLS;
+GRANT USAGE ON SCHEMA "public", "app" TO casei_platform_boundary;
+GRANT SELECT ON "user", "workspace", "membership", "session" TO casei_platform_boundary;
+GRANT SELECT, INSERT, UPDATE ON "platform_account" TO casei_platform_boundary;
+GRANT EXECUTE ON FUNCTION "app"."current_actor_id"() TO casei_platform_boundary;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION "app"."current_platform_role"() RETURNS text
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, app
 AS $$
@@ -180,7 +226,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('casei.platform.bootstrap', 0));
   IF EXISTS (
     SELECT 1 FROM public.platform_account
-     WHERE role = 'platform_admin' AND status = 'active'
+     WHERE role IN ('platform_admin', 'platform_support')
   ) THEN
     RAISE EXCEPTION 'platform bootstrap already completed' USING ERRCODE = '55000';
   END IF;
@@ -197,7 +243,8 @@ $$;
 --> statement-breakpoint
 GRANT USAGE ON SCHEMA "public", "app" TO casei_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-  "twoFactor", "platform_account", "platform_audit_event", "admin_step_up_challenge"
+  "twoFactor", "platform_account", "platform_audit_event", "admin_step_up_challenge",
+  "admin_email_delivery"
   TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."current_platform_role"() TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."platform_role_for_user"(text) TO casei_app;
@@ -208,6 +255,27 @@ GRANT EXECUTE ON FUNCTION "app"."assert_platform_session_allowed"(text) TO casei
 GRANT EXECUTE ON FUNCTION "app"."lock_platform_session_user"(text) TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."guard_platform_session_insert"() TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."claim_first_platform_admin"(text) TO casei_app;
+--> statement-breakpoint
+-- Never leave SECURITY DEFINER execution available to PUBLIC. Ownership is
+-- changed after all definitions exist so the runtime identity is explicit.
+ALTER FUNCTION "app"."current_platform_role"() OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."platform_role_for_user"(text) OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."platform_status_for_user"(text) OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."platform_account_metadata"(text) OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."platform_account_workspaces"(text) OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."assert_platform_session_allowed"(text) OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."lock_platform_session_user"(text) OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."guard_platform_session_insert"() OWNER TO casei_platform_boundary;
+ALTER FUNCTION "app"."claim_first_platform_admin"(text) OWNER TO casei_platform_boundary;
+REVOKE EXECUTE ON FUNCTION "app"."current_platform_role"() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."platform_role_for_user"(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."platform_status_for_user"(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."platform_account_metadata"(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."platform_account_workspaces"(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."assert_platform_session_allowed"(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."lock_platform_session_user"(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."guard_platform_session_insert"() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION "app"."claim_first_platform_admin"(text) FROM PUBLIC;
 --> statement-breakpoint
 ALTER TABLE "platform_account" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "platform_account" FORCE ROW LEVEL SECURITY;
@@ -224,6 +292,15 @@ CREATE POLICY "platform_account_read_scope" ON "platform_account"
     )
   );
 --> statement-breakpoint
+CREATE POLICY "platform_account_boundary" ON "platform_account"
+  TO casei_platform_boundary
+  USING (true)
+  WITH CHECK (true);
+CREATE POLICY "workspace_platform_boundary" ON "workspace"
+  FOR SELECT TO casei_platform_boundary USING (true);
+CREATE POLICY "membership_platform_boundary" ON "membership"
+  FOR SELECT TO casei_platform_boundary USING (true);
+--> statement-breakpoint
 ALTER TABLE "platform_audit_event" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "platform_audit_event" FORCE ROW LEVEL SECURITY;
 CREATE POLICY "platform_audit_event_scope" ON "platform_audit_event"
@@ -238,6 +315,18 @@ ALTER TABLE "admin_step_up_challenge" FORCE ROW LEVEL SECURITY;
 CREATE POLICY "admin_step_up_challenge_scope" ON "admin_step_up_challenge"
   USING ("user_id" = "app"."current_actor_id"())
   WITH CHECK ("user_id" = "app"."current_actor_id"());
+--> statement-breakpoint
+ALTER TABLE "admin_email_delivery" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "admin_email_delivery" FORCE ROW LEVEL SECURITY;
+CREATE POLICY "admin_email_delivery_scope" ON "admin_email_delivery"
+  USING (
+    "actor_id" = "app"."current_actor_id"()
+    AND "app"."current_platform_role"() IN ('platform_admin', 'platform_support')
+  )
+  WITH CHECK (
+    "actor_id" = "app"."current_actor_id"()
+    AND "app"."current_platform_role"() IN ('platform_admin', 'platform_support')
+  );
 --> statement-breakpoint
 -- Better Auth owns the two-factor table lifecycle. It already scopes rows by
 -- authenticated user, so unlike platform authority tables this table is not

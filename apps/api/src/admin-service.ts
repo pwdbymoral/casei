@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   AdminAccountAction,
   AdminAccountDetail,
@@ -29,6 +30,21 @@ export interface AdminActor extends RequestActor {
   platformRole?: PlatformRole | null;
 }
 
+export type AdminEmailDeliveryAudit = {
+  actorId: string;
+  targetId: string;
+  action: string;
+  reason: string;
+  correlationId: string;
+  ipAddress?: string | null;
+  endpoint?: string | null;
+};
+
+export type AdminEmailCommand<T> = {
+  email: string;
+  result: T;
+};
+
 export interface AdminAccountStore {
   searchAccounts(input: AdminAccountSearchQuery): Promise<AdminAccountList>;
   getAccount(userId: string): Promise<AdminAccountDetail | null>;
@@ -49,6 +65,17 @@ export interface AdminAccountStore {
     key: string,
     request: unknown,
     run: () => Promise<T>,
+    actorId?: string,
+    stepUpToken?: string,
+  ): Promise<{ replayed: boolean; result: T }>;
+  /** Finalizes idempotency and audit only after the auth email is accepted. */
+  executeEmailIdempotent?<T>(
+    scope: string,
+    key: string,
+    request: unknown,
+    run: () => Promise<AdminEmailCommand<T>>,
+    send: (email: string) => Promise<void>,
+    audit: AdminEmailDeliveryAudit,
     actorId?: string,
     stepUpToken?: string,
   ): Promise<{ replayed: boolean; result: T }>;
@@ -86,7 +113,10 @@ export interface AdminAuthPort {
     password: string;
     headers: Headers;
   }): Promise<{ totpURI: string; backupCodes: string[] }>;
-  verifyTwoFactorEnrollment?(input: { code: string; headers: Headers }): Promise<void>;
+  verifyTwoFactorEnrollment?(input: {
+    code: string;
+    headers: Headers;
+  }): Promise<{ setCookies: string[] }>;
 }
 
 type CommandResult<T> = { replayed: boolean; result: T };
@@ -237,7 +267,11 @@ export class AdminService {
       "auth:verification-resend",
       userId,
       input,
-      (email) => this.auth.sendVerificationEmail(email, idempotencyKey),
+      (email) =>
+        this.auth.sendVerificationEmail(
+          email,
+          deriveEmailDispatchKey(actor.userId, "auth:verification-resend", userId, idempotencyKey),
+        ),
     );
   }
 
@@ -258,7 +292,11 @@ export class AdminService {
       "auth:recovery-resend",
       userId,
       input,
-      (email) => this.auth.sendPasswordReset(email, idempotencyKey),
+      (email) =>
+        this.auth.sendPasswordReset(
+          email,
+          deriveEmailDispatchKey(actor.userId, "auth:recovery-resend", userId, idempotencyKey),
+        ),
     );
   }
 
@@ -298,12 +336,13 @@ export class AdminService {
     actor: AdminActor,
     code: string,
     headers: Headers,
-  ): Promise<void> {
+  ): Promise<string[]> {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
     if (actor.twoFactorEnabled === true || !this.auth.verifyTwoFactorEnrollment) {
       throw new AdminPolicyError("permission_denied");
     }
-    await this.auth.verifyTwoFactorEnrollment({ code, headers });
+    const result = await this.auth.verifyTwoFactorEnrollment({ code, headers });
+    return result.setCookies;
   }
 
   private async accountStatusCommand(
@@ -377,9 +416,9 @@ export class AdminService {
   }
 
   /**
-   * Email delivery is deliberately invoked after the idempotency transaction
-   * commits. The command key is forwarded to Better Auth so its durable
-   * auth-email outbox derives the same sourceId on a retry.
+   * Email delivery is invoked after a durable pending intent commits. The
+   * store finalizes idempotency and audit only after Better Auth accepts it;
+   * retries keep the same scoped auth-email key.
    */
   private async executeEmailCommand(
     actor: AdminActor,
@@ -390,6 +429,34 @@ export class AdminService {
     input: unknown,
     send: (email: string) => Promise<void>,
   ): Promise<CommandResult<null>> {
+    const scope = `${actor.userId}:platform:${action}:${userId}`;
+    const request = { action, targetId: userId, input };
+    if (this.store.executeEmailIdempotent) {
+      return this.store.executeEmailIdempotent(
+        scope,
+        idempotencyKey,
+        request,
+        async () => {
+          const account = await this.requireAccount(userId);
+          return { email: account.email, result: null };
+        },
+        send,
+        {
+          actorId: actor.userId,
+          targetId: userId,
+          action,
+          reason:
+            typeof input === "object" && input !== null && "reason" in input
+              ? String((input as { reason?: unknown }).reason ?? "")
+              : "",
+          correlationId,
+          ipAddress: actor.ipAddress,
+          endpoint: actor.endpoint,
+        },
+        actor.userId,
+        actor.stepUpToken,
+      );
+    }
     const result = await this.executeCommand(
       actor,
       idempotencyKey,
@@ -420,4 +487,15 @@ export class AdminService {
   private assertNotSelf(actor: AdminActor, targetUserId: string): void {
     if (actor.userId === targetUserId) throw new AdminPolicyError("permission_denied");
   }
+}
+
+function deriveEmailDispatchKey(
+  actorId: string,
+  action: string,
+  targetId: string,
+  commandKey: string,
+): string {
+  return `admin-email-${createHash("sha256")
+    .update(`${actorId}\0${action}\0${targetId}\0${commandKey}`)
+    .digest("hex")}`;
 }

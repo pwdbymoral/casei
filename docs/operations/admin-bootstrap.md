@@ -8,8 +8,9 @@ ou e-mail enviados pelo navegador.
 2. Em uma janela de deploy, configure `DATABASE_URL_MIGRATION` com a conexão administrativa de
    migrations e `CASEI_BOOTSTRAP_USER_ID` com o `user.id` opaco da conta. Não use e-mail como valor.
 3. Execute `pnpm --filter @casei/api bootstrap:platform-admin` uma única vez.
-4. O comando bloqueia o conjunto de administradores ativos na transação. Se outro admin já existir,
-   aborta sem alterar papéis; reexecuções não promovem outra conta.
+4. O comando bloqueia o conjunto de contas de plataforma na transação. Se qualquer conta de
+   plataforma já existir (inclusive suspensa), aborta sem alterar papéis; reexecuções não promovem
+   outra conta.
 5. Remova `CASEI_BOOTSTRAP_USER_ID` dos segredos do job e faça o primeiro login. O console deve
    exigir a ativação do segundo fator antes de qualquer operação administrativa crítica.
 
@@ -21,6 +22,7 @@ Auth two-factor, RLS e as funções controladas de metadados administrativos. Ap
 primeiro `platform_admin` precisa cadastrar e verificar TOTP; sem isso o layout/API liberam somente
 a jornada de enrollment, não contas, sessões ou comandos.
 
-Reenvios de verificação/recuperação são enfileirados fora da transação de comando e usam a chave de
-idempotência como identidade determinística do outbox. Em migrations futuras, use 0022 ou superior;
-não altere 0019, 0020 ou 0021 depois de aplicadas.
+Reenvios de verificação/recuperação criam uma intent `pending` na migration 0021 e só marcam a
+idempotência/auditoria como sucesso depois que Better Auth aceita o envio. Falhas ficam `failed` e
+podem ser reprocessadas com a mesma chave escopada por ator, ação e alvo; a outbox de Better Auth
+recebe uma identidade determinística. Não altere 0019, 0020 ou 0021 depois de aplicadas.

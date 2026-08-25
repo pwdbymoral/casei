@@ -61,7 +61,28 @@ describe("ADMIN PostgreSQL boundary", () => {
       try {
         await restricted.query("BEGIN");
         await restricted.query('SET LOCAL ROLE "casei_app"');
-        await restricted.query(`SELECT set_config('app.actor_id', $1, true)`, [targetId]);
+        await restricted.query(`SELECT set_config('app.actor_id', $1, false)`, [targetId]);
+        const boundaryRole = await restricted.query<{
+          rolsuper: boolean;
+          rolbypassrls: boolean;
+          function_owner: string;
+        }>(
+          `SELECT r.rolsuper, r.rolbypassrls, owner_role.rolname AS function_owner
+             FROM pg_roles r
+             JOIN pg_proc p ON p.proname = 'platform_account_metadata'
+             JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'app'
+             JOIN pg_roles owner_role ON owner_role.oid = p.proowner
+            WHERE r.rolname = 'casei_platform_boundary'`,
+        );
+        expect(boundaryRole.rows[0]).toEqual({
+          rolsuper: false,
+          rolbypassrls: false,
+          function_owner: "casei_platform_boundary",
+        });
+        const actorRole = await restricted.query<{ role: string | null }>(
+          `SELECT app.current_platform_role() AS role`,
+        );
+        expect(actorRole.rows[0]?.role).toBeNull();
         const hidden = await restricted.query<{ workspace_count: string }>(
           `SELECT workspace_count FROM app.platform_account_metadata($1)`,
           [targetId],
@@ -72,6 +93,29 @@ describe("ADMIN PostgreSQL boundary", () => {
         );
         expect(hidden.rows[0]?.workspace_count).toBe("0");
         expect(hiddenWorkspaces.rows).toHaveLength(0);
+        const privileges = await restricted.query<{
+          function_name: string;
+          app_execute: boolean;
+          public_execute: boolean;
+        }>(
+          `SELECT p.proname AS function_name,
+                  has_function_privilege('casei_app', p.oid, 'EXECUTE') AS app_execute,
+                  COALESCE(bool_or(acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'), false) AS public_execute
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             LEFT JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl ON true
+            WHERE n.nspname = 'app'
+              AND p.proname IN (
+                'current_platform_role', 'platform_role_for_user', 'platform_status_for_user',
+                'platform_account_metadata', 'platform_account_workspaces',
+                'assert_platform_session_allowed', 'lock_platform_session_user',
+                'guard_platform_session_insert', 'claim_first_platform_admin'
+              )
+            GROUP BY p.oid, p.proname
+            ORDER BY p.proname`,
+        );
+        expect(privileges.rows.length).toBe(9);
+        expect(privileges.rows.every((row) => row.app_execute && !row.public_execute)).toBe(true);
         await restricted.query("ROLLBACK");
       } finally {
         restricted.release();

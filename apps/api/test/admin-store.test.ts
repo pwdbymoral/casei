@@ -194,4 +194,27 @@ describe("ADMIN PostgreSQL adapter", () => {
     );
     expect(auditValues?.[4]).toBe("203.0.113.0/24");
   });
+
+  it("keeps IPv6 prefixes valid when the source address is compressed", async () => {
+    let auditValues: unknown[] | undefined;
+    const client = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("INSERT INTO platform_audit_event")) auditValues = values;
+        return { rows: [], rowCount: 1 };
+      },
+      release: () => undefined,
+    };
+    const store = new PostgresAdminAccountStore({ connect: async () => client } as never);
+    await store.withActor("admin-user", () =>
+      store.recordAudit({
+        actorId: "admin-user",
+        targetId: "target-user",
+        action: "account:read",
+        reason: "review",
+        correlationId: "01J00000000000000000000000",
+        ipAddress: "2001:db8::42",
+      }),
+    );
+    expect(auditValues?.[4]).toBe("2001:db8:0:0::/64");
+  });
 });

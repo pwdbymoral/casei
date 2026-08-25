@@ -38,7 +38,7 @@ function createAdminApp(
       totpURI: "otpauth://totp/Casei",
       backupCodes: ["one"],
     }),
-    verifyTwoFactorEnrollment: async () => undefined,
+    verifyTwoFactorEnrollment: async () => ["casei_session=verified; Path=/; HttpOnly"],
     completeStepUp: async () => ({ token: "step-up-token", expiresInSeconds: 300 }),
     suspendAccount: async () => ({ replayed: false, result: account }),
     reactivateAccount: async () => ({ replayed: false, result: account }),
@@ -139,6 +139,7 @@ describe("ADMIN-002 HTTP boundary", () => {
       body: JSON.stringify({ code: "123456" }),
     });
     expect(verify.status).toBe(204);
+    expect(verify.headers.get("set-cookie")).toContain("casei_session=verified");
   });
 
   it("requires a reason and idempotency key for suspend", async () => {

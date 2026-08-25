@@ -42,4 +42,19 @@ describe("BetterAuthAdminAuthPort", () => {
       port.startTwoFactorEnrollment({ password: "password", headers: new Headers() }),
     ).resolves.toEqual({ totpURI: "otpauth://totp/Casei", backupCodes: ["one"] });
   });
+
+  it("returns Better Auth session cookies from enrollment verification", async () => {
+    const port = new BetterAuthAdminAuthPort(
+      async () => {
+        const response = new Response(null, { status: 200 });
+        response.headers.append("set-cookie", "casei_session=verified; Path=/; HttpOnly");
+        return response;
+      },
+      "http://api.test",
+      "http://web.test",
+    );
+    await expect(
+      port.verifyTwoFactorEnrollment({ code: "123456", headers: new Headers() }),
+    ).resolves.toMatchObject({ setCookies: [expect.stringContaining("casei_session=verified")] });
+  });
 });
