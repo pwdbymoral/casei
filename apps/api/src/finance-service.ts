@@ -3815,7 +3815,9 @@ export class FinanceService {
     const result = await client.query<TransactionRow>(
       `INSERT INTO finance_transaction (workspace_id, kind, state, instrument, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, cash_settled_on, description, category_id, card_id)
        VALUES ($1, $2, $3, $4, $5::bigint, CASE WHEN $3 = 'posted' THEN $5::bigint ELSE 0::bigint END, $6, $7, $8, CASE WHEN $3 = 'posted' THEN now() ELSE null END, CASE WHEN $3 = 'posted' AND $4 = 'wallet' THEN now() ELSE null END, $9, $10, $11)
-       RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
+       RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                 occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
+                 description, category_id, card_id, statement_id, recurrence_id, version`,
       [
         scope.workspaceId,
         input.kind,
@@ -3835,7 +3837,11 @@ export class FinanceService {
     if (input.state === "posted") {
       await this.publishTransaction(client, scope, row, BigInt(input.amount.minor));
       const refreshed = await client.query<TransactionRow>(
-        `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
+        `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
+                description, category_id, card_id, statement_id, recurrence_id, version
+           FROM finance_transaction
+          WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, row.id],
       );
       const value = refreshed.rows[0] ?? row;

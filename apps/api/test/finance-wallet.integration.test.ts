@@ -306,6 +306,7 @@ describe("CARD-003 statement adjustment PostgreSQL", () => {
           },
           "card-purchase-integration-001",
         );
+        expect(typeof purchase.transaction.occurredOn).toBe("string");
         const firstStatement = (await finance.listStatements(scope, card.id))[0];
         expect(firstStatement).toBeTruthy();
         if (!firstStatement) throw new Error("expected an open statement");
