@@ -1,4 +1,4 @@
-import type { CorrelationId, WorkspaceRole } from "@casei/contracts";
+import type { CorrelationId, PlatformRole, WorkspaceRole } from "@casei/contracts";
 import type { Context, Env } from "hono";
 
 export interface RequestActor {
@@ -7,6 +7,8 @@ export interface RequestActor {
   email?: string;
   displayName?: string;
   recentAuthentication?: boolean;
+  /** Platform role is separate from workspace membership and is absent for ordinary users. */
+  platformRole?: PlatformRole | null;
 }
 
 export interface WorkspaceScope {

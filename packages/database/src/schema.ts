@@ -42,6 +42,52 @@ export const workspace = pgTable(
   ],
 );
 
+/** Global platform authority is separate from workspace memberships. */
+export const platformAccount = pgTable(
+  "platform_account",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role"),
+    status: text("status").notNull().default("active"),
+    suspensionReason: text("suspension_reason"),
+    roleChangeReason: text("role_change_reason"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("platform_account_role_status_idx").on(table.role, table.status),
+    check(
+      "platform_account_role_check",
+      sql`${table.role} is null or ${table.role} in ('platform_admin', 'platform_support')`,
+    ),
+    check("platform_account_status_check", sql`${table.status} in ('active', 'suspended')`),
+    check("platform_account_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
+/** Administrative audit has no workspace scope and stores no domestic content. */
+export const platformAuditEvent = pgTable(
+  "platform_audit_event",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    actorId: text("actor_id").references(() => user.id, { onDelete: "set null" }),
+    targetId: text("target_id"),
+    action: text("action").notNull(),
+    occurredAt: instant("occurred_at").defaultNow().notNull(),
+    origin: text("origin").notNull(),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    result: text("result").notNull(),
+    reason: text("reason").notNull(),
+  },
+  (table) => [
+    index("platform_audit_actor_occurred_idx").on(table.actorId, table.occurredAt),
+    index("platform_audit_target_occurred_idx").on(table.targetId, table.occurredAt),
+  ],
+);
+
 export const userPreference = pgTable(
   "user_preference",
   {

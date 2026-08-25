@@ -187,6 +187,20 @@ function normalizeError(error: unknown): {
           : undefined,
     };
   }
+  if (hasCode(error, "last_platform_admin")) {
+    return {
+      status: 409,
+      code: "validation_failed",
+      message: "O último administrador ativo não pode ser removido ou suspenso.",
+    };
+  }
+  if (hasCode(error, "idempotency_conflict")) {
+    return {
+      status: 409,
+      code: "idempotency_conflict",
+      message: DEFAULT_MESSAGES.idempotency_conflict,
+    };
+  }
   if (hasCode(error, "conflict")) {
     return {
       status: 409,

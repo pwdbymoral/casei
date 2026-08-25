@@ -1,0 +1,125 @@
+import {
+  adminAccountActionSchema,
+  adminAccountSearchQuerySchema,
+  adminPlatformRoleUpdateSchema,
+} from "@casei/contracts";
+import type { Hono, MiddlewareHandler } from "hono";
+import type { AdminService } from "./admin-service.js";
+import type { ApiContext, ApiEnv, RequestActor } from "./http/index.js";
+import { ApiHttpError, parseJsonBody, parseQuery } from "./http/index.js";
+
+export interface AdminRoutesOptions {
+  service: AdminService;
+  actorMiddleware: MiddlewareHandler<ApiEnv>;
+}
+
+export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesOptions): void {
+  const { service } = options;
+  router.use("/admin/*", options.actorMiddleware);
+
+  router.get("/admin/accounts", async (context) => {
+    const result = await service.searchAccounts(
+      actorOf(context),
+      parseQuery(context, adminAccountSearchQuerySchema),
+    );
+    return context.json(result);
+  });
+
+  router.get("/admin/accounts/:userId", async (context) => {
+    return context.json(await service.getAccount(actorOf(context), context.req.param("userId")));
+  });
+
+  router.get("/admin/accounts/:userId/sessions", async (context) => {
+    const account = await service.getAccount(actorOf(context), context.req.param("userId"));
+    return context.json({ sessions: account.sessions });
+  });
+
+  router.post("/admin/accounts/:userId/suspend", async (context) => {
+    const result = await service.suspendAccount(
+      actorOf(context),
+      context.req.param("userId"),
+      await parseJsonBody(context, adminAccountActionSchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(result.result);
+  });
+
+  router.post("/admin/accounts/:userId/reactivate", async (context) => {
+    const result = await service.reactivateAccount(
+      actorOf(context),
+      context.req.param("userId"),
+      await parseJsonBody(context, adminAccountActionSchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(result.result);
+  });
+
+  router.patch("/admin/accounts/:userId/platform-role", async (context) => {
+    const result = await service.changePlatformRole(
+      actorOf(context),
+      context.req.param("userId"),
+      await parseJsonBody(context, adminPlatformRoleUpdateSchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(result.result);
+  });
+
+  router.delete("/admin/accounts/:userId/sessions/:sessionId", async (context) => {
+    const result = await service.revokeSession(
+      actorOf(context),
+      context.req.param("userId"),
+      context.req.param("sessionId"),
+      await parseJsonBody(context, adminAccountActionSchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.body(null, 204);
+  });
+
+  router.post("/admin/accounts/:userId/verification/resend", async (context) => {
+    const result = await service.resendVerification(
+      actorOf(context),
+      context.req.param("userId"),
+      await parseJsonBody(context, adminAccountActionSchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.body(null, 204);
+  });
+
+  router.post("/admin/accounts/:userId/recovery/resend", async (context) => {
+    const result = await service.resendRecovery(
+      actorOf(context),
+      context.req.param("userId"),
+      await parseJsonBody(context, adminAccountActionSchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.body(null, 204);
+  });
+}
+
+function actorOf(context: ApiContext): RequestActor {
+  const actor = context.get("actor");
+  if (!actor) throw new Error("actor middleware is required");
+  return actor;
+}
+
+function requiredIdempotencyKey(context: ApiContext): string {
+  const key = context.req.header("Idempotency-Key");
+  if (!key || !/^[\x21-\x7e]{16,128}$/.test(key)) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { "Idempotency-Key": ["Informe uma chave ASCII de 16 a 128 caracteres."] },
+    });
+  }
+  return key;
+}
