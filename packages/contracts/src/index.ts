@@ -931,12 +931,29 @@ export const statementItemSchema = z.object({
   id: domainIdSchema,
   transactionId: domainIdSchema,
   statementId: domainIdSchema,
-  type: z.enum(["purchase", "payment"]),
+  type: z.enum(["purchase", "payment", "adjustment", "refund"]),
   state: z.enum(["planned", "partially_settled", "posted", "canceled"]),
   description: z.string(),
   occurredOn: civilDateSchema,
   amount: moneySchema,
 });
+
+export const statementAdjustmentKindSchema = z.enum(["charge", "fee", "interest"]);
+export const createStatementAdjustmentSchema = z.object({
+  kind: statementAdjustmentKindSchema,
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+  description: z.string().trim().min(1).max(500),
+});
+export type CreateStatementAdjustmentInput = z.infer<typeof createStatementAdjustmentSchema>;
+
+export const createStatementRefundSchema = z.object({
+  sourceTransactionId: domainIdSchema,
+  amount: positiveMoneySchema,
+  occurredOn: civilDateSchema.optional(),
+  description: z.string().trim().max(500).optional(),
+});
+export type CreateStatementRefundInput = z.infer<typeof createStatementRefundSchema>;
 
 export const payStatementSchema = z.object({
   amount: positiveMoneySchema.optional(),

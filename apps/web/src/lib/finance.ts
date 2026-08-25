@@ -72,11 +72,16 @@ export type StatementItem = {
   id: string;
   transactionId: string;
   statementId: string;
-  type: "purchase" | "payment";
+  type: "purchase" | "payment" | "adjustment" | "refund";
   state: Transaction["state"];
   description: string;
   occurredOn: string;
   amount: Money;
+};
+
+export type StatementAdjustmentResult = {
+  transaction: Transaction;
+  statement: Statement;
 };
 
 export type StatementItemsPage = {
@@ -219,6 +224,11 @@ export function shouldRetryIdempotentCommand(error: unknown): boolean {
     error.status === 429 ||
     error.status >= 500
   );
+}
+
+/** Closing or changing a correction form while its request is pending must not lose its key. */
+export function shouldPreserveStatementAdjustmentCommandKey(saving: boolean): boolean {
+  return saving;
 }
 
 export function hasTransactionQueryFilters(query: TransactionQuery): boolean {
@@ -457,6 +467,28 @@ export type FinanceAdapter = {
     amount?: Money,
     idempotencyKey?: string,
   ): Promise<{ statementId: string; transactionId: string; amount: Money }>;
+  createStatementAdjustment(
+    workspaceId: string,
+    statement: Statement,
+    input: {
+      kind: "charge" | "fee" | "interest";
+      amount: Money;
+      occurredOn?: string;
+      description: string;
+    },
+    idempotencyKey?: string,
+  ): Promise<StatementAdjustmentResult>;
+  createStatementRefund(
+    workspaceId: string,
+    statement: Statement,
+    input: {
+      sourceTransactionId: string;
+      amount: Money;
+      occurredOn?: string;
+      description?: string;
+    },
+    idempotencyKey?: string,
+  ): Promise<StatementAdjustmentResult>;
   createRecurrence(
     workspaceId: string,
     input: {
@@ -559,6 +591,8 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   closeStatement: unavailableFinanceOperation,
   reopenStatement: unavailableFinanceOperation,
   payStatement: unavailableFinanceOperation,
+  createStatementAdjustment: unavailableFinanceOperation,
+  createStatementRefund: unavailableFinanceOperation,
   createRecurrence: unavailableFinanceOperation,
   createInstallmentPlan: unavailableFinanceOperation,
 };
@@ -798,6 +832,30 @@ export function createHttpFinanceAdapter(
           body: JSON.stringify({ amount }),
         },
       ),
+    createStatementAdjustment: (workspaceId, statement, input, commandKey) =>
+      call<StatementAdjustmentResult>(
+        `/workspaces/${workspaceId}/statements/${statement.id}/adjustments`,
+        {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${statement.version}"`,
+          },
+          body: JSON.stringify(input),
+        },
+      ),
+    createStatementRefund: (workspaceId, statement, input, commandKey) =>
+      call<StatementAdjustmentResult>(
+        `/workspaces/${workspaceId}/statements/${statement.id}/refunds`,
+        {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${statement.version}"`,
+          },
+          body: JSON.stringify(input),
+        },
+      ),
     createRecurrence: (workspaceId, input, commandKey) =>
       call<{ id: string; occurrences: string[] }>(`/workspaces/${workspaceId}/recurrences`, {
         method: "POST",
@@ -847,6 +905,18 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       {
         fingerprint: string;
         response: { statementId: string; transactionId: string; amount: Money };
+      }
+    >;
+    statementAdjustmentCommands: Map<
+      string,
+      { fingerprint: string; response: StatementAdjustmentResult }
+    >;
+    statementAdjustments: Map<
+      string,
+      {
+        kind: "charge" | "fee" | "interest" | "refund";
+        amount: bigint;
+        sourceTransactionId: string | null;
       }
     >;
     recurrences: Map<string, { input: unknown; value: { id: string; occurrences: string[] } }>;
@@ -944,6 +1014,8 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       transactionCommands: new Map(),
       settlementCommands: new Map(),
       statementPaymentCommands: new Map(),
+      statementAdjustmentCommands: new Map(),
+      statementAdjustments: new Map(),
       recurrences: new Map(),
       recurrenceCommands: new Map(),
       installmentPlans: new Map(),
@@ -1285,6 +1357,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           return previous.transaction;
         }
       }
+      if (state.statementAdjustments.has(current.id)) {
+        throw new FinanceAdapterError(
+          "Este lançamento é um ajuste da fatura; abra a fatura e registre a correção correspondente.",
+          409,
+        );
+      }
       if (current.state === "canceled") return current;
       const value = { ...current, state: "canceled" as const, version: current.version + 1 };
       state.transactions[state.transactions.indexOf(current)] = value;
@@ -1469,11 +1547,25 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           id: transaction.id,
           transactionId: transaction.id,
           statementId,
-          type: transaction.kind === "transfer" ? ("payment" as const) : ("purchase" as const),
+          type:
+            transaction.kind === "transfer"
+              ? ("payment" as const)
+              : state.statementAdjustments.get(transaction.id)?.kind === "refund"
+                ? ("refund" as const)
+                : state.statementAdjustments.has(transaction.id)
+                  ? ("adjustment" as const)
+                  : ("purchase" as const),
           state: transaction.state,
           description: transaction.description,
           occurredOn: transaction.occurredOn,
-          amount: transaction.amount,
+          amount: state.statementAdjustments.has(transaction.id)
+            ? {
+                ...transaction.amount,
+                minor:
+                  state.statementAdjustments.get(transaction.id)?.amount.toString() ??
+                  transaction.amount.minor,
+              }
+            : transaction.amount,
         }));
       const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
       const offset = query.cursor?.startsWith("fixture:")
@@ -1587,6 +1679,170 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       if (commandKey) state.statementPaymentCommands.set(commandKey, { fingerprint, response });
       return response;
     },
+    createStatementAdjustment: async (workspaceId, statement, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.statements.find(({ id }) => id === statement.id);
+      if (!current) throw new FinanceAdapterError("Fatura não encontrada.", 404);
+      const fingerprint = JSON.stringify({ statementId: statement.id, input });
+      if (commandKey) {
+        const previous = state.statementAdjustmentCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro ajuste.", 409);
+          }
+          return previous.response;
+        }
+      }
+      if (current.version !== statement.version) {
+        throw new FinanceAdapterError(
+          "A fatura foi alterada por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      if (input.amount.currency !== current.total.currency) {
+        throw new FinanceAdapterError("A moeda do ajuste não corresponde à fatura.", 422);
+      }
+      const amountMinor = BigInt(input.amount.minor);
+      if (amountMinor <= BigInt(0))
+        throw new FinanceAdapterError("O ajuste deve ser positivo.", 422);
+      const transaction: Transaction = {
+        id: fixtureId(180 + state.transactions.length),
+        workspaceId,
+        kind: "expense",
+        state: "posted",
+        amount: { ...input.amount, minor: amountMinor.toString() },
+        settledAmount: { ...input.amount, minor: amountMinor.toString() },
+        occurredOn: input.occurredOn ?? new Date().toISOString().slice(0, 10),
+        dueOn: null,
+        postedOn: new Date().toISOString(),
+        description: input.description,
+        categoryId: null,
+        cardId: current.cardId,
+        statementId: current.id,
+        version: 0,
+      };
+      state.transactions.unshift(transaction);
+      state.statementAdjustments.set(transaction.id, {
+        kind: input.kind,
+        amount: amountMinor,
+        sourceTransactionId: null,
+      });
+      const nextTotal = BigInt(current.total.minor) + amountMinor;
+      const nextOpen = nextTotal - BigInt(current.paid.minor);
+      const nextState =
+        current.state === "open"
+          ? "open"
+          : nextOpen <= BigInt(0)
+            ? "paid"
+            : BigInt(current.paid.minor) > BigInt(0)
+              ? "partially_paid"
+              : "closed";
+      const nextStatement = {
+        ...current,
+        total: { ...current.total, minor: nextTotal.toString() },
+        openAmount: { ...current.openAmount, minor: nextOpen.toString() },
+        state: nextState as Statement["state"],
+        version: current.version + 1,
+      };
+      state.statements[state.statements.indexOf(current)] = nextStatement;
+      const response = { transaction, statement: nextStatement };
+      if (commandKey) state.statementAdjustmentCommands.set(commandKey, { fingerprint, response });
+      return response;
+    },
+    createStatementRefund: async (workspaceId, statement, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.statements.find(({ id }) => id === statement.id);
+      if (!current) throw new FinanceAdapterError("Fatura não encontrada.", 404);
+      const fingerprint = JSON.stringify({ statementId: statement.id, input });
+      if (commandKey) {
+        const previous = state.statementAdjustmentCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            throw new FinanceAdapterError("A chave já foi usada para outro estorno.", 409);
+          }
+          return previous.response;
+        }
+      }
+      if (current.version !== statement.version) {
+        throw new FinanceAdapterError(
+          "A fatura foi alterada por outra pessoa.",
+          412,
+          current.version,
+        );
+      }
+      const source = state.transactions.find((item) => item.id === input.sourceTransactionId);
+      if (
+        !source ||
+        state.statementAdjustments.has(source.id) ||
+        source.cardId !== current.cardId ||
+        source.kind !== "expense" ||
+        (source.state !== "posted" && source.state !== "partially_settled")
+      ) {
+        throw new FinanceAdapterError("A compra original não pertence a este cartão.", 409);
+      }
+      const previousRefunds = [...state.statementAdjustments.entries()]
+        .filter(
+          ([, adjustment]) =>
+            adjustment.kind === "refund" && adjustment.sourceTransactionId === source.id,
+        )
+        .reduce((total, [, adjustment]) => total + -adjustment.amount, BigInt(0));
+      if (BigInt(input.amount.minor) > BigInt(source.settledAmount.minor) - previousRefunds) {
+        throw new FinanceAdapterError("O estorno excede o saldo da compra.", 409);
+      }
+      if (input.amount.currency !== current.total.currency) {
+        throw new FinanceAdapterError("A moeda do estorno não corresponde à fatura.", 422);
+      }
+      const amountMinor = BigInt(input.amount.minor);
+      const nextTotal = BigInt(current.total.minor) - amountMinor;
+      if (amountMinor <= BigInt(0) || nextTotal < BigInt(0)) {
+        throw new FinanceAdapterError("O estorno deve manter o total da fatura não negativo.", 422);
+      }
+      const description =
+        input.description?.trim() || `Estorno: ${source.description || "compra no cartão"}`;
+      const transaction: Transaction = {
+        id: fixtureId(200 + state.transactions.length),
+        workspaceId,
+        kind: "expense",
+        state: "posted",
+        amount: { ...input.amount, minor: amountMinor.toString() },
+        settledAmount: { ...input.amount, minor: amountMinor.toString() },
+        occurredOn: input.occurredOn ?? new Date().toISOString().slice(0, 10),
+        dueOn: null,
+        postedOn: new Date().toISOString(),
+        description,
+        categoryId: null,
+        cardId: current.cardId,
+        statementId: current.id,
+        version: 0,
+      };
+      state.transactions.unshift(transaction);
+      state.statementAdjustments.set(transaction.id, {
+        kind: "refund",
+        amount: -amountMinor,
+        sourceTransactionId: source.id,
+      });
+      const nextOpen = nextTotal - BigInt(current.paid.minor);
+      const nextState =
+        current.state === "open"
+          ? "open"
+          : nextOpen <= BigInt(0)
+            ? "paid"
+            : BigInt(current.paid.minor) > BigInt(0)
+              ? "partially_paid"
+              : "closed";
+      const nextStatement = {
+        ...current,
+        total: { ...current.total, minor: nextTotal.toString() },
+        openAmount: { ...current.openAmount, minor: nextOpen.toString() },
+        state: nextState as Statement["state"],
+        version: current.version + 1,
+      };
+      state.statements[state.statements.indexOf(current)] = nextStatement;
+      const response = { transaction, statement: nextStatement };
+      if (commandKey) state.statementAdjustmentCommands.set(commandKey, { fingerprint, response });
+      return response;
+    },
     createRecurrence: async (workspaceId, input, commandKey) => {
       const state = stateFor(workspaceId);
       const fingerprint = JSON.stringify(input);
@@ -1656,7 +1912,7 @@ export function canWriteFinance(role: WorkspaceRole): boolean {
 
 export function statementItemAmountPrefix(item: Pick<StatementItem, "type" | "state">): string {
   if (item.state === "canceled") return "Cancelada · ";
-  return item.type === "payment" ? "−" : "+";
+  return item.type === "payment" || item.type === "refund" ? "−" : "+";
 }
 
 export function createRequestGuard() {

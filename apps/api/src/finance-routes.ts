@@ -7,6 +7,8 @@ import {
   createInstallmentPlanSchema,
   createLoanSchema,
   createRecurrenceSchema,
+  createStatementAdjustmentSchema,
+  createStatementRefundSchema,
   createTransactionSchema,
   domainIdSchema,
   goalAllocateSchema,
@@ -547,6 +549,36 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       requiredIdempotencyKey(context),
     );
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+  });
+
+  router.post("/workspaces/:workspaceId/statements/:statementId/adjustments", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const input = await parseJsonBody(context, createStatementAdjustmentSchema);
+    const result = await service.createStatementAdjustment(
+      scopeOf(context),
+      statementId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.response.statement.version);
+    return context.json(result.response, result.replayed ? 200 : 201);
+  });
+
+  router.post("/workspaces/:workspaceId/statements/:statementId/refunds", async (context) => {
+    const statementId = parseDomainId(context.req.param("statementId"));
+    const input = await parseJsonBody(context, createStatementRefundSchema);
+    const result = await service.createStatementRefund(
+      scopeOf(context),
+      statementId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.response.statement.version);
+    return context.json(result.response, result.replayed ? 200 : 201);
   });
 
   router.post("/workspaces/:workspaceId/installments/preview", async (context) => {
