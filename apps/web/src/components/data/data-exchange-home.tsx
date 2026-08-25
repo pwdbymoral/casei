@@ -63,6 +63,8 @@ import {
   type ImportLocale,
   type ImportPreview,
   importStatusLabel,
+  MAX_IMPORT_ROWS,
+  serializeImportErrorReport,
 } from "@/lib/data-exchange";
 
 type SurfaceStatus = "idle" | "loading" | "success" | "error" | "offline" | "permission";
@@ -105,12 +107,8 @@ function downloadBlob(blob: Blob, fileName: string) {
 }
 
 function downloadErrorReport(job: ImportJob) {
-  const header = "linha,mensagem\n";
-  const body = job.errors
-    .map(({ rowNumber, message }) => `${rowNumber},"${message.replaceAll('"', '""')}"`)
-    .join("\n");
   downloadBlob(
-    new Blob([header + body], { type: "text/csv;charset=utf-8" }),
+    new Blob([serializeImportErrorReport(job.errors)], { type: "text/csv;charset=utf-8" }),
     `casei-erros-${job.id}.csv`,
   );
 }
@@ -280,7 +278,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }
 
   async function previewFile() {
-    if (!file || !importAllowed || !online) return;
+    if (!file || !importAllowed) return;
     setPreviewStatus("loading");
     setPreviewError(null);
     try {
@@ -302,7 +300,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }
 
   async function startImport() {
-    if (!file || !preview?.canConfirm || mappingDirty || !importAllowed || !online) return;
+    if (!file || !preview || !canConfirmImport || !importAllowed || !online) return;
     setImportError(null);
     setImportJob(null);
     const key = importIdempotencyKey.current ?? `import-${crypto.randomUUID()}`;
@@ -382,6 +380,11 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     : previewStatus === "loading"
       ? "Preparando prévia…"
       : "";
+  const canConfirmImport = Boolean(
+    preview?.canConfirm === true &&
+      !mappingDirty &&
+      (applyMode === "valid_only" || preview.counts.errors === 0),
+  );
 
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:py-10">
@@ -517,7 +520,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   <Button
                     type="button"
                     className="min-h-11 w-full"
-                    disabled={!file || !importAllowed || !online || previewStatus === "loading"}
+                    disabled={!file || !importAllowed || previewStatus === "loading"}
                     onClick={() => void previewFile()}
                   >
                     {previewStatus === "loading" ? (
@@ -672,8 +675,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     </section>
                     {preview.rows.length > 10 ? (
                       <p className="text-xs text-muted-foreground">
-                        Mostrando 10 linhas; o job processará todas as {preview.rows.length} linhas
-                        da prévia.
+                        {preview.rowLimitExceeded
+                          ? `A prévia foi limitada a ${MAX_IMPORT_ROWS.toLocaleString("pt-BR")} linhas. Reduza o arquivo para confirmar a importação.`
+                          : `Mostrando 10 linhas; o job processará todas as ${preview.rows.length} linhas da prévia.`}
                       </p>
                     ) : null}
                   </div>
@@ -714,8 +718,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     type="button"
                     className="min-h-11"
                     disabled={
-                      !preview.canConfirm ||
-                      mappingDirty ||
+                      !canConfirmImport ||
                       !importAllowed ||
                       !online ||
                       Boolean(importJob && !terminalImport(importJob))
@@ -725,9 +728,11 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     <CheckCircle2Icon data-icon="inline-start" aria-hidden="true" /> Confirmar
                     importação
                   </Button>
-                  {previewStatus === "success" && !preview.canConfirm ? (
+                  {previewStatus === "success" && !canConfirmImport ? (
                     <span className="text-sm text-muted-foreground">
-                      Corrija os erros e atualize a prévia para confirmar.
+                      {applyMode === "all_or_nothing" && preview.counts.errors > 0
+                        ? "Corrija os erros ou escolha importar somente as linhas válidas."
+                        : "Corrija os campos obrigatórios e atualize a prévia para confirmar."}
                     </span>
                   ) : null}
                 </div>

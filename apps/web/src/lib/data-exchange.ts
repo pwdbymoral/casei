@@ -2,6 +2,7 @@ import { requireApiOrigin } from "./api-origin";
 import type { WorkspaceRole } from "./workspaces";
 
 export const MAX_IMPORT_FILE_BYTES = 10_000_000;
+export const MAX_IMPORT_ROWS = 50_000;
 
 export type DataDomain = "transactions" | "products" | "complete";
 export type DataFileFormat = "csv" | "xlsx";
@@ -48,6 +49,7 @@ export type ImportPreview = {
   serverBacked: boolean;
   canConfirm: boolean;
   counts: { valid: number; warnings: number; duplicates: number; errors: number };
+  rowLimitExceeded?: boolean;
   message?: string;
 };
 
@@ -247,6 +249,7 @@ export function parseLocalCsvPreview(
   ImportPreview,
   "headers" | "rows" | "mapping" | "unknownHeaders" | "canConfirm" | "counts"
 > & {
+  rowLimitExceeded: boolean;
   message?: string;
 } {
   const delimiter = detectPreviewDelimiter(text, options.locale);
@@ -258,7 +261,8 @@ export function parseLocalCsvPreview(
   const fields = dataFieldsForDomain(options.domain);
   const inferred = inferMapping(headers, fields, options.mapping);
   const seenRows = new Set<string>();
-  const rows: ImportPreviewRow[] = lines.slice(0, 100).map((line, index) => {
+  const rowLimitExceeded = lines.length > MAX_IMPORT_ROWS;
+  const rows: ImportPreviewRow[] = lines.slice(0, MAX_IMPORT_ROWS).map((line, index) => {
     const cells = splitCsvLine(line, delimiter);
     const errors: string[] = [];
     for (const field of fields.filter((item) => item.required)) {
@@ -289,11 +293,17 @@ export function parseLocalCsvPreview(
     rows,
     mapping: inferred.mapping,
     unknownHeaders: inferred.unknownHeaders,
-    canConfirm: rows.length > 0 && errors === 0 && inferred.missingRequired.length === 0,
+    canConfirm:
+      !rowLimitExceeded && rows.length > 0 && valid > 0 && inferred.missingRequired.length === 0,
     counts: { valid, warnings, duplicates, errors },
-    ...(inferred.missingRequired.length
-      ? { message: "Mapeie os campos obrigatórios para continuar." }
-      : {}),
+    rowLimitExceeded,
+    ...(rowLimitExceeded
+      ? {
+          message: `O arquivo excede o limite de ${MAX_IMPORT_ROWS.toLocaleString("pt-BR")} linhas.`,
+        }
+      : inferred.missingRequired.length
+        ? { message: "Mapeie os campos obrigatórios para continuar." }
+        : {}),
   };
 }
 
@@ -345,6 +355,7 @@ async function localPreview(
       serverBacked,
       canConfirm: false,
       counts: { valid: 0, warnings: 1, duplicates: 0, errors: 0 },
+      rowLimitExceeded: false,
       message: serverBacked
         ? undefined
         : "A prévia XLSX depende do servidor. Envie o arquivo quando DATA-004 estiver disponível.",
@@ -368,6 +379,7 @@ async function localPreview(
     serverBacked,
     canConfirm: parsed.canConfirm && inferred.missingRequired.length === 0,
     counts: parsed.counts,
+    rowLimitExceeded: parsed.rowLimitExceeded,
     message: parsed.message,
   };
 }
@@ -413,6 +425,16 @@ function workspacePath(workspaceId: string, suffix: string): string {
 const httpDataExchangeAdapter: DataExchangeAdapter = {
   async previewImport(workspaceId, input) {
     assertFile(input.file);
+    if (globalThis.navigator?.onLine === false) {
+      if (extensionFor(input.file) === "xlsx") {
+        throw new DataExchangeError(
+          "A prévia XLSX precisa de conexão. CSV pode ser revisado offline.",
+          undefined,
+          "offline",
+        );
+      }
+      return localPreview(workspaceId, input, false);
+    }
     const form = new FormData();
     form.set("file", input.file);
     form.set("domain", input.domain);
@@ -482,12 +504,69 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
 
 const fixtureImports = new Map<string, ImportJob>();
 const fixtureExports = new Map<string, ExportJob>();
+const fixtureImportKeys = new Map<string, ImportJob>();
+const fixtureRetryKeys = new Map<string, ImportJob>();
+const fixtureExportKeys = new Map<string, ExportJob>();
+
+function fixtureKey(workspaceId: string, key: string): string {
+  return `${workspaceId}\u001f${key}`;
+}
+
+function fixturePermission(message: string): DataExchangeError {
+  return new DataExchangeError(message, 403, "permission");
+}
+
+function rememberImport(job: ImportJob): ImportJob {
+  fixtureImports.set(job.id, job);
+  for (const [key, value] of fixtureImportKeys) {
+    if (value.id === job.id) fixtureImportKeys.set(key, job);
+  }
+  for (const [key, value] of fixtureRetryKeys) {
+    if (value.id === job.id) fixtureRetryKeys.set(key, job);
+  }
+  return job;
+}
+
+function rememberExport(job: ExportJob): ExportJob {
+  fixtureExports.set(job.id, job);
+  for (const [key, value] of fixtureExportKeys) {
+    if (value.id === job.id) fixtureExportKeys.set(key, job);
+  }
+  return job;
+}
 
 const fixtureDataExchangeAdapter: DataExchangeAdapter = {
   previewImport: (workspaceId, input) => localPreview(workspaceId, input, false),
-  async startImport(workspaceId, input) {
-    if (!input.preview.canConfirm)
+  async startImport(workspaceId, input, idempotencyKey) {
+    const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const replay = fixtureImportKeys.get(replayKey);
+    if (replay) return replay;
+    if (!input.preview.canConfirm || input.preview.rowLimitExceeded)
       throw new DataExchangeError("Corrija a prévia antes de confirmar a importação.");
+    if (input.applyMode === "all_or_nothing" && input.preview.counts.errors > 0)
+      throw new DataExchangeError("Tudo ou nada exige uma prévia sem erros.");
+    const duplicateRows = input.preview.rows.filter((row) => row.status === "duplicate");
+    if (input.duplicatePolicy === "review" && duplicateRows.length > 0) {
+      const reviewJob: ImportJob = {
+        id: id("import"),
+        workspaceId,
+        status: "failed",
+        progress: 0,
+        totalRows: input.preview.rows.length,
+        appliedRows: 0,
+        ignoredRows: 0,
+        rejectedRows: duplicateRows.length,
+        errors: duplicateRows.map((row) => ({
+          rowNumber: row.rowNumber,
+          message: "Duplicata provável aguardando revisão; nenhuma linha foi aplicada.",
+        })),
+        createdAt: formatDate(new Date().toISOString()),
+        expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
+        message: "A política de revisão exige uma decisão antes de aplicar duplicatas prováveis.",
+      };
+      fixtureImportKeys.set(replayKey, reviewJob);
+      return rememberImport(reviewJob);
+    }
     const job: ImportJob = {
       id: id("import"),
       workspaceId,
@@ -503,48 +582,65 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
       createdAt: formatDate(new Date().toISOString()),
       expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
     };
-    fixtureImports.set(job.id, job);
-    return job;
+    fixtureImportKeys.set(replayKey, job);
+    return rememberImport(job);
   },
-  async getImportJob(_workspaceId, jobId) {
+  async getImportJob(workspaceId, jobId) {
     const current = fixtureImports.get(jobId);
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
+    if (current.workspaceId !== workspaceId)
+      throw fixturePermission("Esta importação pertence a outro espaço.");
     if (current.status === "processing") {
       const progress = Math.min(100, current.progress + 35);
-      const appliedRows = Math.round((current.totalRows * progress) / 100) - current.rejectedRows;
+      const appliedRows =
+        Math.round((current.totalRows * progress) / 100) -
+        current.rejectedRows -
+        current.ignoredRows;
       const next = {
         ...current,
         progress,
         appliedRows: Math.max(0, appliedRows),
         status: progress === 100 ? (current.rejectedRows ? "partial" : "completed") : "processing",
       } as ImportJob;
-      fixtureImports.set(jobId, next);
-      return next;
+      return rememberImport(next);
     }
     return current;
   },
-  async retryImport(_workspaceId, jobId) {
+  async retryImport(workspaceId, jobId, idempotencyKey) {
     const current = fixtureImports.get(jobId);
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
+    if (current.workspaceId !== workspaceId)
+      throw fixturePermission("Esta importação pertence a outro espaço.");
+    const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const replay = fixtureRetryKeys.get(replayKey);
+    if (replay) return replay;
+    if (current.errors.some((error) => error.message.includes("aguardando revisão"))) {
+      fixtureRetryKeys.set(replayKey, current);
+      return current;
+    }
     const next = { ...current, status: "processing" as const, progress: 0, appliedRows: 0 };
-    fixtureImports.set(jobId, next);
-    return next;
+    fixtureRetryKeys.set(replayKey, next);
+    return rememberImport(next);
   },
-  async cancelImport(_workspaceId, jobId) {
+  async cancelImport(workspaceId, jobId) {
     const current = fixtureImports.get(jobId);
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
+    if (current.workspaceId !== workspaceId)
+      throw fixturePermission("Esta importação pertence a outro espaço.");
     const next = {
       ...current,
       status: "canceled" as const,
       message: "A aplicação foi cancelada; os lotes já confirmados foram mantidos.",
     };
-    fixtureImports.set(jobId, next);
-    return next;
+    return rememberImport(next);
   },
   async listExportJobs(workspaceId) {
     return [...fixtureExports.values()].filter((job) => job.workspaceId === workspaceId);
   },
-  async createExport(workspaceId, input) {
+  async createExport(workspaceId, input, idempotencyKey) {
+    const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const replay = fixtureExportKeys.get(replayKey);
+    if (replay) return replay;
     const job: ExportJob = {
       id: id("export"),
       workspaceId,
@@ -556,12 +652,14 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
       createdAt: formatDate(new Date().toISOString()),
       expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
     };
-    fixtureExports.set(job.id, job);
-    return job;
+    fixtureExportKeys.set(replayKey, job);
+    return rememberExport(job);
   },
-  async getExportJob(_workspaceId, jobId) {
+  async getExportJob(workspaceId, jobId) {
     const current = fixtureExports.get(jobId);
     if (!current) throw new DataExchangeError("Exportação não encontrada.", 404);
+    if (current.workspaceId !== workspaceId)
+      throw fixturePermission("Esta exportação pertence a outro espaço.");
     if (current.status === "processing") {
       const progress = Math.min(100, current.progress + 50);
       const next = {
@@ -569,14 +667,16 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
         progress,
         status: progress === 100 ? "completed" : "processing",
       } as ExportJob;
-      fixtureExports.set(jobId, next);
-      return next;
+      return rememberExport(next);
     }
     return current;
   },
-  async downloadExport(_workspaceId, jobId) {
+  async downloadExport(workspaceId, jobId) {
     const job = fixtureExports.get(jobId);
-    if (job?.status !== "completed")
+    if (!job) throw new DataExchangeError("Exportação não encontrada.", 404);
+    if (job.workspaceId !== workspaceId)
+      throw fixturePermission("Esta exportação pertence a outro espaço.");
+    if (job.status !== "completed")
       throw new DataExchangeError("A exportação ainda não está pronta.");
     const content = "casei_schema_version,casei_id\n1,fixture\n";
     return new Blob([content], {
@@ -603,6 +703,23 @@ export function formatDataFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function protectReportCell(value: string): string {
+  return /^[\t\r\n ]*[=+\-@]/.test(value) ? `'${value}` : value;
+}
+
+function serializeReportCell(value: string): string {
+  return `"${protectReportCell(value).replaceAll('"', '""')}"`;
+}
+
+export function serializeImportErrorReport(
+  errors: readonly { rowNumber: number; message: string }[],
+): string {
+  return [
+    "linha,mensagem",
+    ...errors.map(({ rowNumber, message }) => `${rowNumber},${serializeReportCell(message)}`),
+  ].join("\n");
 }
 
 export function importStatusLabel(status: ImportJobStatus): string {

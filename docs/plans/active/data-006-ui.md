@@ -19,6 +19,9 @@ fabrica sucesso quando o backend ainda não estiver disponível. O adapter de
 fixtures exercita a jornada completa em desenvolvimento e testes sem gravar
 dados reais. A prévia CSV local é somente um fallback de UX para poder revisar
 um arquivo antes da aplicação; a validação canônica continua no servidor.
+Quando não há conexão, o adapter autenticado usa esse fallback somente para
+CSV; XLSX continua exigindo o servidor. A confirmação e o envio permanecem
+bloqueados offline.
 
 Não fazem parte desta fatia storage, job worker, persistência de perfis,
 autorização server-side, reimportação efetiva ou um parser XLSX no navegador.
@@ -41,3 +44,7 @@ disponível.
 Os endpoints DATA-001/DATA-004 ainda não existem na API deste branch. Em
 ambiente autenticado a UI mostra a indisponibilidade do boundary e preserva o
 arquivo/configuração para retry; nenhum sucesso simulado é exibido.
+O fallback local respeita o limite de 50 mil linhas e bloqueia a confirmação
+quando o arquivo excede esse limite. O relatório de erros prefixa células com
+caracteres de fórmula para não transformar mensagens retornadas pelo job em
+fórmulas de planilha; a proteção canônica de exportações continua em DATA-005.
