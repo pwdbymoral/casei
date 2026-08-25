@@ -2645,18 +2645,26 @@ export class FinanceService {
             throw new FinanceConflictError("Parcelas realizadas não podem ser alteradas.");
           }
           if (parsed.amount && BigInt(parsed.amount.minor) !== BigInt(current.amount_minor)) {
+            const targetAmount = BigInt(parsed.amount.minor);
             const others = await client.query<{
               id: string;
               transaction_id: string;
               amount_minor: string;
             }>(
               `SELECT i.id, i.transaction_id, i.amount_minor
-                 FROM installment i JOIN finance_transaction t
+                FROM installment i JOIN finance_transaction t
                    ON t.workspace_id = i.workspace_id AND t.id = i.transaction_id
                 WHERE i.workspace_id = $1 AND i.plan_id = $2 AND i.id <> $3 AND t.state = 'planned'
+                  AND i.amount_minor + $4::bigint - $5::bigint > 0
                 ORDER BY i.number DESC
                 FOR UPDATE OF i, t`,
-              [scope.workspaceId, planId, installmentId],
+              [
+                scope.workspaceId,
+                planId,
+                installmentId,
+                BigInt(current.amount_minor),
+                targetAmount,
+              ],
             );
             const companion = others.rows[0];
             if (!companion) {
@@ -2664,7 +2672,6 @@ export class FinanceService {
                 "É preciso haver outra parcela futura para conservar o total.",
               );
             }
-            const targetAmount = BigInt(parsed.amount.minor);
             const companionAmount =
               BigInt(companion.amount_minor) + BigInt(current.amount_minor) - targetAmount;
             if (companionAmount <= 0n) {
@@ -2757,13 +2764,14 @@ export class FinanceService {
           if (plan.rows[0].version !== expectedVersion) {
             throw new VersionConflictError(plan.rows[0].version);
           }
+          const today = await this.workspaceToday(client, scope.workspaceId);
           const canceled = await client.query<{ id: string; amount_minor: string }>(
             `UPDATE finance_transaction t SET state = 'canceled', version = t.version + 1, updated_at = now()
               FROM installment i
              WHERE t.workspace_id = $1 AND t.id = i.transaction_id AND i.workspace_id = $1
-               AND i.plan_id = $2 AND t.state = 'planned'
+               AND i.plan_id = $2 AND i.due_on >= $3::date AND t.state = 'planned'
              RETURNING t.id, t.amount_minor`,
-            [scope.workspaceId, planId],
+            [scope.workspaceId, planId, today],
           );
           for (const row of canceled.rows) {
             await this.recordTransactionAudit(
@@ -3138,6 +3146,32 @@ export class FinanceService {
                 expectedVersion,
               ],
             );
+            if (parsed.endOn) {
+              const canceled = await client.query<{
+                transaction_id: string;
+                amount_minor: string;
+                version: number;
+              }>(
+                `UPDATE finance_transaction t
+                    SET state = 'canceled', version = t.version + 1, updated_at = now()
+                   FROM recurrence_occurrence o
+                  WHERE t.workspace_id = $1 AND t.id = o.transaction_id
+                    AND o.workspace_id = $1 AND o.recurrence_id = $2
+                    AND o.occurrence_on > $3::date AND t.state = 'planned'
+                  RETURNING t.id AS transaction_id, t.amount_minor, t.version`,
+                [scope.workspaceId, recurrenceId, parsed.endOn],
+              );
+              for (const row of canceled.rows) {
+                await this.recordTransactionAudit(
+                  client,
+                  scope,
+                  row.transaction_id,
+                  "transaction.canceled",
+                  { state: "planned", amountMinor: row.amount_minor, version: row.version - 1 },
+                  { state: "canceled", amountMinor: row.amount_minor, version: row.version },
+                );
+              }
+            }
             for (const changed of updated.rows) {
               await this.recordTransactionAudit(
                 client,

@@ -110,6 +110,59 @@ describe("PLAN-003/004 finance engine PostgreSQL", () => {
           ["200", "posted"],
           ["300", "planned"],
         ]);
+        await service.updateRecurrence(
+          fixture.scope,
+          recurrenceId,
+          {
+            scope: "this_and_future",
+            effectiveOn: "2030-03-01",
+            endOn: "2030-03-01",
+          },
+          "plan-series-shorten-001",
+          3,
+        );
+        const afterShortening = await fixture.pool.query<{
+          occurred_on: string;
+          state: string;
+          version: number;
+        }>(
+          `SELECT occurred_on::text, state, version
+           FROM finance_transaction
+          WHERE workspace_id = $1 AND recurrence_id = $2
+            AND occurred_on IN ('2030-03-01', '2030-04-01')
+          ORDER BY occurred_on`,
+          [fixture.workspaceId, recurrenceId],
+        );
+        expect(afterShortening.rows.map((row) => [row.occurred_on, row.state])).toEqual([
+          ["2030-03-01", "planned"],
+          ["2030-04-01", "canceled"],
+        ]);
+        const canceledApril = afterShortening.rows[1];
+        const canceledAprilTransaction = await fixture.pool.query<{
+          id: string;
+          version: number;
+        }>(
+          `SELECT id, version
+           FROM finance_transaction
+          WHERE workspace_id = $1 AND recurrence_id = $2 AND occurred_on = '2030-04-01'`,
+          [fixture.workspaceId, recurrenceId],
+        );
+        await expect(
+          service.postTransaction(
+            fixture.scope,
+            canceledAprilTransaction.rows[0]?.id ?? "",
+            "plan-series-post-canceled-001",
+            canceledAprilTransaction.rows[0]?.version ?? 0,
+          ),
+        ).rejects.toThrow();
+        expect(canceledApril?.version).toBeGreaterThan(0);
+        const cancellationAudit = await fixture.pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count
+             FROM audit_event
+            WHERE workspace_id = $1 AND target_id = $2 AND action = 'transaction.canceled'`,
+          [fixture.workspaceId, canceledAprilTransaction.rows[0]?.id],
+        );
+        expect(cancellationAudit.rows[0]?.count).toBe("1");
         const exceptionAudit = await fixture.pool.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM audit_event
           WHERE workspace_id = $1 AND action = 'recurrence.occurrence_exception'`,
@@ -164,6 +217,51 @@ describe("PLAN-003/004 finance engine PostgreSQL", () => {
           edited.plan.installments.reduce((sum, part) => sum + BigInt(part.amount.minor), 0n),
         ).toBe(100n);
 
+        const skewedPlan = await service.createInstallmentPlan(
+          fixture.scope,
+          {
+            total: { currency: "BRL", minor: "151" },
+            count: 3,
+            firstDueOn: "2030-01-31",
+            description: "Distribuição ajustável",
+          },
+          "plan-installment-create-skewed-001",
+        );
+        const skewedAmounts = ["50", "100", "1"];
+        for (const [index, installment] of skewedPlan.response.installments.entries()) {
+          const amount = skewedAmounts[index];
+          if (!amount) throw new Error("expected skewed installment amount");
+          await fixture.pool.query(
+            `UPDATE installment SET amount_minor = $1 WHERE workspace_id = $2 AND id = $3`,
+            [amount, fixture.workspaceId, installment.id],
+          );
+          await fixture.pool.query(
+            `UPDATE finance_transaction
+                SET amount_minor = $1
+              WHERE workspace_id = $2 AND id = $3 AND state = 'planned'`,
+            [amount, fixture.workspaceId, installment.transactionId],
+          );
+        }
+        const companionSelected = await service.updateInstallment(
+          fixture.scope,
+          skewedPlan.response.id,
+          skewedPlan.response.installments[0]?.id ?? "",
+          { amount: { currency: "BRL", minor: "120" } },
+          "plan-installment-single-sufficient-companion-001",
+          0,
+        );
+        expect(companionSelected.plan.installments.map((part) => part.amount.minor)).toEqual([
+          "120",
+          "30",
+          "1",
+        ]);
+        expect(
+          companionSelected.plan.installments.reduce(
+            (sum, part) => sum + BigInt(part.amount.minor),
+            0n,
+          ),
+        ).toBe(151n);
+
         const secondPlan = await service.createInstallmentPlan(
           fixture.scope,
           {
@@ -190,6 +288,28 @@ describe("PLAN-003/004 finance engine PostgreSQL", () => {
         );
         expect(canceled.plan.installments.map((part) => part.state)).toEqual([
           "posted",
+          "canceled",
+          "canceled",
+        ]);
+
+        const overduePlan = await service.createInstallmentPlan(
+          fixture.scope,
+          {
+            total: { currency: "BRL", minor: "120" },
+            count: 3,
+            firstDueOn: "2029-12-31",
+            description: "Parcelas vencidas",
+          },
+          "plan-installment-create-overdue-001",
+        );
+        const canceledWithOverdue = await service.cancelFutureInstallments(
+          fixture.scope,
+          overduePlan.response.id,
+          "plan-installment-cancel-overdue-001",
+          0,
+        );
+        expect(canceledWithOverdue.plan.installments.map((part) => part.state)).toEqual([
+          "planned",
           "canceled",
           "canceled",
         ]);
