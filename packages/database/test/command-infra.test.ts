@@ -115,39 +115,6 @@ if (!adminUrl) {
         current_role: "casei_app",
       });
 
-      await pool.query(
-        `INSERT INTO "job"
-          (job_type, job_version, workspace_id, actor_id, required_capability,
-           idempotency_key, payload, state, available_at, correlation_id)
-         VALUES ('data.import', 1, $1, $2, 'import', 'data-import-discovery-key',
-                 '{}'::jsonb, 'pending', now() - interval '1 second',
-                 '01ARZ3NDEKTSV4RRFFQ69G5FAV')`,
-        [workspaceId, actorId],
-      );
-      const importDiscovery = await withUnitOfWork(
-        runtimePool,
-        { applicationRole: "casei_app" },
-        async ({ client }) => {
-          const role = await client.query<{ current_role: string; rolbypassrls: boolean }>(
-            `SELECT current_user AS current_role, r.rolbypassrls
-               FROM pg_roles AS r
-              WHERE r.rolname = current_user`,
-          );
-          const direct = await client.query<{ workspace_id: string }>(
-            `SELECT workspace_id FROM "job" WHERE job_type = 'data.import'`,
-          );
-          const discovered = await client.query<{ workspace_id: string }>(
-            `SELECT workspace_id
-               FROM app.list_data_import_workspaces($1::timestamptz)`,
-            [new Date(Date.now() + 1_000)],
-          );
-          return { role: role.rows[0], direct: direct.rows, discovered: discovered.rows };
-        },
-      );
-      assert.deepEqual(importDiscovery.role, { current_role: "casei_app", rolbypassrls: false });
-      assert.deepEqual(importDiscovery.direct, []);
-      assert.deepEqual(importDiscovery.discovered, [{ workspace_id: workspaceId }]);
-
       const scope = {
         workspaceId,
         actorId,
@@ -549,6 +516,39 @@ if (!adminUrl) {
         `SELECT action FROM "audit_event" WHERE target_id = 'batch' ORDER BY action`,
       );
       assert.deepEqual(batchActions.rows, [{ action: "first_batch" }]);
+
+      await pool.query(
+        `INSERT INTO "job"
+          (job_type, job_version, workspace_id, actor_id, required_capability,
+           idempotency_key, payload, state, available_at, correlation_id)
+         VALUES ('data.import', 1, $1, $2, 'import', 'data-import-discovery-key',
+                 '{}'::jsonb, 'pending', now() - interval '1 second',
+                 '01ARZ3NDEKTSV4RRFFQ69G5FAV')`,
+        [workspaceId, actorId],
+      );
+      const importDiscovery = await withUnitOfWork(
+        runtimePool,
+        { applicationRole: "casei_app" },
+        async ({ client }) => {
+          const role = await client.query<{ current_role: string; rolbypassrls: boolean }>(
+            `SELECT current_user AS current_role, r.rolbypassrls
+               FROM pg_roles AS r
+              WHERE r.rolname = current_user`,
+          );
+          const direct = await client.query<{ workspace_id: string }>(
+            `SELECT workspace_id FROM "job" WHERE job_type = 'data.import'`,
+          );
+          const discovered = await client.query<{ workspace_id: string }>(
+            `SELECT workspace_id
+               FROM app.list_data_import_workspaces($1::timestamptz)`,
+            [new Date(Date.now() + 1_000)],
+          );
+          return { role: role.rows[0], direct: direct.rows, discovered: discovered.rows };
+        },
+      );
+      assert.deepEqual(importDiscovery.role, { current_role: "casei_app", rolbypassrls: false });
+      assert.deepEqual(importDiscovery.direct, []);
+      assert.deepEqual(importDiscovery.discovered, [{ workspace_id: workspaceId }]);
     } finally {
       await runtimePool?.end();
       await pool?.end();
