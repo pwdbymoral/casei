@@ -113,3 +113,28 @@ temporário permanecem fora do pacote. O download sensível usa o proxy
 autorizado descrito na decisão de armazenamento, revalidando sessão,
 membership, capacidade, espaço e estado do job a cada requisição; URL
 presignada bearer não é usada.
+
+## Aplicação DATA-004
+
+`ImportApplication` é a orquestração da aplicação, não um segundo gravador de
+domínio. Cada linha validada é enviada a um `ImportCommandPort` com uma chave
+`import:{jobId}:{lineNumber}`; o adapter chama o caso de uso canônico de
+transações, produtos ou outro domínio e devolve apenas o vínculo redigido
+necessário ao relatório/reversão. A compensação usa a chave
+`import-reverse:{jobId}:{lineNumber}` e nunca apaga silenciosamente o histórico.
+
+`PostgresImportStore` mantém `import_job` e `import_job_line` no espaço com RLS.
+O job `data.import:1` usa o worker durável existente; cada lote trava o job,
+revalida workspace ativo, membership owner/member, capacidade `import`, ator e
+expiração, e só então avança o cursor. `valid_only` usa atomicidade por linha;
+falha de comando vira resultado rejeitado e permite as demais linhas. Em
+`all_or_nothing`, qualquer falha aborta a transação do lote e o job fica
+reexecutável sem efeitos parciais. Cancelamento marca `cancel_requested` e
+impede o lote seguinte; revogação produz o mesmo bloqueio. Retry consulta o
+resultado da linha antes de chamar o adapter, e reversão percorre somente linhas
+aplicadas, gravando `reversed` após a compensação.
+
+A API registra/consulta/cancela/reverte jobs somente quando recebe uma
+`ImportApplication` configurada; essa injeção explícita evita publicar um
+worker sem adapter de storage ou comandos de domínio. O processo worker é
+registrado por `createImportWorker` e não é iniciado dentro do servidor HTTP.

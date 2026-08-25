@@ -424,6 +424,8 @@ export interface JobWorkerOptions extends CommandScope {
   backoffMaxMs?: number;
   random?: () => number;
   authorizeCapability?: CapabilityAuthorizer;
+  /** Optional cleanup hook for jobs whose domain state must be fenced on revocation. */
+  onAuthorizationRevoked?: (job: JobRecord) => Promise<void>;
 }
 
 export type JobRunResult =
@@ -478,6 +480,7 @@ export class PostgresJobWorker {
         return { state: "lease_lost", jobId: job.id };
       }
       if (error instanceof JobAuthorizationError) {
+        await this.options.onAuthorizationRevoked?.(job);
         await this.markCancelled(job);
         return { state: "cancelled", jobId: job.id };
       }
