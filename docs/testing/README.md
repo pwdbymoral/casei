@@ -56,6 +56,13 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 - `pnpm check`: executa lint, typecheck, testes e build em sequência.
 - `pnpm audit --prod --audit-level=high`: falha quando dependências de produção possuem vulnerabilidades de severidade alta ou crítica conhecidas.
 
+O adapter DATA-001 é validado com `pnpm --filter @casei/storage test` e
+`pnpm --filter @casei/storage typecheck`. Os testes usam um cliente S3 fake para
+comprovar stream bounded, hash, expiração, metadados sem nome original, MIME/
+magic e remoção de upload parcial; nenhum teste envia credenciais ou acessa um
+provider externo. A integração contra MinIO/serviço publicado permanece uma
+validação operacional do deploy, conforme a ADR de armazenamento.
+
 Para validar a base PostgreSQL em um banco descartável, configure `DATABASE_URL_TEST` com uma conexão administrativa a PostgreSQL 18 e execute `pnpm --filter @casei/database test`. Os testes criam bancos temporários, aplicam as migrations, verificam role/RLS, isolamento entre dois espaços, auditoria append-only, unit of work, idempotência (incluindo concorrência), outbox→job e worker com lease/revalidação; o rollback usa o companion `packages/database/drizzle/0000_ambitious_madrox.down.sql`. Cada banco é removido ao terminar. O job `quality` do CI fornece PostgreSQL 18 e configura essa variável automaticamente; sem ela, os testes de integração não alteram nenhum banco local.
 
 O teste `apps/api/test/identity-service.integration.test.ts` usa a mesma variável para validar a jornada AUTH-002–005 contra PostgreSQL real: lock de onboarding com chaves distintas, outbox de convite sem bearer token, RLS do entitlement de recuperação, restauração seletiva de memberships, retry após perda de resposta, cutoff nos dias 29/30, guards de backup/restore, execução do worker e tombstone. O processo `pnpm --filter @casei/api worker:workspace` é um worker standalone durável; o supervisor do deploy deve mantê-lo como processo separado da API. Cada poll também executa o reaper de retenção: após o cutoff de 365 dias, `retention_until` remove auditoria detached e `audit_purge_at` remove o tombstone. A operação é baseada em cutoff e segura para retry.
