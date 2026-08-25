@@ -26,6 +26,7 @@ import {
   updateCategorySchema,
   updateCreditCardSchema,
   updateGoalSchema,
+  updateTransactionSchema,
 } from "@casei/contracts";
 import { IdempotencyConflictError } from "@casei/database";
 import { DomainError } from "@casei/domain";
@@ -287,6 +288,21 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     if (!transaction) throw notFoundError();
     setVersionHeaders(context, transaction.version);
     return context.json(transaction);
+  });
+
+  router.patch("/workspaces/:workspaceId/transactions/:id", async (context) => {
+    const id = parseDomainId(context.req.param("id"));
+    const input = await parseJsonBody(context, updateTransactionSchema);
+    const result = await service.updateTransaction(
+      scopeOf(context),
+      id,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.transaction.version);
+    return context.json(result.transaction);
   });
 
   router.get("/workspaces/:workspaceId/transactions/:id/audit", async (context) => {
