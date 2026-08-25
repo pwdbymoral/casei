@@ -482,6 +482,19 @@ export const createTransactionSchema = z.object({
 
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 
+/** Fields that can be corrected before a transaction has published ledger events. */
+export const updateTransactionSchema = z
+  .object({
+    amount: positiveMoneySchema.optional(),
+    occurredOn: civilDateSchema.optional(),
+    dueOn: civilDateSchema.nullable().optional(),
+    description: z.string().trim().max(500).optional(),
+    categoryId: domainIdSchema.nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "Informe ao menos um campo para editar.");
+
+export type UpdateTransactionInput = z.infer<typeof updateTransactionSchema>;
+
 /** Effective settlement amount/date; omitted amount settles the remaining balance. */
 export const settleTransactionSchema = z.object({
   amount: positiveMoneySchema.optional(),
