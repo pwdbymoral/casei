@@ -14,6 +14,10 @@ import {
   goalSpendSchema,
   goalTransitionSchema,
   insightWindowQuerySchema,
+  installmentCancelSchema,
+  installmentPlanUpdateSchema,
+  installmentPreviewSchema,
+  installmentUpdateSchema,
   loanPaymentSchema,
   paginationQuerySchema,
   payStatementSchema,
@@ -26,6 +30,7 @@ import {
   updateCategorySchema,
   updateCreditCardSchema,
   updateGoalSchema,
+  updateRecurrenceSchema,
   updateTransactionSchema,
   walletAdjustmentInputSchema,
   walletAdjustmentPreviewInputSchema,
@@ -537,6 +542,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
   });
 
+  router.post("/workspaces/:workspaceId/installments/preview", async (context) => {
+    const input = await parseJsonBody(context, installmentPreviewSchema);
+    const preview = await service.previewInstallmentPlan(scopeOf(context), input);
+    return context.json(preview);
+  });
+
   router.post("/workspaces/:workspaceId/installments", async (context) => {
     const input = await parseJsonBody(context, createInstallmentPlanSchema);
     const result = await service.createInstallmentPlan(
@@ -544,7 +555,61 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       input,
       requiredIdempotencyKey(context),
     );
-    return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+    return context.json(result.response, result.replayed ? 200 : 201);
+  });
+
+  router.get("/workspaces/:workspaceId/installments/:planId", async (context) => {
+    const planId = parseDomainId(context.req.param("planId"));
+    const plan = await service.getInstallmentPlan(scopeOf(context), planId);
+    if (!plan) throw notFoundError();
+    setVersionHeaders(context, plan.version);
+    return context.json(plan);
+  });
+
+  router.patch("/workspaces/:workspaceId/installments/:planId", async (context) => {
+    const planId = parseDomainId(context.req.param("planId"));
+    const input = await parseJsonBody(context, installmentPlanUpdateSchema);
+    const result = await service.updateInstallmentPlan(
+      scopeOf(context),
+      planId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.plan.version);
+    return context.json(result.plan);
+  });
+
+  router.patch("/workspaces/:workspaceId/installments/:planId/:installmentId", async (context) => {
+    const planId = parseDomainId(context.req.param("planId"));
+    const installmentId = parseDomainId(context.req.param("installmentId"));
+    const input = await parseJsonBody(context, installmentUpdateSchema);
+    const result = await service.updateInstallment(
+      scopeOf(context),
+      planId,
+      installmentId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.plan.version);
+    return context.json(result.plan);
+  });
+
+  router.post("/workspaces/:workspaceId/installments/:planId/cancel", async (context) => {
+    const planId = parseDomainId(context.req.param("planId"));
+    await parseJsonBody(context, installmentCancelSchema);
+    const result = await service.cancelFutureInstallments(
+      scopeOf(context),
+      planId,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.plan.version);
+    return context.json(result.plan);
   });
 
   router.post("/workspaces/:workspaceId/recurrences", async (context) => {
@@ -558,6 +623,21 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       result.response as unknown as Record<string, unknown>,
       result.replayed ? 200 : 201,
     );
+  });
+
+  router.patch("/workspaces/:workspaceId/recurrences/:recurrenceId", async (context) => {
+    const recurrenceId = parseDomainId(context.req.param("recurrenceId"));
+    const input = await parseJsonBody(context, updateRecurrenceSchema);
+    const result = await service.updateRecurrence(
+      scopeOf(context),
+      recurrenceId,
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.response.recurrence.version);
+    return context.json(result.response);
   });
 
   for (const action of ["pause", "resume"] as const) {

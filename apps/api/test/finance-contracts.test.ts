@@ -3,6 +3,10 @@ import {
   createRecurrenceSchema,
   createTransactionSchema,
   insightWindowQuerySchema,
+  installmentCancelSchema,
+  installmentPlanUpdateSchema,
+  installmentPreviewSchema,
+  installmentUpdateSchema,
   loanPaymentSchema,
   loanPaymentViewSchema,
   payStatementSchema,
@@ -11,6 +15,7 @@ import {
   settleTransactionSchema,
   transactionListQuerySchema,
   updateCreditCardSchema,
+  updateRecurrenceSchema,
   updateTransactionSchema,
   walletAdjustmentInputSchema,
   walletAdjustmentPreviewInputSchema,
@@ -128,6 +133,35 @@ describe("finance contracts", () => {
     expect(recurrenceTransitionSchema.parse({ effectiveOn: "2028-02-29" })).toEqual({
       effectiveOn: "2028-02-29",
     });
+    expect(
+      updateRecurrenceSchema.parse({
+        scope: "this_and_future",
+        effectiveOn: "2028-02-29",
+        amount: { currency: "BRL", minor: "100" },
+      }),
+    ).toMatchObject({ scope: "this_and_future" });
+    expect(() =>
+      updateRecurrenceSchema.parse({
+        scope: "this",
+        effectiveOn: "2028-02-29",
+        endOn: "2028-12-31",
+      }),
+    ).toThrow("somente valor e descrição");
+  });
+
+  it("validates installment preview and future edit commands", () => {
+    expect(
+      installmentPreviewSchema.parse({
+        total: { currency: "BRL", minor: "1000" },
+        count: 3,
+        firstDueOn: "2028-02-29",
+      }),
+    ).toMatchObject({ count: 3, description: "" });
+    expect(() => installmentPlanUpdateSchema.parse({})).toThrow("ao menos um campo");
+    expect(installmentUpdateSchema.parse({ dueOn: "2028-03-31" })).toEqual({
+      dueOn: "2028-03-31",
+    });
+    expect(installmentCancelSchema.parse({ confirm: true })).toEqual({ confirm: true });
   });
 
   it("parses timeline filters and rejects an inverted period", () => {

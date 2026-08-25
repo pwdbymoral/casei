@@ -8,6 +8,9 @@ import {
   createRecurrenceSchema,
   createTransactionSchema,
   domainIdSchema,
+  installmentPlanUpdateSchema,
+  installmentPreviewSchema,
+  installmentUpdateSchema,
   loanPaymentSchema,
   type PaginationQuery,
   recurrenceTransitionSchema,
@@ -15,6 +18,7 @@ import {
   type TransactionListQuery,
   updateCategorySchema,
   updateCreditCardSchema,
+  updateRecurrenceSchema,
   updateTransactionSchema,
   walletAdjustmentInputSchema,
   walletAdjustmentPreviewInputSchema,
@@ -189,6 +193,37 @@ export interface RecurrenceCreateResponse {
   id: string;
   frequency: RecurrenceView["frequency"];
   occurrences: string[];
+}
+
+export interface InstallmentView {
+  id: string;
+  number: number;
+  amount: { currency: string; minor: string };
+  dueOn: string;
+  transactionId: string;
+  state: string;
+  version: number;
+}
+
+export interface InstallmentPreviewView {
+  number: number;
+  amount: { currency: string; minor: string };
+  dueOn: string;
+}
+
+export interface InstallmentPlanView {
+  id: string;
+  workspaceId: string;
+  total: { currency: string; minor: string };
+  count: number;
+  firstDueOn: string;
+  version: number;
+  installments: InstallmentView[];
+}
+
+export interface RecurrenceEditResponse {
+  recurrence: RecurrenceView;
+  affectedOccurrences: string[];
 }
 
 interface RecurrenceRuleRow {
@@ -2206,10 +2241,47 @@ export class FinanceService {
     );
   }
 
-  async createInstallmentPlan(scope: FinanceScope, input: unknown, idempotencyKey: string) {
+  async previewInstallmentPlan(
+    scope: FinanceScope,
+    input: unknown,
+  ): Promise<{
+    total: { currency: string; minor: string };
+    count: number;
+    firstDueOn: string;
+    installments: InstallmentPreviewView[];
+  }> {
+    const parsed = installmentPreviewSchema.parse(input);
+    return this.withScopedClient(scope, async (client) => {
+      const currency = await this.workspaceCurrency(client, scope.workspaceId);
+      if (parsed.total.currency !== currency) {
+        throw new FinanceConflictError("O parcelamento deve usar a moeda do espaço.");
+      }
+      const parts = distributeInstallments(
+        Money.fromTrusted(BigInt(parsed.total.minor), parsed.total.currency as never),
+        parsed.count,
+      );
+      const dates = generateRecurrenceDates("monthly", parsed.firstDueOn, parsed.count);
+      return {
+        total: parsed.total,
+        count: parsed.count,
+        firstDueOn: parsed.firstDueOn,
+        installments: parts.map((part, index) => ({
+          number: index + 1,
+          amount: part.toJSON(),
+          dueOn: dates[index] ?? parsed.firstDueOn,
+        })),
+      };
+    });
+  }
+
+  async createInstallmentPlan(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+  ): Promise<{ replayed: boolean; response: InstallmentPlanView }> {
     assertFinanceCapability(scope, "finance.write");
     const parsed = createInstallmentPlanSchema.parse(input);
-    return this.withUnitOfWork(scope, async ({ client }) =>
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/installments`,
         key: idempotencyKey,
@@ -2223,8 +2295,8 @@ export class FinanceService {
             Money.fromTrusted(BigInt(parsed.total.minor), parsed.total.currency as never),
             parsed.count,
           );
-          const plan = await client.query<{ id: string }>(
-            `INSERT INTO installment_plan (workspace_id, total_minor, count, first_due_on) VALUES ($1, $2, $3, $4) RETURNING id`,
+          const plan = await client.query<{ id: string; version: number }>(
+            `INSERT INTO installment_plan (workspace_id, total_minor, count, first_due_on) VALUES ($1, $2, $3, $4) RETURNING id, version`,
             [scope.workspaceId, BigInt(parsed.total.minor), parsed.count, parsed.firstDueOn],
           );
           const planId = plan.rows[0]?.id;
@@ -2235,6 +2307,9 @@ export class FinanceService {
             number: number;
             amount: { currency: string; minor: string };
             dueOn: string;
+            transactionId: string;
+            state: "planned";
+            version: 0;
           }> = [];
           for (const [index, part] of parts.entries()) {
             const transaction = await client.query<{ id: string }>(
@@ -2277,20 +2352,449 @@ export class FinanceService {
               number: index + 1,
               amount: part.toJSON(),
               dueOn: dates[index] ?? parsed.firstDueOn,
+              transactionId,
+              state: "planned",
+              version: 0,
             });
           }
           return {
             statusCode: 201,
             response: {
               id: planId,
+              workspaceId: scope.workspaceId,
               total: parsed.total,
               count: parsed.count,
+              firstDueOn: parsed.firstDueOn,
+              version: plan.rows[0]?.version ?? 0,
               installments,
             } as JsonValue,
           };
         },
       }),
     );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as InstallmentPlanView,
+    };
+  }
+
+  async getInstallmentPlan(
+    scope: FinanceScope,
+    planId: string,
+  ): Promise<InstallmentPlanView | null> {
+    return this.withScopedClient(scope, async (client) =>
+      this.readInstallmentPlan(client, scope.workspaceId, planId),
+    );
+  }
+
+  async updateInstallmentPlan(
+    scope: FinanceScope,
+    planId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; plan: InstallmentPlanView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = installmentPlanUpdateSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/installments/${planId}`,
+        key: idempotencyKey,
+        request: { planId, expectedVersion, ...parsed },
+        execute: async () => {
+          const planResult = await client.query<{
+            id: string;
+            total_minor: string;
+            count: number;
+            first_due_on: string;
+            version: number;
+          }>(
+            `SELECT id, total_minor, count, first_due_on::text AS first_due_on, version
+               FROM installment_plan
+              WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            [scope.workspaceId, planId],
+          );
+          const plan = planResult.rows[0];
+          if (!plan) throw new FinanceNotFoundError();
+          if (plan.version !== expectedVersion) throw new VersionConflictError(plan.version);
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (parsed.total && parsed.total.currency !== currency) {
+            throw new FinanceConflictError("A moeda do parcelamento difere da moeda do espaço.");
+          }
+          const rows = await client.query<{
+            id: string;
+            number: number;
+            amount_minor: string;
+            due_on: string;
+            transaction_id: string;
+            state: string;
+            transaction_version: number;
+          }>(
+            `SELECT i.id, i.number, i.amount_minor, i.due_on::text AS due_on,
+                    i.transaction_id, t.state, t.version AS transaction_version
+               FROM installment i
+               JOIN finance_transaction t
+                 ON t.workspace_id = i.workspace_id AND t.id = i.transaction_id
+              WHERE i.workspace_id = $1 AND i.plan_id = $2
+              ORDER BY i.number
+              FOR UPDATE OF i, t`,
+            [scope.workspaceId, planId],
+          );
+          const nextCount = parsed.count ?? plan.count;
+          const realized = rows.rows.filter(
+            (row) => row.state === "posted" || row.state === "partially_settled",
+          );
+          const highestRealized = realized.reduce((max, row) => Math.max(max, row.number), 0);
+          if (nextCount < highestRealized) {
+            throw new FinanceConflictError(
+              "O número de parcelas não pode remover uma parcela já realizada.",
+            );
+          }
+          const nextTotal = parsed.total ? BigInt(parsed.total.minor) : BigInt(plan.total_minor);
+          const realizedTotal = realized.reduce((sum, row) => sum + BigInt(row.amount_minor), 0n);
+          const remaining = nextTotal - realizedTotal;
+          if (remaining <= 0n) {
+            throw new FinanceConflictError(
+              "O total precisa deixar saldo positivo para parcelas futuras.",
+            );
+          }
+          const nextFirstDueOn = parsed.firstDueOn ?? plan.first_due_on;
+          const nextDates = generateRecurrenceDates("monthly", nextFirstDueOn, nextCount);
+          const activeFuture = rows.rows.filter(
+            (row) => row.state === "planned" && row.number <= nextCount,
+          );
+          if (
+            (parsed.total !== undefined || parsed.count !== undefined) &&
+            rows.rows.some((row) => row.state === "canceled" && row.number <= nextCount)
+          ) {
+            throw new FinanceConflictError(
+              "Um parcelamento com parcelas canceladas não pode redistribuir o plano; crie um novo parcelamento.",
+            );
+          }
+          const missingNumbers = Array.from({ length: nextCount }, (_, index) => index + 1).filter(
+            (number) => !rows.rows.some((row) => row.number === number) && number > highestRealized,
+          );
+          const futureSlots = activeFuture.length + missingNumbers.length;
+          const redistribute = parsed.total !== undefined || parsed.count !== undefined;
+          if (futureSlots === 0) {
+            throw new FinanceConflictError("Não há parcelas futuras não liquidadas para editar.");
+          }
+          const futureParts = redistribute
+            ? distributeInstallments(Money.fromTrusted(remaining, currency as never), futureSlots)
+            : [];
+          let partIndex = 0;
+          for (const row of activeFuture) {
+            const amount = redistribute
+              ? futureParts[partIndex++]?.minor
+              : BigInt(row.amount_minor);
+            if (amount === undefined) throw new Error("installment distribution lost a part");
+            const dueOn = nextDates[row.number - 1] ?? row.due_on;
+            await client.query(
+              `UPDATE installment SET amount_minor = $1, due_on = $2
+                WHERE workspace_id = $3 AND id = $4`,
+              [amount, dueOn, scope.workspaceId, row.id],
+            );
+            await client.query(
+              `UPDATE finance_transaction
+                  SET amount_minor = $1, due_on = $2,
+                      description = COALESCE($3, description),
+                      version = version + 1, updated_at = now()
+                WHERE workspace_id = $4 AND id = $5 AND state = 'planned'`,
+              [amount, dueOn, parsed.description ?? null, scope.workspaceId, row.transaction_id],
+            );
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              row.transaction_id,
+              "installment.updated",
+              { amountMinor: row.amount_minor, dueOn: row.due_on },
+              { amountMinor: amount.toString(), dueOn },
+            );
+          }
+          for (const number of missingNumbers) {
+            const amount = redistribute
+              ? futureParts[partIndex++]?.minor
+              : remaining / BigInt(futureSlots);
+            if (amount === undefined || amount <= 0n)
+              throw new Error("installment distribution lost a part");
+            const dueOn = nextDates[number - 1] ?? nextFirstDueOn;
+            const transaction = await client.query<{ id: string }>(
+              `INSERT INTO finance_transaction
+                (workspace_id, kind, state, instrument, amount_minor, settled_minor,
+                 currency_code, occurred_on, due_on, description, installment_plan_id, installment_number)
+               VALUES ($1, 'expense', 'planned', 'wallet', $2, 0, $3, $4, $4, $5, $6, $7)
+               RETURNING id`,
+              [
+                scope.workspaceId,
+                amount,
+                currency,
+                dueOn,
+                parsed.description ?? "",
+                planId,
+                number,
+              ],
+            );
+            const transactionId = transaction.rows[0]?.id;
+            if (!transactionId) throw new Error("installment transaction insert failed");
+            await client.query(
+              `INSERT INTO installment (workspace_id, plan_id, transaction_id, number, amount_minor, due_on)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [scope.workspaceId, planId, transactionId, number, amount, dueOn],
+            );
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              transactionId,
+              "transaction.created",
+              null,
+              {
+                kind: "expense",
+                state: "planned",
+                categoryId: null,
+                cardId: null,
+                statementId: null,
+                version: 0,
+              },
+            );
+          }
+          for (const row of rows.rows.filter(
+            (item) => item.state === "planned" && item.number > nextCount,
+          )) {
+            await client.query(
+              `UPDATE finance_transaction
+                  SET state = 'canceled', version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND state = 'planned'`,
+              [scope.workspaceId, row.transaction_id],
+            );
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              row.transaction_id,
+              "transaction.canceled",
+              { state: "planned", amountMinor: row.amount_minor },
+              { state: "canceled", amountMinor: row.amount_minor },
+            );
+          }
+          const updatedPlan = await client.query<{ version: number }>(
+            `UPDATE installment_plan
+                SET total_minor = $1, count = $2, first_due_on = $3, version = version + 1
+              WHERE workspace_id = $4 AND id = $5 AND version = $6
+              RETURNING version`,
+            [nextTotal, nextCount, nextFirstDueOn, scope.workspaceId, planId, expectedVersion],
+          );
+          if (!updatedPlan.rows[0]) throw new VersionConflictError(plan.version);
+          const response = await this.readInstallmentPlan(client, scope.workspaceId, planId);
+          if (!response) throw new Error("installment plan update lost its row");
+          return { statusCode: 200, response: response as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      plan: result.response as unknown as InstallmentPlanView,
+    };
+  }
+
+  async updateInstallment(
+    scope: FinanceScope,
+    planId: string,
+    installmentId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; plan: InstallmentPlanView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = installmentUpdateSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/installments/${planId}/${installmentId}`,
+        key: idempotencyKey,
+        request: { planId, installmentId, expectedVersion, ...parsed },
+        execute: async () => {
+          const plan = await client.query<{ version: number; currency_code: string }>(
+            `SELECT p.version, w.currency_code
+               FROM installment_plan p
+               JOIN workspace_preference w ON w.workspace_id = p.workspace_id
+              WHERE p.workspace_id = $1 AND p.id = $2 FOR UPDATE`,
+            [scope.workspaceId, planId],
+          );
+          const planRow = plan.rows[0];
+          if (!planRow) throw new FinanceNotFoundError();
+          if (planRow.version !== expectedVersion) throw new VersionConflictError(planRow.version);
+          if (parsed.amount && parsed.amount.currency !== planRow.currency_code) {
+            throw new FinanceConflictError("A moeda da parcela difere da moeda do espaço.");
+          }
+          const currentResult = await client.query<{
+            amount_minor: string;
+            due_on: string;
+            transaction_id: string;
+            state: string;
+            description: string;
+          }>(
+            `SELECT i.amount_minor, i.due_on::text AS due_on, i.transaction_id,
+                    t.state, t.description
+               FROM installment i JOIN finance_transaction t
+                 ON t.workspace_id = i.workspace_id AND t.id = i.transaction_id
+              WHERE i.workspace_id = $1 AND i.plan_id = $2 AND i.id = $3
+              FOR UPDATE OF i, t`,
+            [scope.workspaceId, planId, installmentId],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.state !== "planned") {
+            throw new FinanceConflictError("Parcelas realizadas não podem ser alteradas.");
+          }
+          if (parsed.amount && BigInt(parsed.amount.minor) !== BigInt(current.amount_minor)) {
+            const targetAmount = BigInt(parsed.amount.minor);
+            const others = await client.query<{
+              id: string;
+              transaction_id: string;
+              amount_minor: string;
+            }>(
+              `SELECT i.id, i.transaction_id, i.amount_minor
+                FROM installment i JOIN finance_transaction t
+                   ON t.workspace_id = i.workspace_id AND t.id = i.transaction_id
+                WHERE i.workspace_id = $1 AND i.plan_id = $2 AND i.id <> $3 AND t.state = 'planned'
+                  AND i.amount_minor + $4::bigint - $5::bigint > 0
+                ORDER BY i.number DESC
+                FOR UPDATE OF i, t`,
+              [
+                scope.workspaceId,
+                planId,
+                installmentId,
+                BigInt(current.amount_minor),
+                targetAmount,
+              ],
+            );
+            const companion = others.rows[0];
+            if (!companion) {
+              throw new FinanceConflictError(
+                "É preciso haver outra parcela futura para conservar o total.",
+              );
+            }
+            const companionAmount =
+              BigInt(companion.amount_minor) + BigInt(current.amount_minor) - targetAmount;
+            if (companionAmount <= 0n) {
+              throw new FinanceConflictError(
+                "O valor informado deixaria outra parcela sem valor positivo.",
+              );
+            }
+            await client.query(
+              `UPDATE installment SET amount_minor = $1 WHERE workspace_id = $2 AND id = $3`,
+              [companionAmount, scope.workspaceId, companion.id],
+            );
+            await client.query(
+              `UPDATE finance_transaction SET amount_minor = $1, version = version + 1, updated_at = now()
+                WHERE workspace_id = $2 AND id = $3 AND state = 'planned'`,
+              [companionAmount, scope.workspaceId, companion.transaction_id],
+            );
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              companion.transaction_id,
+              "installment.updated",
+              { amountMinor: companion.amount_minor },
+              { amountMinor: companionAmount.toString() },
+            );
+          }
+          const amount = parsed.amount ? BigInt(parsed.amount.minor) : BigInt(current.amount_minor);
+          const dueOn = parsed.dueOn ?? current.due_on;
+          await client.query(
+            `UPDATE installment SET amount_minor = $1, due_on = $2 WHERE workspace_id = $3 AND id = $4`,
+            [amount, dueOn, scope.workspaceId, installmentId],
+          );
+          await client.query(
+            `UPDATE finance_transaction
+                SET amount_minor = $1, due_on = $2, description = $3,
+                    version = version + 1, updated_at = now()
+              WHERE workspace_id = $4 AND id = $5 AND state = 'planned'`,
+            [
+              amount,
+              dueOn,
+              parsed.description ?? current.description,
+              scope.workspaceId,
+              current.transaction_id,
+            ],
+          );
+          await this.recordTransactionAudit(
+            client,
+            scope,
+            current.transaction_id,
+            "installment.updated",
+            { amountMinor: current.amount_minor, dueOn: current.due_on },
+            {
+              amountMinor: amount.toString(),
+              dueOn,
+              description: parsed.description ?? current.description,
+            },
+          );
+          const updatedPlan = await client.query<{ version: number }>(
+            `UPDATE installment_plan SET version = version + 1
+              WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING version`,
+            [scope.workspaceId, planId, expectedVersion],
+          );
+          if (!updatedPlan.rows[0]) throw new VersionConflictError(planRow.version);
+          const response = await this.readInstallmentPlan(client, scope.workspaceId, planId);
+          if (!response) throw new Error("installment plan update lost its row");
+          return { statusCode: 200, response: response as unknown as JsonValue };
+        },
+      }),
+    );
+    return { replayed: result.replayed, plan: result.response as unknown as InstallmentPlanView };
+  }
+
+  async cancelFutureInstallments(
+    scope: FinanceScope,
+    planId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; plan: InstallmentPlanView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/installments/${planId}/cancel`,
+        key: idempotencyKey,
+        request: { planId, expectedVersion },
+        execute: async () => {
+          const plan = await client.query<{ version: number }>(
+            `SELECT version FROM installment_plan WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            [scope.workspaceId, planId],
+          );
+          if (!plan.rows[0]) throw new FinanceNotFoundError();
+          if (plan.rows[0].version !== expectedVersion) {
+            throw new VersionConflictError(plan.rows[0].version);
+          }
+          const today = await this.workspaceToday(client, scope.workspaceId);
+          const canceled = await client.query<{ id: string; amount_minor: string }>(
+            `UPDATE finance_transaction t SET state = 'canceled', version = t.version + 1, updated_at = now()
+              FROM installment i
+             WHERE t.workspace_id = $1 AND t.id = i.transaction_id AND i.workspace_id = $1
+               AND i.plan_id = $2 AND i.due_on >= $3::date AND t.state = 'planned'
+             RETURNING t.id, t.amount_minor`,
+            [scope.workspaceId, planId, today],
+          );
+          for (const row of canceled.rows) {
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              row.id,
+              "transaction.canceled",
+              { state: "planned", amountMinor: row.amount_minor },
+              { state: "canceled", amountMinor: row.amount_minor },
+            );
+          }
+          await client.query(
+            `UPDATE installment_plan SET version = version + 1
+              WHERE workspace_id = $1 AND id = $2 AND version = $3`,
+            [scope.workspaceId, planId, expectedVersion],
+          );
+          const response = await this.readInstallmentPlan(client, scope.workspaceId, planId);
+          if (!response) throw new Error("installment plan cancellation lost its row");
+          return { statusCode: 200, response: response as unknown as JsonValue };
+        },
+      }),
+    );
+    return { replayed: result.replayed, plan: result.response as unknown as InstallmentPlanView };
   }
 
   async createRecurrence(
@@ -2494,6 +2998,215 @@ export class FinanceService {
         recurrence: result.response as unknown as RecurrenceView,
       };
     });
+  }
+
+  /**
+   * Updates a recurrence at an occurrence boundary. A single-occurrence edit
+   * is persisted as an exception; broad edits skip exceptions so a later
+   * series change cannot erase a user's correction.
+   */
+  async updateRecurrence(
+    scope: FinanceScope,
+    recurrenceId: string,
+    input: unknown,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; response: RecurrenceEditResponse }> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = updateRecurrenceSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:PATCH:/recurrences/${recurrenceId}`,
+        key: idempotencyKey,
+        request: { recurrenceId, expectedVersion, ...parsed },
+        execute: async () => {
+          const currentResult = await client.query<RecurrenceRuleRow>(
+            `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
+                    start_on::text AS start_on, end_on::text AS end_on,
+                    max_occurrences, variable, estimated_minor, description,
+                    status, paused_on::text AS paused_on, version
+               FROM recurrence_rule WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            [scope.workspaceId, recurrenceId],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.status !== "active") {
+            throw new FinanceConflictError("Uma série arquivada não pode ser editada.");
+          }
+          if (current.version !== expectedVersion) {
+            throw new VersionConflictError(current.version);
+          }
+          if (parsed.endOn && parsed.endOn < parsed.effectiveOn) {
+            throw new FinanceConflictError(
+              "O fim da série não pode ser anterior ao marco editado.",
+            );
+          }
+          const currency = await this.workspaceCurrency(client, scope.workspaceId);
+          if (parsed.amount && parsed.amount.currency !== currency) {
+            throw new FinanceConflictError("A moeda da recorrência difere da moeda do espaço.");
+          }
+          if (parsed.estimatedAmount && parsed.estimatedAmount.currency !== currency) {
+            throw new FinanceConflictError("A moeda da estimativa difere da moeda do espaço.");
+          }
+          if (parsed.estimatedAmount && !current.variable) {
+            throw new FinanceConflictError(
+              "A estimativa só pode ser alterada em uma série variável.",
+            );
+          }
+          const occurrenceResult = await client.query<{
+            id: string;
+            transaction_id: string;
+            state: string;
+            amount_minor: string;
+            description: string;
+          }>(
+            `SELECT o.id, o.transaction_id, t.state, t.amount_minor, t.description
+               FROM recurrence_occurrence o
+               JOIN finance_transaction t
+                 ON t.workspace_id = o.workspace_id AND t.id = o.transaction_id
+              WHERE o.workspace_id = $1 AND o.recurrence_id = $2 AND o.occurrence_on = $3
+              FOR UPDATE OF o, t`,
+            [scope.workspaceId, recurrenceId, parsed.effectiveOn],
+          );
+          const occurrence = occurrenceResult.rows[0];
+          if (!occurrence) {
+            throw new FinanceConflictError(
+              "A edição deve começar em uma ocorrência já materializada.",
+            );
+          }
+          const amount = parsed.amount?.minor ?? current.amount_minor;
+          const description = parsed.description ?? current.description;
+          if (parsed.scope === "this") {
+            if (occurrence.state !== "planned") {
+              throw new FinanceConflictError(
+                "Ocorrências liquidadas são preservadas e não podem ser editadas.",
+              );
+            }
+            await client.query(
+              `UPDATE finance_transaction
+                  SET amount_minor = $1, description = $2,
+                      version = version + 1, updated_at = now()
+                WHERE workspace_id = $3 AND id = $4 AND state = 'planned'`,
+              [BigInt(amount), description, scope.workspaceId, occurrence.transaction_id],
+            );
+            await client.query(
+              `UPDATE recurrence_rule SET version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $3`,
+              [scope.workspaceId, recurrenceId, expectedVersion],
+            );
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              occurrence.transaction_id,
+              "recurrence.occurrence_exception",
+              {
+                state: occurrence.state,
+                amountMinor: occurrence.amount_minor,
+                description: occurrence.description,
+              },
+              { state: "planned", amountMinor: amount, description },
+            );
+          } else {
+            const boundary = parsed.scope === "this_and_future" ? ">=" : ">";
+            const updated = await client.query<{ occurred_on: string; transaction_id: string }>(
+              `UPDATE finance_transaction t
+                  SET amount_minor = $1, description = $2,
+                      version = t.version + 1, updated_at = now()
+                FROM recurrence_occurrence o
+               WHERE t.workspace_id = $3 AND t.id = o.transaction_id
+                 AND o.workspace_id = $3 AND o.recurrence_id = $4
+                 AND o.occurrence_on ${boundary} $5::date
+                 AND t.state = 'planned'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM audit_event exception_audit
+                    WHERE exception_audit.workspace_id = o.workspace_id
+                      AND exception_audit.target_type = 'finance_transaction'
+                      AND exception_audit.target_id = t.id::text
+                      AND exception_audit.action = 'recurrence.occurrence_exception'
+                 )
+               RETURNING o.occurrence_on::text AS occurred_on, t.id AS transaction_id`,
+              [BigInt(amount), description, scope.workspaceId, recurrenceId, parsed.effectiveOn],
+            );
+            await client.query(
+              `UPDATE recurrence_rule
+                  SET amount_minor = $1, description = $2, end_on = $3,
+                      estimated_minor = $4, version = version + 1, updated_at = now()
+                WHERE workspace_id = $5 AND id = $6 AND version = $7`,
+              [
+                BigInt(amount),
+                description,
+                parsed.endOn === undefined ? current.end_on : parsed.endOn,
+                parsed.estimatedAmount === undefined
+                  ? current.estimated_minor
+                  : parsed.estimatedAmount === null
+                    ? null
+                    : BigInt(parsed.estimatedAmount.minor),
+                scope.workspaceId,
+                recurrenceId,
+                expectedVersion,
+              ],
+            );
+            if (parsed.endOn) {
+              const canceled = await client.query<{
+                transaction_id: string;
+                amount_minor: string;
+                version: number;
+              }>(
+                `UPDATE finance_transaction t
+                    SET state = 'canceled', version = t.version + 1, updated_at = now()
+                   FROM recurrence_occurrence o
+                  WHERE t.workspace_id = $1 AND t.id = o.transaction_id
+                    AND o.workspace_id = $1 AND o.recurrence_id = $2
+                    AND o.occurrence_on > $3::date AND t.state = 'planned'
+                  RETURNING t.id AS transaction_id, t.amount_minor, t.version`,
+                [scope.workspaceId, recurrenceId, parsed.endOn],
+              );
+              for (const row of canceled.rows) {
+                await this.recordTransactionAudit(
+                  client,
+                  scope,
+                  row.transaction_id,
+                  "transaction.canceled",
+                  { state: "planned", amountMinor: row.amount_minor, version: row.version - 1 },
+                  { state: "canceled", amountMinor: row.amount_minor, version: row.version },
+                );
+              }
+            }
+            for (const changed of updated.rows) {
+              await this.recordTransactionAudit(
+                client,
+                scope,
+                changed.transaction_id,
+                "recurrence.series_updated",
+                null,
+                { occurrenceOn: changed.occurred_on, amountMinor: amount, description },
+              );
+            }
+          }
+          const nextResult = await client.query<RecurrenceRuleRow>(
+            `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
+                    start_on::text AS start_on, end_on::text AS end_on,
+                    max_occurrences, variable, estimated_minor, description,
+                    status, paused_on::text AS paused_on, version
+               FROM recurrence_rule WHERE workspace_id = $1 AND id = $2`,
+            [scope.workspaceId, recurrenceId],
+          );
+          const next = nextResult.rows[0];
+          if (!next) throw new Error("recurrence edit lost its row");
+          return {
+            statusCode: 200,
+            response: {
+              recurrence: toRecurrenceView(next, currency),
+              affectedOccurrences: [parsed.effectiveOn],
+            } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      response: result.response as unknown as RecurrenceEditResponse,
+    };
   }
 
   /** Builds the durable system worker used by the recurrence process. */
@@ -3199,6 +3912,61 @@ export class FinanceService {
     } catch {
       throw new FinanceConflictError("O fuso horário do espaço é inválido.");
     }
+  }
+
+  private async readInstallmentPlan(
+    client: PgPoolClient,
+    workspaceId: string,
+    planId: string,
+  ): Promise<InstallmentPlanView | null> {
+    const result = await client.query<{
+      plan_id: string;
+      total_minor: string;
+      count: number;
+      first_due_on: string;
+      plan_version: number;
+      transaction_id: string;
+      installment_id: string;
+      number: number;
+      amount_minor: string;
+      due_on: string;
+      state: string;
+      transaction_version: number;
+      currency_code: string;
+    }>(
+      `SELECT p.id AS plan_id, p.total_minor, p.count, p.first_due_on::text AS first_due_on,
+              p.version AS plan_version, i.transaction_id, i.id AS installment_id,
+              i.number, i.amount_minor, i.due_on::text AS due_on, t.state,
+              t.version AS transaction_version, w.currency_code
+         FROM installment_plan p
+         JOIN workspace_preference w ON w.workspace_id = p.workspace_id
+         LEFT JOIN installment i ON i.workspace_id = p.workspace_id AND i.plan_id = p.id
+         LEFT JOIN finance_transaction t ON t.workspace_id = i.workspace_id AND t.id = i.transaction_id
+        WHERE p.workspace_id = $1 AND p.id = $2
+        ORDER BY i.number`,
+      [workspaceId, planId],
+    );
+    const first = result.rows[0];
+    if (!first) return null;
+    return {
+      id: first.plan_id,
+      workspaceId,
+      total: { currency: first.currency_code, minor: first.total_minor.toString() },
+      count: first.count,
+      firstDueOn: first.first_due_on,
+      version: first.plan_version,
+      installments: result.rows
+        .filter((row) => row.installment_id !== null)
+        .map((row) => ({
+          id: row.installment_id,
+          number: row.number,
+          amount: { currency: row.currency_code, minor: row.amount_minor.toString() },
+          dueOn: row.due_on,
+          transactionId: row.transaction_id,
+          state: row.state,
+          version: row.transaction_version,
+        })),
+    };
   }
 
   private async mutateTransaction(

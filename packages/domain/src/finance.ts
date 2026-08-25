@@ -197,6 +197,12 @@ export function distributeInstallments(total: Money, count: number): readonly Mo
       "O parcelamento deve ter de 2 a 999 parcelas positivas.",
     );
   }
+  if (total.minor < BigInt(count)) {
+    throw new DomainError(
+      "validation_failed",
+      "O total deve ser suficiente para que todas as parcelas sejam positivas.",
+    );
+  }
   const base = total.minor / BigInt(count);
   let remainder = total.minor % BigInt(count);
   return Array.from({ length: count }, () => {
