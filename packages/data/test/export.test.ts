@@ -6,6 +6,7 @@ import {
   CsvExportError,
   canonicalExportJson,
   createVersionedCsvExport,
+  createVersionedZipExport,
   DEFAULT_CSV_EXPORT_LIMITS,
   type ExportManifest,
 } from "../src/index.js";
@@ -28,6 +29,70 @@ async function consumeExport(
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(bytes);
+}
+
+async function consumeZip(
+  exported: ReturnType<typeof createVersionedZipExport>,
+): Promise<Uint8Array> {
+  const reader = exported.stream.getReader();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    chunks.push(next.value);
+  }
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function readU16(bytes: Uint8Array, offset: number): number {
+  return (bytes[offset] ?? 0) | ((bytes[offset + 1] ?? 0) << 8);
+}
+
+function readU32(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] ?? 0) |
+      ((bytes[offset + 1] ?? 0) << 8) |
+      ((bytes[offset + 2] ?? 0) << 16) |
+      ((bytes[offset + 3] ?? 0) << 24)) >>>
+    0
+  );
+}
+
+function findZipEnd(bytes: Uint8Array): number {
+  for (let offset = bytes.length - 22; offset >= 0; offset -= 1) {
+    if (readU32(bytes, offset) === 0x06054b50) return offset;
+  }
+  return -1;
+}
+
+function readStoredZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
+  const entries = new Map<string, Uint8Array>();
+  const eocd = findZipEnd(bytes);
+  const centralOffset = readU32(bytes, eocd + 16);
+  const count = readU16(bytes, eocd + 10);
+  let offset = centralOffset;
+  const decoder = new TextDecoder();
+  for (let index = 0; index < count; index += 1) {
+    expect(readU32(bytes, offset)).toBe(0x02014b50);
+    const compressedSize = readU32(bytes, offset + 20);
+    const nameLength = readU16(bytes, offset + 28);
+    const extraLength = readU16(bytes, offset + 30);
+    const commentLength = readU16(bytes, offset + 32);
+    const localOffset = readU32(bytes, offset + 42);
+    const name = decoder.decode(bytes.slice(offset + 46, offset + 46 + nameLength));
+    const dataStart =
+      localOffset + 30 + readU16(bytes, localOffset + 26) + readU16(bytes, localOffset + 28);
+    entries.set(name, bytes.slice(dataStart, dataStart + compressedSize));
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return entries;
 }
 
 function baseOptions() {
@@ -182,6 +247,132 @@ describe("formula injection e manifesto", () => {
     const csv = await consumeExport(exported);
 
     expect(csv).toContain(`"'=HYPERLINK(""https://evil"")"`);
+  });
+});
+
+describe("exportação ZIP versionada", () => {
+  it("empacota o CSV e o manifesto com checksums em um stream ZIP", async () => {
+    const exported = createVersionedZipExport(baseOptions());
+    const zip = await consumeZip(exported);
+    const entries = readStoredZipEntries(zip);
+    const csv = new TextDecoder().decode(entries.get("transactions.csv"));
+    const manifestJson = new TextDecoder().decode(entries.get("manifest.json"));
+    const manifest = await exported.manifest;
+
+    expect(exported.fileName).toBe("transactions.zip");
+    expect(exported.contentType).toBe("application/zip");
+    expect(csv).toContain('"casei_schema_version","casei_id"');
+    expect(JSON.parse(manifestJson)).toEqual(manifest);
+    expect(manifest.files[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(await exported.manifestJson).toBe(manifestJson);
+    expect(zip[0]).toBe(0x50);
+    expect(zip[1]).toBe(0x4b);
+  });
+
+  it("cancela a fonte subjacente quando o consumidor cancela o ZIP", async () => {
+    let returnCalls = 0;
+    const exported = createVersionedZipExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              return {
+                done: false,
+                value: {
+                  casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+                  description: "linha",
+                  amount_minor: "1",
+                },
+              };
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    const reader = exported.stream.getReader();
+    for (let index = 0; index < 16; index += 1) await reader.read();
+    await reader.cancel("cliente desconectou");
+
+    expect(returnCalls).toBe(1);
+    await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+  });
+
+  it("cancela a fonte e rejeita o manifesto quando o ZIP é cancelado antes da primeira leitura", async () => {
+    let returnCalls = 0;
+    const exported = createVersionedZipExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              return {
+                done: false,
+                value: {
+                  casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+                  description: "linha",
+                  amount_minor: "1",
+                },
+              };
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    const reader = exported.stream.getReader();
+
+    await reader.cancel("cliente desconectou antes da leitura");
+
+    // The source is still lazy at this point; cancellation must nevertheless
+    // reject the CSV-derived manifest.
+    expect(returnCalls).toBe(0);
+    await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+    await expect(exported.manifestJson).rejects.toMatchObject({ code: "stream_cancelled" });
+  });
+
+  it("cancela a fonte e rejeita o manifesto depois de emitir apenas o cabeçalho ZIP", async () => {
+    let returnCalls = 0;
+    const exported = createVersionedZipExport({
+      ...baseOptions(),
+      rows: {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              return {
+                done: false,
+                value: {
+                  casei_id: "0190f93c-4b1e-7abc-8def-0123456789ab",
+                  description: "linha",
+                  amount_minor: "1",
+                },
+              };
+            },
+            return() {
+              returnCalls += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    const reader = exported.stream.getReader();
+
+    const header = await reader.read();
+    expect(header.done).toBe(false);
+    expect(header.value?.byteLength).toBeGreaterThan(0);
+    await reader.cancel("cliente desconectou depois do cabeçalho");
+
+    expect(returnCalls).toBe(0);
+    await expect(exported.manifest).rejects.toMatchObject({ code: "stream_cancelled" });
+    await expect(exported.manifestJson).rejects.toMatchObject({ code: "stream_cancelled" });
   });
 });
 
