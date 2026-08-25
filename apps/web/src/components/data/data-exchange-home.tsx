@@ -64,8 +64,10 @@ import {
   formatDataFileSize,
   type ImportApplyMode,
   type ImportJob,
+  type ImportLineResult,
   type ImportLocale,
   type ImportPreview,
+  importLineStatusLabel,
   importStatusLabel,
   MAX_IMPORT_ROWS,
   serializeImportErrorReport,
@@ -189,6 +191,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importPending, setImportPending] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
+  const [importResults, setImportResults] = useState<readonly ImportLineResult[]>([]);
+  const [importResultsStatus, setImportResultsStatus] = useState<SurfaceStatus>("idle");
+  const [importResultsError, setImportResultsError] = useState<string | null>(null);
   const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
@@ -209,6 +215,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [exportCategoryId] = useState<string | null>(() => searchParams.get("categoryId") || null);
   const [activeExport, setActiveExport] = useState<ExportJob | null>(null);
   const importOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
+  const cancelOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
 
@@ -262,6 +269,35 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }, [adapter, importJob, workspaceId]);
 
   useEffect(() => {
+    if (!importJob || !terminalImport(importJob)) {
+      setImportResults([]);
+      setImportResultsStatus("idle");
+      setImportResultsError(null);
+      return;
+    }
+
+    let active = true;
+    setImportResultsStatus("loading");
+    setImportResultsError(null);
+    void adapter
+      .listImportResults(workspaceId, importJob.id)
+      .then((page) => {
+        if (!active) return;
+        setImportResults(page.items);
+        setImportResultsStatus("success");
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setImportResultsStatus(errorStatus(error));
+        setImportResultsError(errorMessage(error));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [adapter, importJob, workspaceId]);
+
+  useEffect(() => {
     if (!activeExport || terminalExport(activeExport)) return;
     let active = true;
     const poll = async () => {
@@ -292,7 +328,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setPreviewError(null);
     setImportJob(null);
     setImportError(null);
+    setCancelPending(false);
+    setImportResults([]);
+    setImportResultsStatus("idle");
+    setImportResultsError(null);
     importOperation.current.key = null;
+    cancelOperation.current.key = null;
     retryOperation.current.key = null;
   }
 
@@ -337,6 +378,10 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportPending(true);
     setImportError(null);
     setImportJob(null);
+    setImportResults([]);
+    setImportResultsStatus("idle");
+    setImportResultsError(null);
+    cancelOperation.current.key = null;
     try {
       setImportJob(await operation.promise);
     } catch (error) {
@@ -347,11 +392,22 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }
 
   async function cancelImport() {
-    if (!importJob || terminalImport(importJob)) return;
+    if (!importJob || terminalImport(importJob) || !online) return;
+    const jobId = importJob.id;
+    const operation = beginDataExchangeOperation(
+      cancelOperation.current,
+      "cancel",
+      () => `cancel-${crypto.randomUUID()}`,
+      (key) => adapter.cancelImport(workspaceId, jobId, key),
+    );
+    if (!operation.started) return;
+    setCancelPending(true);
     try {
-      setImportJob(await adapter.cancelImport(workspaceId, importJob.id));
+      setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
+    } finally {
+      setCancelPending(false);
     }
   }
 
@@ -368,6 +424,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setRetryPending(true);
     try {
       setImportError(null);
+      setImportResults([]);
+      setImportResultsStatus("idle");
+      setImportResultsError(null);
       setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
@@ -437,6 +496,16 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     exportStatus === "idle" ? "loading" : exportStatus,
     exportJobs.length > 0,
   );
+  const importStepIndex = !file
+    ? 0
+    : !preview
+      ? 1
+      : !importJob
+        ? 2
+        : terminalImport(importJob)
+          ? 4
+          : 3;
+  const importSteps = ["Arquivo", "Mapeamento", "Revisão", "Aplicação", "Resultado"];
 
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:py-10">
@@ -494,6 +563,24 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
               CSV e XLSX, até 10 MB e 50 mil linhas. O arquivo original não é armazenado pela
               prévia.
             </CardDescription>
+            <ol
+              aria-label="Etapas da importação"
+              className="grid grid-cols-2 gap-2 pt-2 text-xs text-muted-foreground sm:grid-cols-5"
+            >
+              {importSteps.map((label, index) => (
+                <li
+                  key={label}
+                  className={
+                    index <= importStepIndex
+                      ? "rounded-md border border-primary/30 bg-primary/5 px-2 py-2 text-foreground"
+                      : "rounded-md border px-2 py-2"
+                  }
+                  aria-current={index === importStepIndex ? "step" : undefined}
+                >
+                  <span className="font-medium">{index + 1}.</span> {label}
+                </li>
+              ))}
+            </ol>
           </CardHeader>
           <CardContent className="flex flex-col gap-6">
             <FieldGroup>
@@ -543,7 +630,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       setFile(null);
                       setPreview(null);
                       setPreviewStatus("idle");
+                      setImportJob(null);
+                      setImportResults([]);
+                      setImportResultsStatus("idle");
+                      setImportResultsError(null);
                       importOperation.current.key = null;
+                      cancelOperation.current.key = null;
                       retryOperation.current.key = null;
                     }}
                   >
@@ -864,8 +956,22 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                 ) : null}
                 <div className="flex flex-wrap gap-3">
                   {!terminalImport(importJob) ? (
-                    <Button type="button" variant="outline" onClick={() => void cancelImport()}>
-                      <PauseCircleIcon data-icon="inline-start" aria-hidden="true" /> Cancelar job
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!online || cancelPending}
+                      onClick={() => void cancelImport()}
+                    >
+                      {cancelPending ? (
+                        <LoaderCircleIcon
+                          data-icon="inline-start"
+                          className="animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <PauseCircleIcon data-icon="inline-start" aria-hidden="true" />
+                      )}
+                      {cancelPending ? "Cancelando…" : "Cancelar job"}
                     </Button>
                   ) : null}
                   {importJob.status === "failed" || importJob.status === "canceled" ? (
@@ -898,6 +1004,85 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     </Button>
                   ) : null}
                 </div>
+                {terminalImport(importJob) && importResultsStatus === "loading" ? (
+                  <AsyncState status="loading" title="Carregando resultados por linha" />
+                ) : null}
+                {terminalImport(importJob) &&
+                (importResultsStatus === "error" ||
+                  importResultsStatus === "offline" ||
+                  importResultsStatus === "permission") ? (
+                  <AsyncState
+                    status={importResultsStatus}
+                    description={importResultsError ?? undefined}
+                    action={{
+                      label: "Tentar novamente",
+                      onClick: () => setImportJob({ ...importJob }),
+                    }}
+                  />
+                ) : null}
+                {terminalImport(importJob) && importResultsStatus === "success" ? (
+                  <section className="flex flex-col gap-2" aria-labelledby="import-results-heading">
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <h3 id="import-results-heading" className="font-medium">
+                        Resultado por linha
+                      </h3>
+                      <span className="text-xs text-muted-foreground">
+                        {importResults.length} {importResults.length === 1 ? "linha" : "linhas"}
+                      </span>
+                    </div>
+                    {importResults.length > 0 ? (
+                      <div className="overflow-x-auto rounded-lg border">
+                        <table className="w-full min-w-[34rem] text-left text-sm">
+                          <caption className="sr-only">
+                            Resultado de cada linha processada na importação
+                          </caption>
+                          <thead className="bg-muted/50 text-xs text-muted-foreground">
+                            <tr>
+                              <th scope="col" className="px-3 py-2">
+                                Linha
+                              </th>
+                              <th scope="col" className="px-3 py-2">
+                                Situação
+                              </th>
+                              <th scope="col" className="px-3 py-2">
+                                Detalhe
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importResults.map((result) => (
+                              <tr key={result.lineNumber} className="border-t align-top">
+                                <th scope="row" className="px-3 py-2 font-medium">
+                                  {result.lineNumber}
+                                </th>
+                                <td className="px-3 py-2">
+                                  <Badge
+                                    variant={
+                                      result.status === "rejected"
+                                        ? "destructive"
+                                        : result.status === "applied"
+                                          ? "secondary"
+                                          : "outline"
+                                    }
+                                  >
+                                    {importLineStatusLabel(result.status)}
+                                  </Badge>
+                                </td>
+                                <td className="max-w-80 px-3 py-2 text-muted-foreground">
+                                  {result.errorMessage ?? result.targetId ?? "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Nenhum resultado detalhado foi retornado por esta aplicação.
+                      </p>
+                    )}
+                  </section>
+                ) : null}
               </section>
             ) : null}
           </CardContent>
