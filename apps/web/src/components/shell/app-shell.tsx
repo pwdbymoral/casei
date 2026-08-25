@@ -5,6 +5,7 @@ import {
   BarChart3Icon,
   ChevronDownIcon,
   CircleHelpIcon,
+  HandCoinsIcon,
   HomeIcon,
   LogOutIcon,
   MenuIcon,
@@ -84,6 +85,7 @@ const primaryNav = [
 ] as const;
 
 const secondaryNav = [
+  { href: "/app/loans", label: "Empréstimos", icon: HandCoinsIcon },
   { href: "/app/reports", label: "Relatórios", icon: BarChart3Icon },
   { href: "/app/settings", label: "Configurações", icon: SettingsIcon },
   { href: "/app/help", label: "Ajuda", icon: CircleHelpIcon },

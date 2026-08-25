@@ -53,5 +53,27 @@ RLS e ausência de contas income/expense nos eventos.
 - API cobre criação, listagem, detalhe e pagamento com idempotência/versão.
 - PostgreSQL cobre migration `0013_loans`, FKs compostas, RLS, ledger,
   auditoria, retry, excedente e concorrência.
-- UI fica deliberadamente em LOAN-003, sem inventar uma jornada visual antes
-  do contrato estabilizar.
+- A jornada visual foi adicionada em LOAN-003 depois da estabilização do
+  contrato; a limitação de leitura detalhada do histórico está registrada
+  abaixo.
+
+## LOAN-003 — incremento web
+
+O incremento web foi implementado na rota `/app/loans` com:
+
+- adapter HTTP/fixture tipado para listar contratos, criar empréstimo com
+  idempotência e registrar pagamento com `If-Match`/versão;
+- resumo separado de valores a receber, a pagar e contratos em aberto;
+- cadastro curto de contraparte, principal, data e vencimento opcional;
+- confirmação de pagamento parcial ou total, atualização de saldo/status e
+  tratamento de conflito, erro, offline, permissão e espaço vazio;
+- cronograma baseado somente no vencimento informado e previsão explícita sem
+  presumir parcelas, juros ou tarifas;
+- histórico visual do contrato e dos pagamentos carregados pelo fixture ou
+  registrados na sessão atual.
+
+O contrato HTTP vigente ainda não possui uma leitura de `loan_payment`. Por
+isso, após um recarregamento autenticado a tela exibe o principal já pago como
+agregado, sem fabricar datas ou itens individuais que a API não retorna. A
+leitura persistente detalhada dos pagamentos permanece uma extensão de API
+necessária antes de declarar o histórico completo concluído.
