@@ -134,6 +134,11 @@ impede o lote seguinte; revogação produz o mesmo bloqueio. Retry consulta o
 resultado da linha antes de chamar o adapter, e reversão percorre somente linhas
 aplicadas, gravando `reversed` após a compensação.
 
+O `ImportSource` recebe `storageKey`, `sourceHash`, cursor, lote e expiração;
+seu adapter de DATA-001 deve verificar o hash do objeto antes de entregar a
+primeira linha e nunca devolver conteúdo após a expiração. A aplicação rejeita
+jobs com retenção maior que 24 horas.
+
 A API registra/consulta/cancela/reverte jobs somente quando recebe uma
 `ImportApplication` configurada; essa injeção explícita evita publicar um
 worker sem adapter de storage ou comandos de domínio. O processo worker é

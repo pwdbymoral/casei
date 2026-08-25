@@ -249,6 +249,29 @@ describe("DATA-004 aplicação de importação", () => {
     expect(store.batchCalls).toBe(3); // two data batches plus the empty completion batch
   });
 
+  it("não cria job para arquivo expirado ou com retenção acima de 24 horas", async () => {
+    const store = new MemoryStore();
+    const app = new ImportApplication(store, source(rows()), new MemoryCommands());
+    const expired = new Date(Date.now() - 1_000).toISOString();
+    const tooLong = new Date(Date.now() + 25 * 60 * 60 * 1_000).toISOString();
+    await expect(
+      app.create({
+        workspaceId,
+        actorId,
+        correlationId: "corr-expired",
+        request: { ...baseRequest, expiresAt: expired },
+      }),
+    ).rejects.toThrow("até 24 horas");
+    await expect(
+      app.create({
+        workspaceId,
+        actorId,
+        correlationId: "corr-too-long",
+        request: { ...baseRequest, expiresAt: tooLong },
+      }),
+    ).rejects.toThrow("até 24 horas");
+  });
+
   it("mantém a transação da linha independente quando uma válida falha", async () => {
     const store = new MemoryStore();
     const commands = new MemoryCommands();

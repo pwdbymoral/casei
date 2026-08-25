@@ -33,6 +33,8 @@ CREATE TABLE "import_job" (
   CONSTRAINT "import_job_source_hash_check" CHECK ("source_hash" ~ '^[a-f0-9]{64}$'),
   CONSTRAINT "import_job_preview_hash_check" CHECK ("preview_hash" ~ '^[a-f0-9]{64}$'),
   CONSTRAINT "import_job_idempotency_key_check" CHECK (length("idempotency_key") between 16 and 128),
+  CONSTRAINT "import_job_capability_check" CHECK ("required_capability" = 'import'),
+  CONSTRAINT "import_job_duplicate_lines_check" CHECK (jsonb_typeof("accepted_duplicate_lines") = 'array'),
   CONSTRAINT "import_job_domain_check" CHECK ("domain" in ('transactions', 'products', 'full')),
   CONSTRAINT "import_job_mode_check" CHECK ("mode" in ('valid_only', 'all_or_nothing')),
   CONSTRAINT "import_job_duplicate_policy_check" CHECK ("duplicate_policy" in ('skip', 'import', 'review')),

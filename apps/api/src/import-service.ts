@@ -236,6 +236,14 @@ export class ImportApplication {
       // The job may still contain duplicates, but no duplicate can be imported by accident.
       // They will be reported as skipped until the caller confirms individual lines.
     }
+    const expiresAt = Date.parse(input.request.expiresAt);
+    if (
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= Date.now() ||
+      expiresAt > Date.now() + 24 * 60 * 60 * 1_000
+    ) {
+      throw new ImportConflictError("O arquivo temporário deve expirar em até 24 horas.");
+    }
     const idempotencyKey = input.idempotencyKey ?? `import-create:${input.request.previewHash}`;
     validateIdempotencyKey(idempotencyKey);
     return this.store.createJob({
@@ -256,6 +264,7 @@ export class ImportApplication {
         let terminal = false;
         const sourceRows = await this.source.readBatch({
           storageKey: job.storageKey,
+          sourceHash: job.sourceHash,
           cursor: job.cursor,
           limit: job.batchSize,
           expiresAt: job.expiresAt,
@@ -445,6 +454,7 @@ export class ImportApplication {
 export interface ImportSource {
   readBatch(input: {
     readonly storageKey: string;
+    readonly sourceHash: string;
     readonly cursor: number;
     readonly limit: number;
     readonly expiresAt: string;

@@ -623,6 +623,7 @@ export const importJob = pgTable(
       table.id,
     ),
     check("import_job_domain_check", sql`${table.domain} in ('transactions', 'products', 'full')`),
+    check("import_job_capability_check", sql`${table.requiredCapability} = 'import'`),
     check("import_job_mode_check", sql`${table.mode} in ('valid_only', 'all_or_nothing')`),
     check(
       "import_job_duplicate_policy_check",
@@ -638,6 +639,10 @@ export const importJob = pgTable(
     ),
     check("import_job_batch_size_check", sql`${table.batchSize} between 1 and 1000`),
     check("import_job_version_check", sql`${table.version} >= 0`),
+    check(
+      "import_job_duplicate_lines_check",
+      sql`jsonb_typeof(${table.acceptedDuplicateLines}) = 'array'`,
+    ),
   ],
 );
 
