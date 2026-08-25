@@ -84,6 +84,7 @@ type DashboardData = {
   commitments: TodayCommitment[];
   goals: Goal[];
   shoppingItems: StockShoppingItem[];
+  sectionErrors: Partial<Record<"commitments" | "goals" | "stock", string>>;
 };
 
 function errorStatus(error: unknown): DashboardStatus {
@@ -214,8 +215,10 @@ function DashboardContent({
   onToggleHidden: () => void;
 }) {
   const { financial, safeToSpend, commitments, goals, shoppingItems } = data;
+  const { sectionErrors } = data;
   const attentionGoals = goalsRequiringAttention(goals, financial.asOf);
   const overdueCommitments = commitments.filter((item) => item.bucket === "overdue");
+  const hasPartialData = Object.keys(sectionErrors).length > 0;
 
   return (
     <div className="flex flex-col gap-6">
@@ -229,8 +232,21 @@ function DashboardContent({
             Resumo de {dateLabel(financial.asOf)}.
           </p>
         </div>
-        <StatusBadge status="success">Dados atualizados agora</StatusBadge>
+        <StatusBadge status={hasPartialData ? "warning" : "success"}>
+          {hasPartialData ? "Dados parcialmente disponíveis" : "Dados atualizados agora"}
+        </StatusBadge>
       </section>
+
+      {hasPartialData ? (
+        <Alert>
+          <CircleAlertIcon aria-hidden="true" />
+          <AlertTitle>Algumas áreas não puderam ser atualizadas</AlertTitle>
+          <AlertDescription>
+            {Object.values(sectionErrors).filter(Boolean).join(" ")} Os dados disponíveis continuam
+            visíveis; tente novamente para completar o painel.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <section className="grid gap-4 md:grid-cols-[1.25fr_1fr]" aria-label="Resumo financeiro">
         <Card className="bg-primary text-primary-foreground">
@@ -351,13 +367,25 @@ function DashboardContent({
                 <CardTitle>Próximos compromissos</CardTitle>
                 <CardDescription>Vencidos e previstos nos próximos sete dias.</CardDescription>
               </div>
-              <StatusBadge status={overdueCommitments.length > 0 ? "warning" : "info"}>
-                {String(commitments.length)}
+              <StatusBadge
+                status={
+                  sectionErrors.commitments
+                    ? "warning"
+                    : overdueCommitments.length > 0
+                      ? "warning"
+                      : "info"
+                }
+              >
+                {sectionErrors.commitments ? "—" : String(commitments.length)}
               </StatusBadge>
             </div>
           </CardHeader>
           <CardContent>
-            {commitments.length === 0 ? (
+            {sectionErrors.commitments ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                Os compromissos não estão disponíveis agora.
+              </p>
+            ) : commitments.length === 0 ? (
               <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
                 Nenhum compromisso exige ação nesta semana.
               </p>
@@ -384,13 +412,21 @@ function DashboardContent({
                 <CardTitle>Metas que pedem atenção</CardTitle>
                 <CardDescription>Reservas sem cobertura ou prazos próximos.</CardDescription>
               </div>
-              <StatusBadge status={attentionGoals.length > 0 ? "warning" : "info"}>
-                {String(attentionGoals.length)}
+              <StatusBadge
+                status={
+                  sectionErrors.goals ? "warning" : attentionGoals.length > 0 ? "warning" : "info"
+                }
+              >
+                {sectionErrors.goals ? "—" : String(attentionGoals.length)}
               </StatusBadge>
             </div>
           </CardHeader>
           <CardContent>
-            {attentionGoals.length === 0 ? (
+            {sectionErrors.goals ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                As metas não estão disponíveis agora.
+              </p>
+            ) : attentionGoals.length === 0 ? (
               <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
                 Nenhuma meta precisa de ação agora.
               </p>
@@ -437,13 +473,21 @@ function DashboardContent({
               <CardTitle>O que falta em casa</CardTitle>
               <CardDescription>Itens da lista para lembrar no mercado.</CardDescription>
             </div>
-            <StatusBadge status={shoppingItems.length > 0 ? "warning" : "success"}>
-              {String(shoppingItems.length)}
+            <StatusBadge
+              status={
+                sectionErrors.stock ? "warning" : shoppingItems.length > 0 ? "warning" : "success"
+              }
+            >
+              {sectionErrors.stock ? "—" : String(shoppingItems.length)}
             </StatusBadge>
           </div>
         </CardHeader>
         <CardContent>
-          {shoppingItems.length === 0 ? (
+          {sectionErrors.stock ? (
+            <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+              O estoque não está disponível agora.
+            </p>
+          ) : shoppingItems.length === 0 ? (
             <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
               Nenhum item marcado como faltando.
             </p>
@@ -508,27 +552,61 @@ export default function TodayPage() {
     setError(null);
     try {
       const asOf = civilDateInTimeZone(new Date(), timeZone);
-      const [financial, safeToSpend, transactions, statements, goalPage, shoppingItems] =
-        await Promise.all([
-          insightAdapter.getFinancial(workspaceId, { asOf }),
-          insightAdapter.getSafeToSpend(workspaceId, { asOf, horizonDays: 30 }),
-          listAllTransactions(financeAdapter, workspaceId),
-          financeAdapter.listStatements(workspaceId),
-          goalsAdapter.listGoals(workspaceId, { limit: 100 }),
-          stockAdapter.listShoppingItems(workspaceId),
-        ]);
+      const [
+        financialResult,
+        safeToSpendResult,
+        transactionsResult,
+        statementsResult,
+        goalsResult,
+        stockResult,
+      ] = await Promise.allSettled([
+        insightAdapter.getFinancial(workspaceId, { asOf }),
+        insightAdapter.getSafeToSpend(workspaceId, { asOf, horizonDays: 30 }),
+        listAllTransactions(financeAdapter, workspaceId),
+        financeAdapter.listStatements(workspaceId),
+        goalsAdapter.listGoals(workspaceId, { limit: 100 }),
+        stockAdapter.listShoppingItems(workspaceId),
+      ]);
+      if (financialResult.status === "rejected") throw financialResult.reason;
+      if (safeToSpendResult.status === "rejected") throw safeToSpendResult.reason;
+      const sectionErrors: DashboardData["sectionErrors"] = {};
+      function readOptional<T>(
+        result: PromiseSettledResult<T>,
+        key: keyof DashboardData["sectionErrors"],
+        label: string,
+        fallback: T,
+      ): T {
+        if (result.status === "fulfilled") return result.value;
+        sectionErrors[key] =
+          `${sectionErrors[key] ? `${sectionErrors[key]} ` : ""}${label}: ${errorMessage(result.reason)}`;
+        return fallback;
+      }
+      const transactions = readOptional(
+        transactionsResult,
+        "commitments",
+        "Compromissos",
+        [] as Awaited<ReturnType<typeof listAllTransactions>>,
+      );
+      const statements = readOptional(statementsResult, "commitments", "Faturas", []);
+      const goalPage = readOptional(goalsResult, "goals", "Metas", {
+        items: [] as Goal[],
+        nextCursor: null,
+        hasMore: false,
+      });
+      const shoppingItems = readOptional(stockResult, "stock", "Estoque", []);
       if (!loadRequest.isCurrent(request) || !workspaceRequests.isCurrent(workspaceRequest)) return;
       setData({
-        financial,
-        safeToSpend,
+        financial: financialResult.value,
+        safeToSpend: safeToSpendResult.value,
         commitments: buildTodayCommitments({
           transactions,
           statements,
-          asOf: financial.asOf,
-          currency: financial.currency,
+          asOf: financialResult.value.asOf,
+          currency: financialResult.value.currency,
         }),
         goals: goalPage.items,
         shoppingItems,
+        sectionErrors,
       });
       setStatus("success");
     } catch (cause) {

@@ -464,6 +464,14 @@ function FinanceDashboard({
     router.replace(`/app/finances${query ? `?${query}` : ""}`, { scroll: false });
   }
 
+  function clearDeepLinkParam(param: "transaction" | "statement") {
+    if (!searchParams.has(param)) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete(param);
+    const query = params.toString();
+    router.replace(`/app/finances${query ? `?${query}` : ""}`, { scroll: false });
+  }
+
   const load = useCallback(
     async (append = false) => {
       const request = timelineRequest.begin();
@@ -2450,7 +2458,10 @@ function FinanceDashboard({
       <Dialog
         open={visibleViewingTransaction !== null}
         onOpenChange={(open) => {
-          if (!open) setViewingTransaction(null);
+          if (!open) {
+            setViewingTransaction(null);
+            clearDeepLinkParam("transaction");
+          }
         }}
       >
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
@@ -2638,7 +2649,10 @@ function FinanceDashboard({
       <Dialog
         open={visibleViewingStatement !== null}
         onOpenChange={(open) => {
-          if (!open) setViewingStatement(null);
+          if (!open) {
+            setViewingStatement(null);
+            clearDeepLinkParam("statement");
+          }
         }}
       >
         <DialogContent className="sm:max-w-lg">
