@@ -408,6 +408,7 @@ export type CapabilityAuthorizer = (input: {
 export interface JobBatchContext {
   client: PoolClient;
   beforeTransition: () => Promise<void>;
+  renewLease: () => Promise<boolean>;
 }
 
 export interface JobExecutionContext {
@@ -424,6 +425,8 @@ export interface JobWorkerOptions extends CommandScope {
   backoffMaxMs?: number;
   random?: () => number;
   authorizeCapability?: CapabilityAuthorizer;
+  /** Optional cleanup hook for jobs whose domain state must be fenced on revocation. */
+  onAuthorizationRevoked?: (job: JobRecord) => Promise<void>;
 }
 
 export type JobRunResult =
@@ -478,6 +481,7 @@ export class PostgresJobWorker {
         return { state: "lease_lost", jobId: job.id };
       }
       if (error instanceof JobAuthorizationError) {
+        await this.options.onAuthorizationRevoked?.(job);
         await this.markCancelled(job);
         return { state: "cancelled", jobId: job.id };
       }
@@ -576,6 +580,7 @@ export class PostgresJobWorker {
               );
             }
           },
+          renewLease: () => this.renewLeaseInTransaction(client, job),
         });
         await assertLeaseFenced(client, job);
         return result;
@@ -588,17 +593,20 @@ export class PostgresJobWorker {
     return withUnitOfWork(
       this.pool,
       { workspaceId: job.workspaceId, applicationRole: this.options.applicationRole },
-      async ({ client }) => {
-        const result = await client.query(
-          `UPDATE "job"
-           SET lease_until = clock_timestamp() + ($4 * interval '1 millisecond'), updated_at = clock_timestamp()
-           WHERE id = $1 AND state = 'running' AND lease_token = $2
-             AND workspace_id = $3 AND lease_until > clock_timestamp()`,
-          [job.id, job.leaseToken, job.workspaceId, this.options.leaseMs],
-        );
-        return result.rowCount === 1;
-      },
+      async ({ client }) => this.renewLeaseInTransaction(client, job),
     );
+  }
+
+  private async renewLeaseInTransaction(client: PoolClient, job: JobRecord): Promise<boolean> {
+    if (!job.workspaceId) return false;
+    const result = await client.query(
+      `UPDATE "job"
+       SET lease_until = clock_timestamp() + ($4 * interval '1 millisecond'), updated_at = clock_timestamp()
+       WHERE id = $1 AND state = 'running' AND lease_token = $2
+         AND workspace_id = $3 AND lease_until > clock_timestamp()`,
+      [job.id, job.leaseToken, job.workspaceId, this.options.leaseMs],
+    );
+    return result.rowCount === 1;
   }
 
   private async markSucceeded(job: JobRecord): Promise<boolean> {

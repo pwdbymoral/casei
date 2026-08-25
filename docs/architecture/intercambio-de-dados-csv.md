@@ -113,3 +113,40 @@ temporário permanecem fora do pacote. O download sensível usa o proxy
 autorizado descrito na decisão de armazenamento, revalidando sessão,
 membership, capacidade, espaço e estado do job a cada requisição; URL
 presignada bearer não é usada.
+
+## Aplicação DATA-004
+
+`ImportApplication` é a orquestração da aplicação, não um segundo gravador de
+domínio. Cada linha validada é enviada a um `ImportCommandPort` com uma chave
+`import:{jobId}:{lineNumber}`; o adapter chama o caso de uso canônico de
+transações, produtos ou outro domínio e devolve apenas o vínculo redigido
+necessário ao relatório/reversão. A compensação usa a chave
+`import-reverse:{jobId}:{lineNumber}` e nunca apaga silenciosamente o histórico.
+
+`PostgresImportStore` mantém `import_job` e `import_job_line` no espaço com RLS.
+O job `data.import:1` usa o worker durável existente; cada lote trava o job,
+revalida workspace ativo, membership owner/member, capacidade `import`, ator e
+expiração, e só então avança o cursor. `valid_only` usa atomicidade por linha;
+falha de comando vira resultado rejeitado e permite as demais linhas. Em
+`all_or_nothing`, o lote persistido cobre todas as linhas do job e qualquer
+falha aborta a única transação da aplicação, deixando zero efeitos parciais.
+O manifesto imutável registra status, digest da linha e fingerprint de cada
+linha; o worker confere esses valores e entrega `sourceHash`, `mappingVersion`
+e `previewHash` ao adapter de storage antes de aplicar. Cancelamento marca
+`cancel_requested` e impede o lote seguinte; revogação produz o mesmo bloqueio.
+Retry consulta o resultado da linha antes de chamar o adapter, e reversão
+percorre somente linhas aplicadas, gravando `reversed` após a compensação. O
+endpoint de resultados lista as linhas paginadas sem expor o arquivo original;
+ações de cancelamento/reversão registram o ator e a correlação da solicitação.
+
+O `ImportSource` recebe `storageKey`, `sourceHash`, `mappingVersion`,
+`previewHash`, manifesto, cursor, lote e expiração; seu adapter de DATA-001
+deve verificar esses fingerprints e o hash do objeto antes de entregar a
+primeira linha e nunca devolver conteúdo após a expiração. A aplicação também
+confere o digest, status e fingerprint de cada linha contra o manifesto e
+rejeita jobs com retenção maior que 24 horas.
+
+A API registra/consulta/cancela/reverte jobs somente quando recebe uma
+`ImportApplication` configurada; essa injeção explícita evita publicar um
+worker sem adapter de storage ou comandos de domínio. O processo worker é
+registrado por `createImportWorker` e não é iniciado dentro do servidor HTTP.
