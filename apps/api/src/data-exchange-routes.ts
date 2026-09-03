@@ -211,17 +211,22 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
   readonly fields: Readonly<Record<string, string>>;
 }> {
   const declaredLength = context.req.header("content-length");
-  if (declaredLength !== undefined) {
-    const parsedLength = Number.parseInt(declaredLength, 10);
-    if (
-      !Number.isSafeInteger(parsedLength) ||
-      parsedLength < 1 ||
-      parsedLength > MAX_MULTIPART_BODY_BYTES
-    ) {
-      throw new ApiHttpError(413, "validation_failed", {
-        message: "O corpo do upload excede o limite de 10 MB.",
-      });
-    }
+  if (declaredLength === undefined) {
+    throw new ApiHttpError(413, "validation_failed", {
+      message: "O upload multipart precisa informar o tamanho do corpo antes do envio.",
+    });
+  }
+  const normalizedLength = declaredLength.trim();
+  const parsedLength = Number(normalizedLength);
+  if (
+    !/^\d+$/u.test(normalizedLength) ||
+    !Number.isSafeInteger(parsedLength) ||
+    parsedLength < 1 ||
+    parsedLength > MAX_MULTIPART_BODY_BYTES
+  ) {
+    throw new ApiHttpError(413, "validation_failed", {
+      message: "O corpo do upload excede o limite de 10 MB.",
+    });
   }
   let body: Record<string, unknown>;
   try {

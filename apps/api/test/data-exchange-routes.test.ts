@@ -6,9 +6,9 @@ import type {
   DataExchangeExportApplication,
   ImportUploadApplication,
 } from "../src/data-exchange-routes.js";
-import { ImportUploadError } from "../src/data-exchange-routes.js";
+import { ImportUploadError, parseMultipartImport } from "../src/data-exchange-routes.js";
 import type { IdentityService } from "../src/identity-service.js";
-import { toImportJobResponse } from "../src/import-routes.js";
+import { importErrorToHttp, toImportJobResponse } from "../src/import-routes.js";
 import type { ImportApplication, ImportJobRecord } from "../src/import-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
@@ -143,7 +143,7 @@ describe("DATA-006 HTTP boundary", () => {
 
     const response = await appWith({ upload }).request(
       `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
-      { method: "POST", body: form },
+      { method: "POST", body: form, headers: { "Content-Length": "1000" } },
     );
 
     expect(response.status).toBe(200);
@@ -184,6 +184,43 @@ describe("DATA-006 HTTP boundary", () => {
     );
     expect(response.status).toBe(413);
     expect(parsed).toBe(false);
+  });
+
+  it("rejects a chunked multipart request before consuming the body", async () => {
+    const upload: ImportUploadApplication = {
+      preview: async () => {
+        throw new Error("the application should not run");
+      },
+      confirm: async () => {
+        throw new Error("the application should not run");
+      },
+    };
+    const response = await appWith({ upload }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "multipart/form-data; boundary=casei-boundary" },
+        body: "this body must not be read",
+      },
+    );
+
+    expect(response.status).toBe(413);
+  });
+
+  it("rejects a multipart request without Content-Length before parseBody", async () => {
+    let parseBodyCalled = false;
+    const context = {
+      req: {
+        header: () => undefined,
+        parseBody: async () => {
+          parseBodyCalled = true;
+          throw new Error("parseBody must not be called");
+        },
+      },
+    } as unknown as Parameters<typeof parseMultipartImport>[0];
+
+    await expect(parseMultipartImport(context)).rejects.toMatchObject({ status: 413 });
+    expect(parseBodyCalled).toBe(false);
   });
 
   it("rejects the aggregate file and field payload after parsing when no length is declared", async () => {
@@ -253,7 +290,7 @@ describe("DATA-006 HTTP boundary", () => {
       {
         method: "POST",
         body: form,
-        headers: { "Idempotency-Key": "import-key-123456" },
+        headers: { "Idempotency-Key": "import-key-123456", "Content-Length": "1000" },
       },
     );
 
@@ -291,7 +328,7 @@ describe("DATA-006 HTTP boundary", () => {
       {
         method: "POST",
         body: form,
-        headers: { "Idempotency-Key": "import-review-123456" },
+        headers: { "Idempotency-Key": "import-review-123456", "Content-Length": "1000" },
       },
     );
     expect(response.status).toBe(422);
@@ -319,11 +356,60 @@ describe("DATA-006 HTTP boundary", () => {
       {
         method: "POST",
         body: form,
-        headers: { "Idempotency-Key": "import-key-123456" },
+        headers: { "Idempotency-Key": "import-key-123456", "Content-Length": "1000" },
       },
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it("maps import storage unavailability to HTTP 503", async () => {
+    const upload: ImportUploadApplication = {
+      preview: async () => {
+        throw new Error("not used");
+      },
+      confirm: async () => {
+        throw new ImportUploadError(
+          "O armazenamento da importação está indisponível; tente novamente.",
+          "storage_unavailable",
+        );
+      },
+    };
+    const application = { create: async () => ({}) } as unknown as ImportApplication;
+    const form = new FormData();
+    form.set("file", new File(["nome\nArroz\n"], "produtos.csv", { type: "text/csv" }));
+    form.set("previewId", "preview-1");
+    form.set("mapping", JSON.stringify({ name: "nome" }));
+    form.set("duplicatePolicy", "ignore");
+    form.set("applyMode", "valid_only");
+
+    const response = await appWith({ upload, importApplication: application }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports`,
+      {
+        method: "POST",
+        body: form,
+        headers: { "Idempotency-Key": "import-storage-123456", "Content-Length": "1000" },
+      },
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "internal_error" },
+    });
+  });
+
+  it("maps storage errors in the import error boundary to HTTP 503", () => {
+    expect(
+      importErrorToHttp(
+        new ImportUploadError(
+          "O armazenamento da importação está indisponível; tente novamente.",
+          "storage_unavailable",
+        ),
+      ),
+    ).toMatchObject({
+      status: 503,
+      code: "internal_error",
+    });
   });
 
   it("exposes export list/create/status/download behind the same scope", async () => {

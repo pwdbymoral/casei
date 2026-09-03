@@ -12,6 +12,7 @@ Planilhas reduzem o custo de adoção e garantem portabilidade. Importação pre
 - Entrada MVP: CSV UTF-8/Latin-1 detectável e XLSX sem macros.
 - Saída canônica: CSV UTF-8 com cabeçalho versionado; exportação completa pode gerar ZIP com um CSV por domínio e manifesto JSON.
 - Limites iniciais: 10 MB por arquivo, 50 mil linhas e uma planilha selecionada por operação. Limites são configuráveis no servidor e informados antes do upload.
+- O boundary HTTP multipart exige `Content-Length` válido e dentro do limite antes de chamar o parser; requisições chunked ou sem comprimento declarado são rejeitadas sem bufferizar o corpo.
 - Fórmulas são lidas pelo valor armazenado; macros, links externos e conteúdo executável nunca são executados.
 
 O núcleo `@casei/data` converte CSV e uma planilha XLSX visível selecionada para
@@ -84,9 +85,9 @@ proxy que revalida autorização pertencem à aplicação, não ao pacote puro.
 ## Privacidade e operação
 
 - Arquivo temporário é criptografado em trânsito e repouso, não vai para logs e expira automaticamente em até 24 horas.
-- O boundary multipart rejeita `Content-Length` acima de 10 MB antes do parser,
-  limita campos textuais a 256 KB e também confere o agregado de arquivos e
-  campos quando o transporte não declara comprimento.
+- O boundary multipart rejeita comprimento ausente, inválido ou acima de 10 MB
+  antes do parser, limita campos textuais a 256 KB e também confere o agregado
+  de arquivos e campos após o parse.
 - Apenas owner e member importam; viewer pode exportar somente os domínios que pode visualizar. Export completo é exclusivo do owner.
 - Eventos auditam quem iniciou, confirmou, baixou, cancelou ou reverteu, com contagens e hash, não conteúdo linha a linha.
 

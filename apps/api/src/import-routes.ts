@@ -4,6 +4,7 @@ import {
   importCreateRequestSchema,
   importLineListQuerySchema,
 } from "@casei/contracts";
+import { ObjectStorageError } from "@casei/storage";
 import type { Hono, MiddlewareHandler } from "hono";
 import {
   type ImportUploadApplication,
@@ -346,7 +347,19 @@ export function importErrorToHttp(error: unknown): unknown {
       return new ApiHttpError(410, "validation_failed", { message: error.message });
     if (error.code === "source_mismatch")
       return new ApiHttpError(409, "validation_failed", { message: error.message });
+    if (error.code === "storage_unavailable")
+      return new ApiHttpError(503, "internal_error", {
+        message: "O armazenamento da importação está indisponível; tente novamente.",
+      });
     return new ApiHttpError(422, "validation_failed", { message: error.message });
+  }
+  if (error instanceof ObjectStorageError) {
+    if (error.code === "object_not_found") return new ApiHttpError(404, "not_found");
+    if (error.code === "object_expired")
+      return new ApiHttpError(410, "validation_failed", { message: error.message });
+    return new ApiHttpError(503, "internal_error", {
+      message: "O armazenamento da importação está indisponível; tente novamente.",
+    });
   }
   if (error instanceof ImportAuthorizationError) return new ApiHttpError(403, "permission_denied");
   if (error instanceof ImportConflictError)
