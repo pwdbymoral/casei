@@ -7,6 +7,13 @@ import type {
   ImportUploadApplication,
 } from "../src/data-exchange-routes.js";
 import { ImportUploadError, parseMultipartImport } from "../src/data-exchange-routes.js";
+import {
+  ExportAuthorizationError,
+  ExportConflictError,
+  ExportExpiredError,
+  ExportFailure,
+  ExportNotFoundError,
+} from "../src/export-service.js";
 import type { IdentityService } from "../src/identity-service.js";
 import { importErrorToHttp, toImportJobResponse } from "../src/import-routes.js";
 import type { ImportApplication, ImportJobRecord } from "../src/import-service.js";
@@ -468,6 +475,7 @@ describe("DATA-006 HTTP boundary", () => {
     );
     expect(download.status).toBe(200);
     expect(download.headers.get("Content-Disposition")).toContain("transactions.csv");
+    expect(download.headers.get("Location")).toBeNull();
     await expect(download.arrayBuffer()).resolves.toEqual(new Uint8Array([1, 2, 3]).buffer);
     expect(calls).toEqual([`list:${workspaceId}`, "create:export-key-123456"]);
   });
@@ -491,6 +499,36 @@ describe("DATA-006 HTTP boundary", () => {
     };
     const response = await appWith({ exports }).request(
       `http://localhost/v1/workspaces/${workspaceId}/data/exports/export-1/download`,
+    );
+    expect(response.status).toBe(status);
+  });
+
+  it.each([
+    [new ExportAuthorizationError(), 403],
+    [new ExportNotFoundError(), 404],
+    [new ExportConflictError("not ready"), 409],
+    [new ExportExpiredError(), 410],
+    [new ExportFailure("storage unavailable"), 503],
+  ] as const)("maps export application error to HTTP %d", async (error, status) => {
+    const exports: DataExchangeExportApplication = {
+      list: async () => [],
+      create: async () => {
+        throw error;
+      },
+      get: async () => {
+        throw error;
+      },
+      download: async () => {
+        throw error;
+      },
+    };
+    const response = await appWith({ exports }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/exports`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "export-key-123456" },
+        body: JSON.stringify({ domain: "transactions", format: "csv" }),
+      },
     );
     expect(response.status).toBe(status);
   });

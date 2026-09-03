@@ -473,6 +473,7 @@ export class PostgresJobWorker {
       };
       await handler(job, context);
       const completed = await this.markSucceeded(job);
+      if (!completed) await this.options.onAuthorizationRevoked?.(job);
       return completed
         ? { state: "succeeded", jobId: job.id }
         : { state: "cancelled", jobId: job.id };

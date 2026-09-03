@@ -10,6 +10,13 @@ import {
 } from "@casei/contracts";
 import { ObjectStorageError } from "@casei/storage";
 import type { Hono, MiddlewareHandler } from "hono";
+import {
+  ExportAuthorizationError,
+  ExportConflictError,
+  ExportExpiredError,
+  ExportFailure,
+  ExportNotFoundError,
+} from "./export-service.js";
 import { ApiHttpError, errorResponse, validationError } from "./http/index.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
 import { ImportAuthorizationError, ImportConflictError, ImportFailure } from "./import-service.js";
@@ -405,6 +412,21 @@ function contentDisposition(fileName: string): string {
 
 function dataExchangeErrorToHttp(error: unknown): unknown {
   if (error instanceof ApiHttpError) return error;
+  if (error instanceof ExportAuthorizationError) {
+    return new ApiHttpError(403, "permission_denied");
+  }
+  if (error instanceof ExportNotFoundError) return new ApiHttpError(404, "not_found");
+  if (error instanceof ExportExpiredError) {
+    return new ApiHttpError(410, "validation_failed", { message: error.message });
+  }
+  if (error instanceof ExportConflictError) {
+    return new ApiHttpError(409, "validation_failed", { message: error.message });
+  }
+  if (error instanceof ExportFailure) {
+    return new ApiHttpError(503, "internal_error", {
+      message: "A exportação está indisponível; tente novamente.",
+    });
+  }
   if (error instanceof ImportUploadError) {
     if (error.code === "not_found") return new ApiHttpError(404, "not_found");
     if (error.code === "expired")

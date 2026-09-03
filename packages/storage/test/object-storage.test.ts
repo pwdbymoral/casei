@@ -207,6 +207,20 @@ describe("ObjectStoragePort S3-compatible", () => {
     });
   });
 
+  it("accepts the ZIP signature for a generated archive", async () => {
+    const scanner = new FormatFileScanPort();
+    const session = scanner.start({
+      format: "zip",
+      contentType: "application/zip",
+      contentLength: 4,
+    });
+    await session.accept(Uint8Array.from([0x50, 0x4b, 0x03, 0x04]));
+    await expect(session.complete()).resolves.toMatchObject({
+      status: "format_valid",
+      format: "zip",
+    });
+  });
+
   it("still rejects NUL bytes in CSV after format detection", async () => {
     const scanner = new FormatFileScanPort();
     const session = scanner.start({ format: "csv", contentType: "text/csv", contentLength: 3 });
