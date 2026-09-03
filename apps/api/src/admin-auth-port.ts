@@ -9,7 +9,11 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
     private readonly webOrigin: string,
   ) {}
 
-  sendVerificationEmail(email: string, idempotencyKey?: string): Promise<void> {
+  sendVerificationEmail(
+    email: string,
+    idempotencyKey?: string,
+    correlationId?: string,
+  ): Promise<void> {
     return this.send(
       "/api/auth/send-verification-email",
       {
@@ -17,10 +21,11 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
         callbackURL: this.webOrigin,
       },
       idempotencyKey,
+      correlationId,
     );
   }
 
-  sendPasswordReset(email: string, idempotencyKey?: string): Promise<void> {
+  sendPasswordReset(email: string, idempotencyKey?: string, correlationId?: string): Promise<void> {
     return this.send(
       "/api/auth/request-password-reset",
       {
@@ -28,6 +33,7 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
         redirectTo: `${this.webOrigin}/reset-password`,
       },
       idempotencyKey,
+      correlationId,
     );
   }
 
@@ -105,12 +111,14 @@ export class BetterAuthAdminAuthPort implements AdminAuthPort {
     path: string,
     body: Record<string, string>,
     idempotencyKey?: string,
+    correlationId?: string,
   ): Promise<void> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       Origin: this.webOrigin,
     };
     if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    if (correlationId) headers["X-Correlation-ID"] = correlationId;
     const response = await this.handler(
       new Request(`${this.apiOrigin}${path}`, {
         method: "POST",

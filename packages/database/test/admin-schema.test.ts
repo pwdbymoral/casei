@@ -21,6 +21,7 @@ test("ADMIN-001/002 journals platform schema with RLS and Better Auth two-factor
   assert.match(migration, /admin_email_delivery_scope/i);
   assert.match(migration, /pg_advisory_xact_lock|platform.bootstrap/i);
   assert.match(migration, /claim_first_platform_admin/i);
+  assert.match(migration, /IF EXISTS \(\s*SELECT 1 FROM public\.platform_account\s*\)/i);
   assert.match(migration, /ENABLE ROW LEVEL SECURITY/i);
   assert.match(migration, /current_platform_role/i);
   assert.match(migration, /platform_status_for_user/i);

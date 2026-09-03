@@ -25,8 +25,13 @@ describe("BetterAuthAdminAuthPort", () => {
       "http://api.test",
       "http://web.test",
     );
-    await port.sendVerificationEmail("ada@example.com", "admin-command-key-0001");
+    await port.sendVerificationEmail(
+      "ada@example.com",
+      "admin-command-key-0001",
+      "01J00000000000000000000000",
+    );
     expect(request?.headers.get("Idempotency-Key")).toBe("admin-command-key-0001");
+    expect(request?.headers.get("X-Correlation-ID")).toBe("01J00000000000000000000000");
   });
 
   it("validates the enrollment payload before returning it", async () => {

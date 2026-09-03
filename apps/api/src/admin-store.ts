@@ -232,11 +232,12 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     correlationId: string;
     ipAddress?: string | null;
     endpoint?: string | null;
+    result?: "success" | "failure";
   }): Promise<void> {
     await this.query(
       `INSERT INTO platform_audit_event
         (actor_id, target_id, action, occurred_at, origin, correlation_id, ip_address, endpoint, result, reason)
-       VALUES ($1, $2, $3, now(), 'admin_console', $4, $5, $6, 'success', $7)`,
+       VALUES ($1, $2, $3, now(), 'admin_console', $4, $5, $6, $7, $8)`,
       [
         input.actorId,
         input.targetId,
@@ -244,6 +245,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
         input.correlationId,
         truncateIp(input.ipAddress ?? null),
         input.endpoint ?? null,
+        input.result ?? "success",
         input.reason,
       ],
     );

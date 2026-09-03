@@ -84,12 +84,13 @@ describe("admin API adapter", () => {
             JSON.stringify({ error: { code: "permission_denied", message: "Negado" } }),
             {
               status: 403,
+              headers: { "X-Correlation-ID": "01J00000000000000000000001" },
             },
           ),
       ),
     );
-    await expect(authenticatedAdminAdapter.searchAccounts("ada")).rejects.toEqual(
-      new AdminAdapterError(403, "permission_denied", "Negado"),
+    await expect(authenticatedAdminAdapter.searchAccounts("ada")).rejects.toMatchObject(
+      new AdminAdapterError(403, "permission_denied", "Negado", "01J00000000000000000000001"),
     );
     vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "");
     await expect(authenticatedAdminAdapter.searchAccounts("ada")).rejects.toMatchObject({

@@ -37,16 +37,19 @@ export type AdminAccountList = {
 export class AdminAdapterError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly correlationId: string | null;
 
   constructor(
     status: number,
     code = "internal_error",
     message = "Não foi possível concluir a ação.",
+    correlationId: string | null = null,
   ) {
     super(message);
     this.name = "AdminAdapterError";
     this.status = status;
     this.code = code;
+    this.correlationId = correlationId;
   }
 }
 
@@ -77,6 +80,7 @@ async function adminRequest<T>(
       response.status,
       error?.code ?? "internal_error",
       error?.message ?? "Não foi possível concluir a ação.",
+      correlationId,
     );
   }
   return { data: body as T, correlationId };

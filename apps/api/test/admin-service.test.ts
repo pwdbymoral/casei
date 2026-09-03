@@ -52,6 +52,7 @@ class MemoryAdminStore implements AdminAccountStore {
   activeAdminCount = 2;
   calls = 0;
   audits: Array<{ action: string; reason: string }> = [];
+  auditResults: Array<"success" | "failure"> = [];
   private readonly results = new Map<string, unknown>();
 
   async searchAccounts(): Promise<AdminAccountList> {
@@ -85,8 +86,13 @@ class MemoryAdminStore implements AdminAccountStore {
     this.calls += 1;
   }
 
-  async recordAudit(input: { action: string; reason: string }): Promise<void> {
+  async recordAudit(input: {
+    action: string;
+    reason: string;
+    result?: "success" | "failure";
+  }): Promise<void> {
     this.audits.push({ action: input.action, reason: input.reason });
+    this.auditResults.push(input.result ?? "success");
   }
 
   async executeIdempotent<T>(scope: string, key: string, request: unknown, run: () => Promise<T>) {
@@ -105,15 +111,27 @@ class MemoryAuthPort implements AdminAuthPort {
   recovery = 0;
   verificationKeys: string[] = [];
   recoveryKeys: string[] = [];
-  async sendVerificationEmail(email: string, idempotencyKey?: string): Promise<void> {
+  verificationCorrelations: Array<string | undefined> = [];
+  recoveryCorrelations: Array<string | undefined> = [];
+  async sendVerificationEmail(
+    email: string,
+    idempotencyKey?: string,
+    correlationId?: string,
+  ): Promise<void> {
     if (email !== account.email) throw new AdminNotFoundError();
     this.verification += 1;
     if (idempotencyKey) this.verificationKeys.push(idempotencyKey);
+    this.verificationCorrelations.push(correlationId);
   }
-  async sendPasswordReset(email: string, idempotencyKey?: string): Promise<void> {
+  async sendPasswordReset(
+    email: string,
+    idempotencyKey?: string,
+    correlationId?: string,
+  ): Promise<void> {
     if (email !== account.email) throw new AdminNotFoundError();
     this.recovery += 1;
     if (idempotencyKey) this.recoveryKeys.push(idempotencyKey);
+    this.recoveryCorrelations.push(correlationId);
   }
 }
 
@@ -267,6 +285,29 @@ describe("ADMIN-001/002 service", () => {
     expect(store.calls).toBe(1);
   });
 
+  it("records a failure audit when an administrative command is rejected", async () => {
+    const store = new MemoryAdminStore();
+    store.updateStatus = async () => {
+      throw new Error("account update failed");
+    };
+    const service = new AdminService(store, new MemoryAuthPort());
+
+    await expect(
+      service.suspendAccount(
+        actor("platform_support"),
+        "target-user",
+        { reason: "security review" },
+        "suspend-key-failure-audit",
+        "01J00000000000000000000000",
+      ),
+    ).rejects.toThrow("account update failed");
+
+    expect(store.audits).toEqual([
+      { action: "account:suspended", reason: "security review [failure:internal_error]" },
+    ]);
+    expect(store.auditResults).toEqual(["failure"]);
+  });
+
   it("revokes sessions and delegates verification/recovery to Better Auth flows", async () => {
     const store = new MemoryAdminStore();
     const auth = new MemoryAuthPort();
@@ -295,6 +336,8 @@ describe("ADMIN-001/002 service", () => {
     );
     expect(auth.verification).toBe(1);
     expect(auth.recovery).toBe(1);
+    expect(auth.verificationCorrelations).toEqual(["01J00000000000000000000000"]);
+    expect(auth.recoveryCorrelations).toEqual(["01J00000000000000000000000"]);
   });
 
   it("derives an email dispatch key scoped to actor, action, target, and command", async () => {

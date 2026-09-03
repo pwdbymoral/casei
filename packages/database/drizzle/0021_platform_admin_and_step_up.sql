@@ -235,7 +235,6 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('casei.platform.bootstrap', 0));
   IF EXISTS (
     SELECT 1 FROM public.platform_account
-     WHERE role IN ('platform_admin', 'platform_support')
   ) THEN
     RAISE EXCEPTION 'platform bootstrap already completed' USING ERRCODE = '55000';
   END IF;

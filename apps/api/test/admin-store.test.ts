@@ -190,9 +190,11 @@ describe("ADMIN PostgreSQL adapter", () => {
         reason: "review",
         correlationId: "01J00000000000000000000000",
         ipAddress: "203.0.113.42",
+        result: "failure",
       }),
     );
     expect(auditValues?.[4]).toBe("203.0.113.0/24");
+    expect(auditValues?.[6]).toBe("failure");
   });
 
   it("keeps IPv6 prefixes valid when the source address is compressed", async () => {

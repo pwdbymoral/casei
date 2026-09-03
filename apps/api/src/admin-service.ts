@@ -45,6 +45,8 @@ export type AdminEmailCommand<T> = {
   result: T;
 };
 
+export type AdminAuditResult = "success" | "failure";
+
 export interface AdminAccountStore {
   searchAccounts(input: AdminAccountSearchQuery): Promise<AdminAccountList>;
   getAccount(userId: string): Promise<AdminAccountDetail | null>;
@@ -89,6 +91,7 @@ export interface AdminAccountStore {
     correlationId: string;
     ipAddress?: string | null;
     endpoint?: string | null;
+    result?: AdminAuditResult;
   }): Promise<void>;
   issueStepUpChallenge?(input: {
     userId: string;
@@ -102,8 +105,12 @@ export interface AdminAccountStore {
 }
 
 export interface AdminAuthPort {
-  sendVerificationEmail(email: string, idempotencyKey?: string): Promise<void>;
-  sendPasswordReset(email: string, idempotencyKey?: string): Promise<void>;
+  sendVerificationEmail(
+    email: string,
+    idempotencyKey?: string,
+    correlationId?: string,
+  ): Promise<void>;
+  sendPasswordReset(email: string, idempotencyKey?: string, correlationId?: string): Promise<void>;
   verifyStepUp?(input: {
     method: "totp" | "backup_code";
     code: string;
@@ -271,6 +278,7 @@ export class AdminService {
         this.auth.sendVerificationEmail(
           email,
           deriveEmailDispatchKey(actor.userId, "auth:verification-resend", userId, idempotencyKey),
+          correlationId,
         ),
     );
   }
@@ -296,6 +304,7 @@ export class AdminService {
         this.auth.sendPasswordReset(
           email,
           deriveEmailDispatchKey(actor.userId, "auth:recovery-resend", userId, idempotencyKey),
+          correlationId,
         ),
     );
   }
@@ -385,33 +394,64 @@ export class AdminService {
     input: unknown,
     run: () => Promise<T>,
   ): Promise<CommandResult<T>> {
-    return this.store.executeIdempotent(
-      `${actor.userId}:platform:${action}:${targetId}`,
-      idempotencyKey,
-      // Correlation IDs identify attempts for audit/tracing; they must not
-      // change the idempotency fingerprint of the same client command.
-      { action, targetId, input },
-      async () => {
-        const result = await run();
-        if (this.store.recordAudit) {
-          const reason =
-            typeof input === "object" && input !== null && "reason" in input
-              ? String((input as { reason?: unknown }).reason ?? "")
-              : "";
-          await this.store.recordAudit({
-            actorId: actor.userId,
+    try {
+      return await this.store.executeIdempotent(
+        `${actor.userId}:platform:${action}:${targetId}`,
+        idempotencyKey,
+        // Correlation IDs identify attempts for audit/tracing; they must not
+        // change the idempotency fingerprint of the same client command.
+        { action, targetId, input },
+        async () => {
+          const result = await run();
+          await this.recordCommandAudit({
+            actor,
             targetId,
             action,
-            reason,
+            reason: commandReason(input),
             correlationId,
-            ipAddress: actor.ipAddress,
-            endpoint: actor.endpoint,
+            result: "success",
           });
-        }
-        return result;
-      },
-      actor.userId,
-      actor.stepUpToken,
+          return result;
+        },
+        actor.userId,
+        actor.stepUpToken,
+      );
+    } catch (error) {
+      // The command transaction is rolled back before this catch runs. Keep
+      // the failure audit in its own transaction so rejected commands remain
+      // visible without making the original error unsafe or opaque.
+      await this.recordCommandAudit({
+        actor,
+        targetId,
+        action,
+        reason: `${commandReason(input)} [failure:${adminErrorCode(error)}]`,
+        correlationId,
+        result: "failure",
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private recordCommandAudit(input: {
+    actor: AdminActor;
+    targetId: string;
+    action: string;
+    reason: string;
+    correlationId: string;
+    result: AdminAuditResult;
+  }): Promise<void> {
+    if (!this.store.recordAudit) return Promise.resolve();
+    return this.withActor(input.actor, () =>
+      this.store.recordAudit?.({
+        actorId: input.actor.userId,
+        targetId: input.targetId,
+        action: input.action,
+        reason: input.reason,
+        correlationId: input.correlationId,
+        ipAddress: input.actor.ipAddress,
+        endpoint: input.actor.endpoint,
+        result: input.result,
+      }),
     );
   }
 
@@ -445,10 +485,7 @@ export class AdminService {
           actorId: actor.userId,
           targetId: userId,
           action,
-          reason:
-            typeof input === "object" && input !== null && "reason" in input
-              ? String((input as { reason?: unknown }).reason ?? "")
-              : "",
+          reason: commandReason(input),
           correlationId,
           ipAddress: actor.ipAddress,
           endpoint: actor.endpoint,
@@ -498,4 +535,17 @@ function deriveEmailDispatchKey(
   return `admin-email-${createHash("sha256")
     .update(`${actorId}\0${action}\0${targetId}\0${commandKey}`)
     .digest("hex")}`;
+}
+
+function commandReason(input: unknown): string {
+  if (typeof input !== "object" || input === null || !("reason" in input)) return "";
+  return String((input as { reason?: unknown }).reason ?? "");
+}
+
+function adminErrorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && /^[a-z0-9_:-]{1,64}$/.test(code)) return code;
+  }
+  return "internal_error";
 }
