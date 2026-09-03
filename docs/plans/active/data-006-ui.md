@@ -57,6 +57,12 @@ O fallback local respeita o limite de 50 mil linhas e bloqueia a confirmação
 quando o arquivo excede esse limite. O relatório de erros prefixa células com
 caracteres de fórmula para não transformar mensagens retornadas pelo job em
 fórmulas de planilha; a proteção canônica de exportações continua em DATA-005.
+As chamadas autenticadas usam a fronteira `/v1/workspaces/:workspaceId/data`
+para importações e exportações, incluindo paginação de resultados por linha.
+Enquanto o contrato não possui um comando de decisão individual por duplicata,
+a política “Parar para revisar” fica explicitamente bloqueada na UI e o usuário
+precisa escolher ignorar ou importar; a aplicação nunca finge que uma revisão
+individual foi concluída.
 No adapter de fixtures, chaves de idempotência são isoladas por espaço,
 reproduzem o mesmo resultado e rejeitam uma segunda requisição com payload
 divergente; a aplicação server-side permanece responsabilidade do DATA-004.

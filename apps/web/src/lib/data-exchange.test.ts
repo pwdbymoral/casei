@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   beginDataExchangeOperation,
+  canDiscardImportDraft,
   canExportData,
   canImportData,
   dataExchangeAdapterForEnvironment,
@@ -9,6 +10,7 @@ import {
   detectPreviewDelimiter,
   exportHistorySurfaceStatus,
   formatDataFileSize,
+  importErrorEntriesForReport,
   importLineStatusLabel,
   inferMapping,
   MAX_IMPORT_ROWS,
@@ -17,6 +19,17 @@ import {
 } from "./data-exchange";
 
 describe("data exchange UI ports", () => {
+  it("não permite descartar um rascunho enquanto o job de importação está ativo", () => {
+    expect(canDiscardImportDraft(null)).toBe(true);
+    expect(canDiscardImportDraft(null, true)).toBe(false);
+    expect(canDiscardImportDraft({ status: "queued" })).toBe(false);
+    expect(canDiscardImportDraft({ status: "processing" })).toBe(false);
+    expect(canDiscardImportDraft({ status: "completed" })).toBe(true);
+    expect(canDiscardImportDraft({ status: "partial" })).toBe(true);
+    expect(canDiscardImportDraft({ status: "failed" })).toBe(true);
+    expect(canDiscardImportDraft({ status: "canceled" })).toBe(true);
+  });
+
   it("infere o separador pt-BR e preserva campos desconhecidos como aviso", () => {
     const preview = parseLocalCsvPreview(
       "Tipo;Valor;Data;Observação\ndespesa;10,00;2026-08-25;mercado",
@@ -285,14 +298,21 @@ describe("data exchange UI ports", () => {
       expect(page.items).toEqual([{ lineNumber: 2, status: "applied" }]);
       expect(fetchMock).toHaveBeenNthCalledWith(
         1,
-        "https://api.example.test/v1/workspaces/workspace-1/imports/import-1/cancel",
+        "https://api.example.test/v1/workspaces/workspace-1/data/imports/import-1/cancel",
         expect.objectContaining({
           headers: expect.objectContaining({ "Idempotency-Key": "cancel-key-123456" }),
         }),
       );
       expect(fetchMock).toHaveBeenNthCalledWith(
         2,
-        "https://api.example.test/v1/workspaces/workspace-1/imports/import-1/lines?limit=50&afterLine=1",
+        "https://api.example.test/v1/workspaces/workspace-1/data/imports/import-1/lines?limit=50&afterLine=1",
+        expect.objectContaining({ credentials: "include" }),
+      );
+
+      await adapter.listExportJobs("workspace-1");
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        3,
+        "https://api.example.test/v1/workspaces/workspace-1/data/exports",
         expect.objectContaining({ credentials: "include" }),
       );
     } finally {
@@ -546,5 +566,21 @@ describe("data exchange UI ports", () => {
     expect(serializeImportErrorReport([{ rowNumber: 2, message: '=HYPERLINK("x")' }])).toBe(
       'linha,mensagem\n2,"\'=HYPERLINK(""x"")"',
     );
+  });
+
+  it("inclui rejeições paginadas sem mensagem e remove duplicatas do relatório", () => {
+    expect(
+      importErrorEntriesForReport(
+        [{ rowNumber: 2, message: "Valor é obrigatório." }],
+        [
+          { lineNumber: 2, status: "rejected", errorMessage: "Valor é obrigatório." },
+          { lineNumber: 3, status: "rejected" },
+          { lineNumber: 4, status: "skipped" },
+        ],
+      ),
+    ).toEqual([
+      { rowNumber: 2, message: "Valor é obrigatório." },
+      { rowNumber: 3, message: "A linha foi rejeitada." },
+    ]);
   });
 });

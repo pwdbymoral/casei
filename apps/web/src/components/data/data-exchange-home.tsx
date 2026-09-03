@@ -50,6 +50,7 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   beginDataExchangeOperation,
+  canDiscardImportDraft,
   canExportData,
   canImportData,
   type DataDomain,
@@ -67,6 +68,7 @@ import {
   type ImportLineResult,
   type ImportLocale,
   type ImportPreview,
+  importErrorEntriesForReport,
   importLineStatusLabel,
   importStatusLabel,
   MAX_IMPORT_ROWS,
@@ -113,19 +115,7 @@ function downloadBlob(blob: Blob, fileName: string) {
 }
 
 function downloadErrorReport(job: ImportJob, results: readonly ImportLineResult[] = []) {
-  const errors = [
-    ...job.errors,
-    ...results
-      .filter((result) => result.errorMessage)
-      .map((result) => ({ rowNumber: result.lineNumber, message: result.errorMessage ?? "" })),
-  ];
-  const seen = new Set<string>();
-  const uniqueErrors = errors.filter((error) => {
-    const key = `${error.rowNumber}\u001f${error.message}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const uniqueErrors = importErrorEntriesForReport(job.errors, results);
   downloadBlob(
     new Blob([serializeImportErrorReport(uniqueErrors)], { type: "text/csv;charset=utf-8" }),
     `casei-erros-${job.id}.csv`,
@@ -211,6 +201,8 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [importResultsNextAfterLine, setImportResultsNextAfterLine] = useState<number | null>(null);
   const [importResultsMorePending, setImportResultsMorePending] = useState(false);
   const [importResultsMoreError, setImportResultsMoreError] = useState<string | null>(null);
+  const [errorReportPending, setErrorReportPending] = useState(false);
+  const [errorReportError, setErrorReportError] = useState<string | null>(null);
   const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
@@ -234,6 +226,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const cancelOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const importAllowed = canImportData(role);
   const exportAllowed = canExportData(role);
@@ -300,6 +293,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportResultsError(null);
     setImportResultsNextAfterLine(null);
     setImportResultsMoreError(null);
+    setErrorReportError(null);
     void adapter
       .listImportResults(workspaceId, importJob.id)
       .then((page) => {
@@ -341,9 +335,15 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     };
   }, [activeExport, adapter, workspaceId]);
 
-  function chooseFile(event: ChangeEvent<HTMLInputElement>) {
-    const next = event.target.files?.[0] ?? null;
-    setFile(next);
+  function resetImportDraft(nextFile: File | null, clearInput = false) {
+    if (!canDiscardImportDraft(importJob, importPending)) {
+      setImportError(
+        "A importação está em andamento. Aguarde a conclusão ou cancele o job antes de trocar o arquivo.",
+      );
+      return false;
+    }
+    if (clearInput && fileInputRef.current) fileInputRef.current.value = "";
+    setFile(nextFile);
     setPreview(null);
     setMapping({});
     setMappingDirty(false);
@@ -358,9 +358,22 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportResultsNextAfterLine(null);
     setImportResultsMorePending(false);
     setImportResultsMoreError(null);
+    setErrorReportError(null);
     importOperation.current.key = null;
     cancelOperation.current.key = null;
     retryOperation.current.key = null;
+    return true;
+  }
+
+  function chooseFile(event: ChangeEvent<HTMLInputElement>) {
+    if (!canDiscardImportDraft(importJob, importPending)) {
+      event.currentTarget.value = "";
+      setImportError(
+        "A importação está em andamento. Aguarde a conclusão ou cancele o job antes de trocar o arquivo.",
+      );
+      return;
+    }
+    resetImportDraft(event.target.files?.[0] ?? null);
   }
 
   async function previewFile() {
@@ -388,7 +401,15 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }
 
   async function startImport() {
-    if (!file || !preview || !canConfirmImport || !importAllowed || !online) return;
+    if (
+      !file ||
+      !preview ||
+      !canConfirmImport ||
+      !importAllowed ||
+      !online ||
+      !canDiscardImportDraft(importJob, importPending)
+    )
+      return;
     const operation = beginDataExchangeOperation(
       importOperation.current,
       "import",
@@ -459,6 +480,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       setImportResultsNextAfterLine(null);
       setImportResultsMorePending(false);
       setImportResultsMoreError(null);
+      setErrorReportError(null);
       setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
@@ -483,6 +505,29 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       setImportResultsMoreError(errorMessage(error));
     } finally {
       setImportResultsMorePending(false);
+    }
+  }
+
+  async function downloadAllErrorReport(job: ImportJob) {
+    if (!online || errorReportPending) return;
+    setErrorReportPending(true);
+    setErrorReportError(null);
+    try {
+      const allResults = [...importResults];
+      let afterLine = importResultsNextAfterLine;
+      while (afterLine !== null) {
+        const page = await adapter.listImportResults(workspaceId, job.id, afterLine);
+        allResults.push(...page.items);
+        if (page.nextAfterLine !== null && page.nextAfterLine <= afterLine) {
+          throw new DataExchangeError("O relatório retornou uma página sem continuidade.");
+        }
+        afterLine = page.nextAfterLine;
+      }
+      downloadErrorReport(job, allResults);
+    } catch (error) {
+      setErrorReportError(errorMessage(error));
+    } finally {
+      setErrorReportPending(false);
     }
   }
 
@@ -541,8 +586,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     preview?.canConfirm === true &&
       (preview.serverBacked || fixtureMode) &&
       !mappingDirty &&
+      !(duplicatePolicy === "review" && (preview.counts.duplicates ?? 0) > 0) &&
       (applyMode === "valid_only" || preview.counts.errors === 0),
   );
+  const importDraftActive = !canDiscardImportDraft(importJob, importPending);
+  const duplicateReviewBlocked =
+    duplicatePolicy === "review" && (preview?.counts.duplicates ?? 0) > 0;
   const exportSurfaceStatus = exportHistorySurfaceStatus(
     exportStatus === "idle" ? "loading" : exportStatus,
     exportJobs.length > 0,
@@ -642,10 +691,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                   value={domain}
                   disabled={
-                    !importAllowed ||
-                    importPending ||
-                    importResultsMorePending ||
-                    importJob?.status === "processing"
+                    !importAllowed || importPending || importResultsMorePending || importDraftActive
                   }
                   onChange={(event) => {
                     setDomain(event.target.value as typeof domain);
@@ -665,17 +711,25 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="min-h-11 cursor-pointer py-2"
                   disabled={
-                    !importAllowed ||
-                    importPending ||
-                    importResultsMorePending ||
-                    importJob?.status === "processing"
+                    !importAllowed || importPending || importResultsMorePending || importDraftActive
                   }
                   onChange={chooseFile}
+                  ref={fileInputRef}
                 />
                 <FieldDescription>
                   CSV UTF-8/Latin-1 ou XLSX sem macros. Limite: 10 MB.
                 </FieldDescription>
               </Field>
+              {importDraftActive ? (
+                <Alert>
+                  <PauseCircleIcon aria-hidden="true" />
+                  <AlertTitle>Importação em andamento</AlertTitle>
+                  <AlertDescription>
+                    O arquivo e as opções ficam preservados enquanto o job é processado. Cancele o
+                    job ou aguarde o resultado para iniciar outra importação.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               {file ? (
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3 text-sm">
                   <div className="flex min-w-0 items-center gap-2">
@@ -687,22 +741,8 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     type="button"
                     variant="ghost"
                     size="sm"
-                    disabled={importResultsMorePending}
-                    onClick={() => {
-                      setFile(null);
-                      setPreview(null);
-                      setPreviewStatus("idle");
-                      setImportJob(null);
-                      setImportResults([]);
-                      setImportResultsStatus("idle");
-                      setImportResultsError(null);
-                      setImportResultsNextAfterLine(null);
-                      setImportResultsMorePending(false);
-                      setImportResultsMoreError(null);
-                      importOperation.current.key = null;
-                      cancelOperation.current.key = null;
-                      retryOperation.current.key = null;
-                    }}
+                    disabled={importDraftActive || importResultsMorePending || errorReportPending}
+                    onClick={() => resetImportDraft(null, true)}
                   >
                     <XIcon data-icon="inline-start" aria-hidden="true" /> Remover
                   </Button>
@@ -715,7 +755,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     id="import-locale"
                     className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                     value={locale}
-                    disabled={!importAllowed}
+                    disabled={!importAllowed || importDraftActive}
                     onChange={(event) => {
                       setLocale(event.target.value as ImportLocale);
                       setPreview(null);
@@ -731,7 +771,11 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     type="button"
                     className="min-h-11 w-full"
                     disabled={
-                      !file || !importAllowed || importPending || previewStatus === "loading"
+                      !file ||
+                      !importAllowed ||
+                      importPending ||
+                      importDraftActive ||
+                      previewStatus === "loading"
                     }
                     onClick={() => void previewFile()}
                   >
@@ -783,6 +827,17 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     <AlertDescription>{preview.message}</AlertDescription>
                   </Alert>
                 ) : null}
+                {duplicateReviewBlocked ? (
+                  <Alert>
+                    <PauseCircleIcon aria-hidden="true" />
+                    <AlertTitle>Revisão individual ainda não disponível</AlertTitle>
+                    <AlertDescription>
+                      A API atual não oferece uma decisão por linha. Escolha “Ignorar e registrar”
+                      ou “Importar mesmo assim” para continuar; nenhuma linha será aplicada enquanto
+                      “Parar para revisar” estiver selecionado.
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <CountCard label="Válidas" value={preview.counts.valid} />
                   <CountCard label="Avisos" value={preview.counts.warnings} tone="warning" />
@@ -811,6 +866,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                             id={`mapping-${field.key}`}
                             className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                             value={mapping[field.key] ?? ""}
+                            disabled={importDraftActive}
                             onChange={(event) => changeMapping(field.key, event.target.value)}
                           >
                             <option value="">Não mapear</option>
@@ -905,6 +961,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       id="duplicate-policy"
                       className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       value={duplicatePolicy}
+                      disabled={importDraftActive}
                       onChange={(event) => {
                         setDuplicatePolicy(event.target.value as DuplicatePolicy);
                         importOperation.current.key = null;
@@ -921,6 +978,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       id="import-mode"
                       className="min-h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       value={applyMode}
+                      disabled={importDraftActive}
                       onChange={(event) => {
                         setApplyMode(event.target.value as ImportApplyMode);
                         importOperation.current.key = null;
@@ -1058,18 +1116,34 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       {retryPending ? "Tentando novamente…" : "Tentar novamente"}
                     </Button>
                   ) : null}
-                  {importJob.errors.length > 0 ||
+                  {importJob.rejectedRows > 0 ||
+                  importJob.errors.length > 0 ||
                   importResults.some((result) => Boolean(result.errorMessage)) ? (
                     <Button
                       type="button"
                       variant="outline"
-                      onClick={() => downloadErrorReport(importJob, importResults)}
+                      disabled={!online || errorReportPending || importResultsMorePending}
+                      onClick={() => void downloadAllErrorReport(importJob)}
                     >
-                      <DownloadIcon data-icon="inline-start" aria-hidden="true" /> Baixar relatório
-                      de erros
+                      {errorReportPending ? (
+                        <LoaderCircleIcon
+                          data-icon="inline-start"
+                          className="animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <DownloadIcon data-icon="inline-start" aria-hidden="true" />
+                      )}{" "}
+                      {errorReportPending ? "Preparando relatório…" : "Baixar relatório de erros"}
                     </Button>
                   ) : null}
                 </div>
+                {errorReportError ? (
+                  <Alert variant="destructive">
+                    <AlertCircleIcon aria-hidden="true" />
+                    <AlertDescription>{errorReportError}</AlertDescription>
+                  </Alert>
+                ) : null}
                 {terminalImport(importJob) && importResultsStatus === "loading" ? (
                   <AsyncState status="loading" title="Carregando resultados por linha" />
                 ) : null}

@@ -557,7 +557,7 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 function workspacePath(workspaceId: string, suffix: string): string {
-  return `${requireApiOrigin()}/v1/workspaces/${encodeURIComponent(workspaceId)}${suffix}`;
+  return `${requireApiOrigin()}/v1/workspaces/${encodeURIComponent(workspaceId)}/data${suffix}`;
 }
 
 const httpDataExchangeAdapter: DataExchangeAdapter = {
@@ -956,6 +956,20 @@ export function dataExchangeAdapterForEnvironment(
   return options.fixtures ? fixtureDataExchangeAdapter : httpDataExchangeAdapter;
 }
 
+/**
+ * A local import draft can only be replaced after its server job reached a
+ * terminal state. Keeping this rule in the adapter module makes it testable
+ * independently of React and protects against accidental state resets from
+ * future UI entry points.
+ */
+export function canDiscardImportDraft(
+  job: Pick<ImportJob, "status"> | null,
+  pending = false,
+): boolean {
+  if (pending) return false;
+  return !job || ["completed", "partial", "failed", "canceled"].includes(job.status);
+}
+
 export function canImportData(role: WorkspaceRole): boolean {
   return role === "owner" || role === "member";
 }
@@ -985,6 +999,28 @@ export function serializeImportErrorReport(
     "linha,mensagem",
     ...errors.map(({ rowNumber, message }) => `${rowNumber},${serializeReportCell(message)}`),
   ].join("\n");
+}
+
+export function importErrorEntriesForReport(
+  errors: readonly { rowNumber: number; message: string }[],
+  results: readonly ImportLineResult[] = [],
+): { rowNumber: number; message: string }[] {
+  const entries = [
+    ...errors,
+    ...results
+      .filter((result) => result.status === "rejected" || Boolean(result.errorMessage))
+      .map((result) => ({
+        rowNumber: result.lineNumber,
+        message: result.errorMessage ?? "A linha foi rejeitada.",
+      })),
+  ];
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    const key = `${entry.rowNumber}\u001f${entry.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function importStatusLabel(status: ImportJobStatus): string {
