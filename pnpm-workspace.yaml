@@ -12,4 +12,4 @@ minimumReleaseAgeExclude:
 
 overrides:
   browserslist: 4.28.8
-  fast-uri: 3.1.6
+  fast-uri: 3.1.7
