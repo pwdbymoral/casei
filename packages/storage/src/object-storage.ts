@@ -11,7 +11,7 @@ import {
 export const DEFAULT_OBJECT_STORAGE_MAX_BYTES = 10_000_000;
 export const DEFAULT_OBJECT_STORAGE_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 
-export type StoredFileFormat = "csv" | "xlsx";
+export type StoredFileFormat = "csv" | "xlsx" | "zip";
 export type StorageEnvironment = "dev" | "test" | "staging" | "prod";
 export type ObjectBody =
   | AsyncIterable<Uint8Array>
@@ -135,7 +135,7 @@ export class ObjectStorageCleanupError extends ObjectStorageError {
 const uuidSource = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const uuidPattern = new RegExp(`^${uuidSource}$`, "u");
 const storageKeyPattern = new RegExp(
-  `^(dev|test|staging|prod)\\/${uuidSource}\\/${uuidSource}\\/${uuidSource}\\.(csv|xlsx)$`,
+  `^(dev|test|staging|prod)\\/${uuidSource}\\/${uuidSource}\\/${uuidSource}\\.(csv|xlsx|zip)$`,
   "u",
 );
 
@@ -183,6 +183,7 @@ const xlsxContentTypes = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/octet-stream",
 ]);
+const zipContentTypes = new Set(["application/zip", "application/octet-stream"]);
 
 /**
  * Streaming, format-only validation. Malware scanning is intentionally an
@@ -220,6 +221,10 @@ export class FormatFileScanPort implements FileScanPort {
         if (input.format === "xlsx") {
           if (!xlsxContentTypes.has(contentType ?? "") || !isZipPrefix(prefix)) {
             throw new InvalidFormatError("O arquivo XLSX não corresponde ao formato declarado.");
+          }
+        } else if (input.format === "zip") {
+          if (!zipContentTypes.has(contentType ?? "") || !isZipPrefix(prefix)) {
+            throw new InvalidFormatError("O arquivo ZIP não corresponde ao formato declarado.");
           }
         } else if (!csvContentTypes.has(contentType ?? "") || isZipPrefix(prefix)) {
           throw new InvalidFormatError("O arquivo CSV não corresponde ao formato declarado.");
@@ -474,7 +479,7 @@ export class S3ObjectStorage implements ObjectStoragePort {
       throw new InvalidObjectInputError("O objeto armazenado excede o limite permitido.");
     }
     const format = response.Metadata?.["casei-format"];
-    if (format !== "csv" && format !== "xlsx") {
+    if (format !== "csv" && format !== "xlsx" && format !== "zip") {
       throw new ObjectStorageError("storage_unavailable", "O objeto não possui formato seguro.");
     }
     const sha256 = response.Metadata?.["casei-sha256"];
