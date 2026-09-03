@@ -17,6 +17,7 @@ import {
 import { hashRequest } from "@casei/database";
 import {
   createOpaqueStorageKey,
+  ObjectStorageError,
   type ObjectStoragePort,
   type StorageEnvironment,
 } from "@casei/storage";
@@ -174,9 +175,27 @@ export class ImportUploadService implements ImportUploadApplication {
       }
     } catch (error) {
       if (error instanceof ImportUploadError) throw error;
+      if (error instanceof ObjectStorageError) {
+        if (error.code === "object_not_found") {
+          throw new ImportUploadError(
+            "O arquivo temporário não foi encontrado; envie o arquivo novamente.",
+            "not_found",
+          );
+        }
+        if (error.code === "object_expired") {
+          throw new ImportUploadError(
+            "O arquivo temporário expirou; envie o arquivo novamente.",
+            "expired",
+          );
+        }
+        throw new ImportUploadError(
+          "O armazenamento da importação está indisponível; tente novamente.",
+          "storage_unavailable",
+        );
+      }
       throw new ImportUploadError(
-        "O arquivo temporário expirou ou não está disponível.",
-        "expired",
+        "O armazenamento da importação está indisponível; tente novamente.",
+        "storage_unavailable",
       );
     }
     const sourceHash = sha256(input.bytes);
@@ -194,6 +213,20 @@ export class ImportUploadService implements ImportUploadApplication {
     if (!preview.canConfirm && input.mode === "all_or_nothing") {
       throw new ImportUploadError("Tudo ou nada exige uma prévia sem erros.", "invalid_preview");
     }
+    const duplicateLines = preview.previewManifest
+      .filter((line) => line.status === "duplicate")
+      .map((line) => line.lineNumber);
+    if (
+      input.duplicatePolicy === "review" &&
+      duplicateLines.length > 0 &&
+      ((input.acceptedDuplicateLines ?? []).length !== duplicateLines.length ||
+        (input.acceptedDuplicateLines ?? []).some((line) => !duplicateLines.includes(line)))
+    ) {
+      throw new ImportUploadError(
+        "Revise cada duplicata sugerida e selecione as linhas que devem ser importadas.",
+        "invalid_preview",
+      );
+    }
     return {
       domain: preview.domain,
       storageKey: preview.storageKey,
@@ -203,7 +236,7 @@ export class ImportUploadService implements ImportUploadApplication {
       previewManifest: preview.previewManifest,
       mode: input.mode,
       duplicatePolicy: input.duplicatePolicy,
-      acceptedDuplicateLines: [] as number[],
+      acceptedDuplicateLines: [...(input.acceptedDuplicateLines ?? [])],
       totalRows: preview.previewManifest.length,
       validRows: preview.counts.valid,
       duplicateRows: preview.counts.duplicates,

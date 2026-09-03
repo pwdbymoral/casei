@@ -18,6 +18,7 @@ import {
   ImportAuthorizationError,
   ImportConflictError,
   ImportFailure,
+  type ImportLineResult,
 } from "./import-service.js";
 
 export interface ImportRoutesOptions {
@@ -29,11 +30,14 @@ export interface ImportRoutesOptions {
 /** API command/query boundary for DATA-004; worker execution is deliberately separate. */
 export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoutesOptions): void {
   router.onError((error, context) => errorResponse(context, importErrorToHttp(error)));
-  for (const path of ["/workspaces/:workspaceId/imports", "/workspaces/:workspaceId/imports/*"]) {
+  for (const path of [
+    "/workspaces/:workspaceId/data/imports",
+    "/workspaces/:workspaceId/data/imports/*",
+  ]) {
     router.use(path, options.scopeMiddleware);
   }
 
-  router.post("/workspaces/:workspaceId/imports", async (context) => {
+  router.post("/workspaces/:workspaceId/data/imports", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     const idempotencyKey = requiredIdempotencyKey(context);
@@ -49,6 +53,9 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
       const previewId = textField(multipart.fields.previewId, "previewId");
       const mode = modeFromText(multipart.fields.applyMode);
       const duplicatePolicy = duplicatePolicyFromText(multipart.fields.duplicatePolicy);
+      const acceptedDuplicateLines = duplicateLinesFromText(
+        multipart.fields.acceptedDuplicateLines,
+      );
       request = await options.upload.confirm({
         ...multipart,
         workspaceId: scope.workspaceId,
@@ -57,6 +64,7 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
         previewId,
         mode,
         duplicatePolicy,
+        acceptedDuplicateLines,
       });
     } else {
       request = await parseJsonBody(context, importCreateRequestSchema);
@@ -71,7 +79,7 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     return context.json(toImportJobResponse(job), 202);
   });
 
-  router.post("/workspaces/:workspaceId/imports/previews", async (context) => {
+  router.post("/workspaces/:workspaceId/data/imports/previews", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     if (!options.upload) {
@@ -102,15 +110,21 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     return context.json(preview);
   });
 
-  router.get("/workspaces/:workspaceId/imports/:importId", async (context) => {
+  router.get("/workspaces/:workspaceId/data/imports/:importId", async (context) => {
     const scope = scopeOf(context);
     const importId = context.req.param("importId");
     const job = await options.application.getJob(importId, scope.workspaceId);
     if (!job) throw notFoundError();
-    return context.json(toImportJobResponse(job));
+    const results = await options.application.listResults(
+      importId,
+      scope.workspaceId,
+      undefined,
+      100,
+    );
+    return context.json(toImportJobResponse(job, results.items));
   });
 
-  router.get("/workspaces/:workspaceId/imports/:importId/lines", async (context) => {
+  router.get("/workspaces/:workspaceId/data/imports/:importId/lines", async (context) => {
     const scope = scopeOf(context);
     const query = parseQuery(context, importLineListQuerySchema);
     const page = await options.application.listResults(
@@ -125,7 +139,7 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     });
   });
 
-  router.post("/workspaces/:workspaceId/imports/:importId/cancel", async (context) => {
+  router.post("/workspaces/:workspaceId/data/imports/:importId/cancel", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     requiredIdempotencyKey(context);
@@ -137,7 +151,7 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
     return context.json(toImportJobResponse(job), 202);
   });
 
-  router.post("/workspaces/:workspaceId/imports/:importId/retry", async (context) => {
+  router.post("/workspaces/:workspaceId/data/imports/:importId/retry", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     requiredIdempotencyKey(context);
@@ -156,11 +170,12 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
         correlationId: scope.correlationId,
         origin: "api",
       },
+      context.req.header("Idempotency-Key") ?? undefined,
     );
     return context.json(toImportJobResponse(job), 202);
   });
 
-  router.post("/workspaces/:workspaceId/imports/:importId/reverse", async (context) => {
+  router.post("/workspaces/:workspaceId/data/imports/:importId/reverse", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
     requiredIdempotencyKey(context);
@@ -178,19 +193,22 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
 }
 
 /** Stable UI DTO; internal actor/storage/manifest fields never cross this boundary. */
-export function toImportJobResponse(job: {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly state: string;
-  readonly cursor: number;
-  readonly totalRows: number;
-  readonly appliedRows: number;
-  readonly skippedRows: number;
-  readonly rejectedRows: number;
-  readonly createdAt?: string;
-  readonly expiresAt: string;
-  readonly lastError?: string;
-}): ImportJobResponse {
+export function toImportJobResponse(
+  job: {
+    readonly id: string;
+    readonly workspaceId: string;
+    readonly state: string;
+    readonly cursor: number;
+    readonly totalRows: number;
+    readonly appliedRows: number;
+    readonly skippedRows: number;
+    readonly rejectedRows: number;
+    readonly createdAt?: string;
+    readonly expiresAt: string;
+    readonly lastError?: string;
+  },
+  lineResults: readonly ImportLineResult[] = [],
+): ImportJobResponse {
   const terminal = ["succeeded", "reversed", "cancelled"].includes(job.state);
   const status =
     job.state === "queued"
@@ -220,7 +238,15 @@ export function toImportJobResponse(job: {
     appliedRows: job.appliedRows,
     ignoredRows: job.skippedRows,
     rejectedRows: job.rejectedRows,
-    errors: job.lastError ? [{ rowNumber: 0, message: job.lastError }] : [],
+    errors: [
+      ...lineResults
+        .filter((line) => line.status === "rejected" || line.status === "skipped")
+        .map((line) => ({
+          rowNumber: line.lineNumber,
+          message: line.errorMessage ?? line.errorCode ?? "A linha não foi aplicada.",
+        })),
+      ...(job.lastError ? [{ rowNumber: 0, message: job.lastError }] : []),
+    ].slice(0, 100),
     createdAt: job.createdAt ?? job.expiresAt,
     expiresAt: job.expiresAt,
     ...(job.lastError ? { message: job.lastError } : {}),
@@ -277,6 +303,40 @@ function duplicatePolicyFromText(value: unknown): "skip" | "import" | "review" {
   throw new ApiHttpError(422, "validation_failed", {
     fieldErrors: { duplicatePolicy: ["A política de duplicatas é inválida."] },
   });
+}
+
+function duplicateLinesFromText(value: unknown): readonly number[] {
+  if (value === undefined || value === "") return [];
+  if (typeof value !== "string" || value.length > 256_000) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { acceptedDuplicateLines: ["A seleção de duplicatas é inválida."] },
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (cause) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { acceptedDuplicateLines: ["A seleção de duplicatas não é um JSON válido."] },
+      cause,
+    });
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length > 50_000 ||
+    parsed.some((line) => !Number.isSafeInteger(line) || line < 2 || line > 50_001)
+  ) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { acceptedDuplicateLines: ["A seleção de duplicatas é inválida."] },
+    });
+  }
+  const lines = parsed as number[];
+  if (new Set(lines).size !== lines.length) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { acceptedDuplicateLines: ["A seleção de duplicatas contém linhas repetidas."] },
+    });
+  }
+  return lines;
 }
 
 export function importErrorToHttp(error: unknown): unknown {

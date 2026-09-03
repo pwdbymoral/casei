@@ -1,6 +1,6 @@
 # Plano: DATA-006 — boundary HTTP de intercâmbio
 
-- Status: boundary HTTP e preflight server-side implementados; export job bootstrap persistente permanece pendente
+- Status: boundary HTTP e preflight server-side implementados; hardening pós-revisão publicado em branch corretiva; export job bootstrap persistente permanece pendente
 - Spec: [intercâmbio de dados](../../specs/intercambio-de-dados.md)
 - Relacionados: [DATA-001 storage](data-001-storage.md), [DATA-004 importação](data-004-import.md), [DATA-005 exportação](data-005-export.md)
 
@@ -40,4 +40,12 @@ entrada de arquivo, exigir idempotência nas mutações e não vazar URLs bearer
 - [x] todas as rotas passam por actor + workspace scope;
 - [x] download delega ao adapter, que deve revalidar autorização/estado/expiração antes do stream;
 - [x] ausência de bootstrap explícito retorna erro operacional claro, não 404;
+- [x] rotas de import/export usam o prefixo `/data` consumido pelo adapter web;
+- [x] multipart verifica limite anunciado antes do parser, limite agregado de
+  arquivos/campos e limite de mapping;
+- [x] `review` transporta linhas aceitas e rejeita confirmação que não cubra o
+  manifesto de duplicatas;
+- [x] status do job inclui erros de linhas; retry encaminha e persiste a chave,
+  payload e resposta pelo mecanismo de idempotência; storage distingue
+  ausente/expirado de indisponibilidade transitória;
 - [ ] aplicação persistente de export jobs e wiring de produção.

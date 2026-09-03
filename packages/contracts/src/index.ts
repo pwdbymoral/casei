@@ -294,7 +294,7 @@ export const importCreateRequestSchema = z.object({
   previewManifest: importPreviewManifestSchema,
   mode: importModeSchema,
   duplicatePolicy: importDuplicatePolicySchema,
-  acceptedDuplicateLines: z.array(z.number().int().min(1).max(50_000)).max(50_000).default([]),
+  acceptedDuplicateLines: z.array(z.number().int().min(2).max(50_001)).max(50_000).default([]),
   totalRows: z.number().int().min(1).max(50_000),
   validRows: z.number().int().min(0).max(50_000),
   duplicateRows: z.number().int().min(0).max(50_000),

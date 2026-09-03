@@ -8,6 +8,7 @@ import {
   type ImportDomain,
   type ImportPreviewResponse,
 } from "@casei/contracts";
+import { ObjectStorageError } from "@casei/storage";
 import type { Hono, MiddlewareHandler } from "hono";
 import { ApiHttpError, errorResponse, validationError } from "./http/index.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
@@ -15,13 +16,17 @@ import { ImportAuthorizationError, ImportConflictError, ImportFailure } from "./
 
 const MAX_IMPORT_FILE_BYTES = 10_000_000;
 const MAX_FILE_NAME_LENGTH = 255;
+const MAX_MULTIPART_BODY_BYTES = 10_000_000;
+const MAX_MULTIPART_FIELD_BYTES = 256_000;
+const multipartTextEncoder = new TextEncoder();
 
 export type ImportUploadErrorCode =
   | "not_found"
   | "expired"
   | "source_mismatch"
   | "invalid_preview"
-  | "invalid_file";
+  | "invalid_file"
+  | "storage_unavailable";
 
 export class ImportUploadError extends Error {
   readonly code: ImportUploadErrorCode;
@@ -62,6 +67,8 @@ export type ImportUploadConfirmInput = {
   readonly previewId: string;
   readonly mode: "valid_only" | "all_or_nothing";
   readonly duplicatePolicy: "skip" | "import" | "review";
+  /** Lines the user explicitly selected after reviewing duplicate suggestions. */
+  readonly acceptedDuplicateLines?: readonly number[];
 };
 
 export type DataExchangeExportApplication = {
@@ -108,11 +115,17 @@ export function configureDataExchangeRoutes(
   options: DataExchangeRoutesOptions,
 ): void {
   router.onError((error, context) => errorResponse(context, dataExchangeErrorToHttp(error)));
-  for (const path of ["/workspaces/:workspaceId/exports", "/workspaces/:workspaceId/exports/*"]) {
+  for (const path of [
+    "/workspaces/:workspaceId/data/exports",
+    "/workspaces/:workspaceId/data/exports/*",
+  ]) {
     router.use(path, options.scopeMiddleware);
   }
   if (options.importUnavailable) {
-    for (const path of ["/workspaces/:workspaceId/imports", "/workspaces/:workspaceId/imports/*"]) {
+    for (const path of [
+      "/workspaces/:workspaceId/data/imports",
+      "/workspaces/:workspaceId/data/imports/*",
+    ]) {
       router.use(path, options.scopeMiddleware);
     }
     const unavailableImport = async () => {
@@ -120,17 +133,17 @@ export function configureDataExchangeRoutes(
         message: "A fronte server-side de importação ainda não foi configurada.",
       });
     };
-    router.post("/workspaces/:workspaceId/imports", unavailableImport);
-    router.all("/workspaces/:workspaceId/imports/*", unavailableImport);
+    router.post("/workspaces/:workspaceId/data/imports", unavailableImport);
+    router.all("/workspaces/:workspaceId/data/imports/*", unavailableImport);
   }
 
-  router.get("/workspaces/:workspaceId/exports", async (context) => {
+  router.get("/workspaces/:workspaceId/data/exports", async (context) => {
     const scope = scopeOf(context);
     const application = requireExportApplication(options.exports);
     return context.json(await application.list({ ...scope, origin: "api" }));
   });
 
-  router.post("/workspaces/:workspaceId/exports", async (context) => {
+  router.post("/workspaces/:workspaceId/data/exports", async (context) => {
     const scope = scopeOf(context);
     const application = requireExportApplication(options.exports);
     const idempotencyKey = requiredIdempotencyKey(context);
@@ -146,7 +159,7 @@ export function configureDataExchangeRoutes(
     );
   });
 
-  router.get("/workspaces/:workspaceId/exports/:exportId", async (context) => {
+  router.get("/workspaces/:workspaceId/data/exports/:exportId", async (context) => {
     const scope = scopeOf(context);
     const application = requireExportApplication(options.exports);
     return context.json(
@@ -158,7 +171,7 @@ export function configureDataExchangeRoutes(
     );
   });
 
-  router.get("/workspaces/:workspaceId/exports/:exportId/download", async (context) => {
+  router.get("/workspaces/:workspaceId/data/exports/:exportId/download", async (context) => {
     const scope = scopeOf(context);
     const application = requireExportApplication(options.exports);
     const download = await application.download({
@@ -197,6 +210,19 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
   readonly mapping: Readonly<Record<string, string>>;
   readonly fields: Readonly<Record<string, string>>;
 }> {
+  const declaredLength = context.req.header("content-length");
+  if (declaredLength !== undefined) {
+    const parsedLength = Number.parseInt(declaredLength, 10);
+    if (
+      !Number.isSafeInteger(parsedLength) ||
+      parsedLength < 1 ||
+      parsedLength > MAX_MULTIPART_BODY_BYTES
+    ) {
+      throw new ApiHttpError(413, "validation_failed", {
+        message: "O corpo do upload excede o limite de 10 MB.",
+      });
+    }
+  }
   let body: Record<string, unknown>;
   try {
     body = await context.req.parseBody();
@@ -204,7 +230,7 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
     throw new ApiHttpError(400, "malformed_request", { cause });
   }
   const file = body.file;
-  if (!(file instanceof File)) {
+  if (!(file instanceof File) || Array.isArray(file)) {
     throw new ApiHttpError(422, "validation_failed", {
       fieldErrors: { file: ["Envie um arquivo CSV ou XLSX."] },
     });
@@ -249,8 +275,29 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
   }
   const mapping = parseMapping(body.mapping);
   const fields: Record<string, string> = {};
+  let fieldsBytes = 0;
+  let fileBytes = 0;
   for (const [key, value] of Object.entries(body)) {
-    if (typeof value === "string") fields[key] = value;
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      if (item instanceof File) {
+        fileBytes += item.size;
+        continue;
+      }
+      if (typeof item !== "string") continue;
+      fieldsBytes += multipartTextEncoder.encode(item).byteLength;
+      if (fieldsBytes > MAX_MULTIPART_FIELD_BYTES || item.length > 100_000) {
+        throw new ApiHttpError(413, "validation_failed", {
+          message: "Os campos do upload excedem o limite permitido.",
+        });
+      }
+      if (typeof value === "string") fields[key] = value;
+    }
+  }
+  if (fileBytes + fieldsBytes > MAX_MULTIPART_BODY_BYTES) {
+    throw new ApiHttpError(413, "validation_failed", {
+      message: "O corpo do upload excede o limite de 10 MB.",
+    });
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (bytes.byteLength !== file.size || bytes.byteLength > MAX_IMPORT_FILE_BYTES) {
@@ -271,7 +318,7 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
 
 export function parseMapping(value: unknown): Readonly<Record<string, string>> {
   if (value === undefined || value === "") return {};
-  if (typeof value !== "string") throw invalidMapping();
+  if (typeof value !== "string" || value.length > MAX_MULTIPART_FIELD_BYTES) throw invalidMapping();
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -284,7 +331,9 @@ export function parseMapping(value: unknown): Readonly<Record<string, string>> {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
     throw invalidMapping();
   const mapping: Record<string, string> = {};
-  for (const [key, item] of Object.entries(parsed)) {
+  const entries = Object.entries(parsed);
+  if (entries.length > 256) throw invalidMapping();
+  for (const [key, item] of entries) {
     if (!/^[a-z][a-z0-9_]{0,99}$/u.test(key) || typeof item !== "string" || item.length > 1_000) {
       throw invalidMapping();
     }
@@ -357,6 +406,10 @@ function dataExchangeErrorToHttp(error: unknown): unknown {
       return new ApiHttpError(410, "validation_failed", { message: error.message });
     if (error.code === "source_mismatch")
       return new ApiHttpError(409, "validation_failed", { message: error.message });
+    if (error.code === "storage_unavailable")
+      return new ApiHttpError(503, "internal_error", {
+        message: "O armazenamento da importação está indisponível; tente novamente.",
+      });
     return new ApiHttpError(422, "validation_failed", { message: error.message });
   }
   if (error instanceof ImportAuthorizationError) return new ApiHttpError(403, "permission_denied");
@@ -364,5 +417,13 @@ function dataExchangeErrorToHttp(error: unknown): unknown {
     return new ApiHttpError(409, "validation_failed", { message: error.message });
   if (error instanceof ImportFailure)
     return new ApiHttpError(422, "validation_failed", { message: error.message });
+  if (error instanceof ObjectStorageError) {
+    if (error.code === "object_not_found") return new ApiHttpError(404, "not_found");
+    if (error.code === "object_expired")
+      return new ApiHttpError(410, "validation_failed", { message: error.message });
+    return new ApiHttpError(503, "internal_error", {
+      message: "O armazenamento da exportação está indisponível; tente novamente.",
+    });
+  }
   return error;
 }

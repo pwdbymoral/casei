@@ -1,4 +1,9 @@
-import type { ObjectStoragePort, ObjectStorageRead, ObjectStorageRecord } from "@casei/storage";
+import {
+  ObjectStorageError,
+  type ObjectStoragePort,
+  type ObjectStorageRead,
+  type ObjectStorageRecord,
+} from "@casei/storage";
 import { describe, expect, it } from "vitest";
 import type { ImportUploadError } from "../src/data-exchange-routes.js";
 import {
@@ -12,6 +17,7 @@ const now = new Date("2026-08-25T12:00:00.000Z");
 
 class MemoryStorage implements ObjectStoragePort {
   readonly puts: Array<{ key: string; bytes: Uint8Array; sha256: string }> = [];
+  headError?: ObjectStorageError;
 
   async put(input: Parameters<ObjectStoragePort["put"]>[0]): Promise<ObjectStorageRecord> {
     const chunks: Uint8Array[] = [];
@@ -35,6 +41,7 @@ class MemoryStorage implements ObjectStoragePort {
   }
 
   async head(input: { key: string }): Promise<ObjectStorageRecord> {
+    if (this.headError) throw this.headError;
     const stored = this.puts.find((put) => put.key === input.key);
     if (!stored) throw new Error("missing");
     return {
@@ -185,5 +192,46 @@ describe("ImportUploadService", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_file" });
     expect(dependencies.storage.puts).toHaveLength(0);
+  });
+
+  it.each([
+    ["object_not_found", "not_found"],
+    ["object_expired", "expired"],
+    ["storage_unavailable", "storage_unavailable"],
+  ] as const)("preserves storage state %s while confirming", async (storageCode, errorCode) => {
+    const dependencies = service();
+    dependencies.storage.headError = new ObjectStorageError(storageCode, "storage failure");
+    const application = new ImportUploadService({
+      ...dependencies,
+      environment: "test",
+      now: () => now,
+    });
+    const bytes = new TextEncoder().encode("nome\nArroz\n");
+    const preview = await application.preview({
+      workspaceId,
+      actorId: "user-1",
+      correlationId: "corr-storage-state",
+      domain: "products",
+      locale: "pt-BR",
+      mapping: {},
+      fileName: "produtos.csv",
+      contentType: "text/csv",
+      bytes,
+    });
+
+    await expect(
+      application.confirm({
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "corr-storage-state",
+        fileName: "produtos.csv",
+        contentType: "text/csv",
+        bytes,
+        previewId: preview.id,
+        mapping: preview.mapping,
+        mode: "valid_only",
+        duplicatePolicy: "skip",
+      }),
+    ).rejects.toMatchObject({ code: errorCode } satisfies Partial<ImportUploadError>);
   });
 });

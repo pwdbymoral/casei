@@ -1,4 +1,5 @@
 import type { Pool } from "@casei/database";
+import { ObjectStorageError } from "@casei/storage";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type {
@@ -74,6 +75,34 @@ describe("DATA-006 HTTP boundary", () => {
     });
   });
 
+  it("includes rejected and skipped line errors in the job DTO", () => {
+    expect(
+      toImportJobResponse(
+        {
+          id: "job-1",
+          workspaceId,
+          state: "succeeded",
+          cursor: 4,
+          totalRows: 4,
+          appliedRows: 2,
+          skippedRows: 1,
+          rejectedRows: 1,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+        [
+          { lineNumber: 2, status: "applied" },
+          { lineNumber: 3, status: "skipped", errorCode: "duplicate_suggestion" },
+          { lineNumber: 4, status: "rejected", errorMessage: "Categoria inválida." },
+        ],
+      ),
+    ).toMatchObject({
+      errors: [
+        { rowNumber: 3, message: "duplicate_suggestion" },
+        { rowNumber: 4, message: "Categoria inválida." },
+      ],
+    });
+  });
+
   it("passes multipart preview through actor and workspace scope", async () => {
     const calls: unknown[] = [];
     const upload: ImportUploadApplication = {
@@ -113,7 +142,7 @@ describe("DATA-006 HTTP boundary", () => {
     form.set("locale", "pt-BR");
 
     const response = await appWith({ upload }).request(
-      `http://localhost/v1/workspaces/${workspaceId}/imports/previews`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
       { method: "POST", body: form },
     );
 
@@ -128,6 +157,55 @@ describe("DATA-006 HTTP boundary", () => {
     expect((calls[0] as { bytes: Uint8Array }).bytes).toEqual(
       new TextEncoder().encode("nome\nArroz\n"),
     );
+  });
+
+  it("rejects an oversized multipart body before the parser buffers it", async () => {
+    let parsed = false;
+    const upload: ImportUploadApplication = {
+      preview: async () => {
+        parsed = true;
+        throw new Error("the parser should not run");
+      },
+      confirm: async () => {
+        throw new Error("the parser should not run");
+      },
+    };
+    const form = new FormData();
+    form.set("file", new File(["nome\nArroz\n"], "produtos.csv", { type: "text/csv" }));
+    form.set("domain", "products");
+    form.set("locale", "pt-BR");
+    const response = await appWith({ upload }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
+      {
+        method: "POST",
+        body: form,
+        headers: { "Content-Length": "10000001" },
+      },
+    );
+    expect(response.status).toBe(413);
+    expect(parsed).toBe(false);
+  });
+
+  it("rejects the aggregate file and field payload after parsing when no length is declared", async () => {
+    let parsed = false;
+    const upload: ImportUploadApplication = {
+      preview: async () => {
+        parsed = true;
+        throw new Error("the aggregate limit should reject before application");
+      },
+      confirm: async () => {
+        throw new Error("the aggregate limit should reject before application");
+      },
+    };
+    const form = new FormData();
+    form.set("file", new File([new Uint8Array(9_900_000)], "produtos.csv", { type: "text/csv" }));
+    form.set("notes", "x".repeat(200_000));
+    const response = await appWith({ upload }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
+      { method: "POST", body: form },
+    );
+    expect(response.status).toBe(413);
+    expect(parsed).toBe(false);
   });
 
   it("confirms multipart only after the preview application validates the source", async () => {
@@ -171,7 +249,7 @@ describe("DATA-006 HTTP boundary", () => {
     form.set("applyMode", "all_or_nothing");
 
     const response = await appWith({ upload, importApplication: application }).request(
-      `http://localhost/v1/workspaces/${workspaceId}/imports`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports`,
       {
         method: "POST",
         body: form,
@@ -188,6 +266,35 @@ describe("DATA-006 HTTP boundary", () => {
       mode: "all_or_nothing",
       duplicatePolicy: "skip",
     });
+  });
+
+  it("requires every duplicate suggestion to have an explicit review decision", async () => {
+    const upload: ImportUploadApplication = {
+      preview: async () => {
+        throw new Error("not used");
+      },
+      confirm: async (input) => {
+        expect(input.acceptedDuplicateLines).toEqual([3]);
+        throw new ImportUploadError("Revise as duplicatas.", "invalid_preview");
+      },
+    };
+    const application = { create: async () => ({}) } as unknown as ImportApplication;
+    const form = new FormData();
+    form.set("file", new File(["nome\nArroz\nFeijão\n"], "produtos.csv", { type: "text/csv" }));
+    form.set("previewId", "preview-1");
+    form.set("mapping", JSON.stringify({ name: "nome" }));
+    form.set("duplicatePolicy", "review");
+    form.set("acceptedDuplicateLines", JSON.stringify([3]));
+    form.set("applyMode", "valid_only");
+    const response = await appWith({ upload, importApplication: application }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports`,
+      {
+        method: "POST",
+        body: form,
+        headers: { "Idempotency-Key": "import-review-123456" },
+      },
+    );
+    expect(response.status).toBe(422);
   });
 
   it("maps stale preview errors to a conflict instead of leaking an internal error", async () => {
@@ -208,7 +315,7 @@ describe("DATA-006 HTTP boundary", () => {
     form.set("applyMode", "valid_only");
 
     const response = await appWith({ upload, importApplication: application }).request(
-      `http://localhost/v1/workspaces/${workspaceId}/imports`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports`,
       {
         method: "POST",
         body: form,
@@ -258,20 +365,20 @@ describe("DATA-006 HTTP boundary", () => {
       }),
     };
     const app = appWith({ exports, role: "viewer" });
-    const list = await app.request(`http://localhost/v1/workspaces/${workspaceId}/exports`);
+    const list = await app.request(`http://localhost/v1/workspaces/${workspaceId}/data/exports`);
     expect(list.status).toBe(200);
-    const create = await app.request(`http://localhost/v1/workspaces/${workspaceId}/exports`, {
+    const create = await app.request(`http://localhost/v1/workspaces/${workspaceId}/data/exports`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Idempotency-Key": "export-key-123456" },
       body: JSON.stringify({ domain: "transactions", format: "csv" }),
     });
     expect(create.status).toBe(202);
     const status = await app.request(
-      `http://localhost/v1/workspaces/${workspaceId}/exports/export-1`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/exports/export-1`,
     );
     expect(status.status).toBe(200);
     const download = await app.request(
-      `http://localhost/v1/workspaces/${workspaceId}/exports/export-1/download`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/exports/export-1/download`,
     );
     expect(download.status).toBe(200);
     expect(download.headers.get("Content-Disposition")).toContain("transactions.csv");
@@ -279,9 +386,62 @@ describe("DATA-006 HTTP boundary", () => {
     expect(calls).toEqual([`list:${workspaceId}`, "create:export-key-123456"]);
   });
 
+  it.each([
+    ["object_not_found", 404],
+    ["object_expired", 410],
+    ["storage_unavailable", 503],
+  ] as const)("maps export storage state %s to HTTP %d", async (storageCode, status) => {
+    const exports: DataExchangeExportApplication = {
+      list: async () => [],
+      create: async () => {
+        throw new Error("not used");
+      },
+      get: async () => {
+        throw new Error("not used");
+      },
+      download: async () => {
+        throw new ObjectStorageError(storageCode, "storage failure");
+      },
+    };
+    const response = await appWith({ exports }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/exports/export-1/download`,
+    );
+    expect(response.status).toBe(status);
+  });
+
+  it("exposes import line errors through the scoped status route", async () => {
+    const job = {
+      id: "job-1",
+      workspaceId,
+      state: "succeeded",
+      cursor: 2,
+      totalRows: 2,
+      appliedRows: 1,
+      skippedRows: 1,
+      rejectedRows: 0,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    } as ImportJobRecord;
+    const application = {
+      getJob: async () => job,
+      listResults: async () => ({
+        items: [{ lineNumber: 3, status: "skipped", errorMessage: "Duplicata provável." }],
+        nextAfterLine: null,
+      }),
+    } as unknown as ImportApplication;
+    const response = await appWith({ importApplication: application }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/job-1`,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      errors: [{ rowNumber: 3, message: "Duplicata provável." }],
+    });
+  });
+
   it("returns an explicit unavailable response instead of a route 404 without bootstrap", async () => {
     const app = appWith({});
-    const response = await app.request(`http://localhost/v1/workspaces/${workspaceId}/exports`);
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/exports`,
+    );
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "internal_error" },
@@ -291,7 +451,7 @@ describe("DATA-006 HTTP boundary", () => {
     form.set("domain", "products");
     form.set("locale", "pt-BR");
     const preview = await app.request(
-      `http://localhost/v1/workspaces/${workspaceId}/imports/previews`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
       { method: "POST", body: form },
     );
     expect(preview.status).toBe(503);

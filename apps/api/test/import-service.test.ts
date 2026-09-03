@@ -45,7 +45,7 @@ const baseRequest: ImportCreateRequest = {
   validRows: 2,
   duplicateRows: 1,
   invalidRows: 0,
-  expiresAt: "2026-08-26T00:00:00.000Z",
+  expiresAt: new Date(Date.now() + 60_000).toISOString(),
 };
 
 function source(rows: readonly ImportSourceRow[]): ImportSource {
@@ -417,6 +417,51 @@ describe("DATA-004 aplicação de importação", () => {
     await app.run(job.id, workspaceId);
 
     expect(commands.applied).toHaveLength(2);
+  });
+
+  it("exige decisão para cada duplicata quando a política é revisão", async () => {
+    const app = new ImportApplication(new MemoryStore(), source(rows()), new MemoryCommands());
+
+    await expect(
+      app.create({
+        workspaceId,
+        actorId,
+        correlationId: "corr-review",
+        request: {
+          ...baseRequest,
+          duplicatePolicy: "review",
+          acceptedDuplicateLines: [],
+        },
+      }),
+    ).rejects.toThrow("Revise cada duplicata");
+  });
+
+  it("permite que o store reproduza um retry idempotente após o job já estar enfileirado", async () => {
+    const calls: unknown[] = [];
+    const queuedJob = { id: "job-retry", workspaceId, state: "queued" } as ImportJobRecord;
+    const store = {
+      getJob: async () => queuedJob,
+      retry: async (...args: unknown[]) => {
+        calls.push(args);
+        return queuedJob;
+      },
+    } as unknown as ImportStore;
+    const app = new ImportApplication(store, source([]), new MemoryCommands());
+
+    await expect(
+      app.retry(
+        queuedJob.id,
+        workspaceId,
+        { actorId, correlationId: "corr-retry", origin: "api" },
+        "retry-key-123456",
+      ),
+    ).resolves.toBe(queuedJob);
+    expect(calls[0]).toEqual([
+      queuedJob.id,
+      workspaceId,
+      { actorId, correlationId: "corr-retry", origin: "api" },
+      "retry-key-123456",
+    ]);
   });
 
   it("propaga o lease de execução para cada lote e renova antes da leitura", async () => {
