@@ -1,4 +1,5 @@
 import type { Pool } from "@casei/database";
+import { IdempotencyConflictError, IdempotencyInProgressError } from "@casei/database";
 import { ObjectStorageError } from "@casei/storage";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
@@ -140,6 +141,7 @@ describe("DATA-006 HTTP boundary", () => {
     form.set("file", new File(["nome\nArroz\n"], "produtos.csv", { type: "text/csv" }));
     form.set("domain", "products");
     form.set("locale", "pt-BR");
+    form.set("sheetName", "Dados");
 
     const response = await appWith({ upload }).request(
       `http://localhost/v1/workspaces/${workspaceId}/data/imports/previews`,
@@ -152,6 +154,7 @@ describe("DATA-006 HTTP boundary", () => {
       actorId: "requester-1",
       domain: "products",
       locale: "pt-BR",
+      sheetName: "Dados",
       fileName: "produtos.csv",
     });
     expect((calls[0] as { bytes: Uint8Array }).bytes).toEqual(
@@ -412,6 +415,25 @@ describe("DATA-006 HTTP boundary", () => {
     });
   });
 
+  it.each(["invalid_object", "invalid_format", "scan_rejected"] as const)(
+    "maps actionable import storage error %s to HTTP 422",
+    (storageCode) => {
+      expect(
+        importErrorToHttp(new ObjectStorageError(storageCode, "invalid upload")),
+      ).toMatchObject({
+        status: 422,
+        code: "validation_failed",
+      });
+    },
+  );
+
+  it.each([
+    [new IdempotencyConflictError(), "idempotency_conflict"],
+    [new IdempotencyInProgressError(), "idempotency_conflict"],
+  ] as const)("maps concurrent import retry errors to %s", (error, code) => {
+    expect(importErrorToHttp(error)).toMatchObject({ status: 409, code });
+  });
+
   it("exposes export list/create/status/download behind the same scope", async () => {
     const calls: string[] = [];
     const exports: DataExchangeExportApplication = {
@@ -476,6 +498,9 @@ describe("DATA-006 HTTP boundary", () => {
     ["object_not_found", 404],
     ["object_expired", 410],
     ["storage_unavailable", 503],
+    ["invalid_object", 422],
+    ["invalid_format", 422],
+    ["scan_rejected", 422],
   ] as const)("maps export storage state %s to HTTP %d", async (storageCode, status) => {
     const exports: DataExchangeExportApplication = {
       list: async () => [],
@@ -493,6 +518,35 @@ describe("DATA-006 HTTP boundary", () => {
       `http://localhost/v1/workspaces/${workspaceId}/data/exports/export-1/download`,
     );
     expect(response.status).toBe(status);
+  });
+
+  it("rejects impossible civil export dates before calling the application", async () => {
+    const exports: DataExchangeExportApplication = {
+      list: async () => [],
+      create: async () => {
+        throw new Error("the application must not receive invalid dates");
+      },
+      get: async () => {
+        throw new Error("not used");
+      },
+      download: async () => {
+        throw new Error("not used");
+      },
+    };
+
+    const response = await appWith({ exports }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/exports`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "export-date-123456" },
+        body: JSON.stringify({ domain: "transactions", format: "csv", from: "2026-02-31" }),
+      },
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "validation_failed", fieldErrors: { from: expect.any(Array) } },
+    });
   });
 
   it("exposes import line errors through the scoped status route", async () => {

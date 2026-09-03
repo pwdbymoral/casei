@@ -11,9 +11,10 @@ import {
 import {
   configureDataExchangeRoutes,
   type DataExchangeExportApplication,
+  dataExchangeErrorToHttp,
   type ImportUploadApplication,
 } from "./data-exchange-routes.js";
-import { configureFinanceRoutes } from "./finance-routes.js";
+import { configureFinanceRoutes, financeErrorToHttp } from "./finance-routes.js";
 import { FinanceService } from "./finance-service.js";
 import { GoalService } from "./goal-service.js";
 import {
@@ -26,10 +27,10 @@ import {
 } from "./http/index.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
-import { configureImportRoutes } from "./import-routes.js";
+import { configureImportRoutes, importErrorToHttp } from "./import-routes.js";
 import type { ImportApplication } from "./import-service.js";
 import { InsightService } from "./insight-service.js";
-import { configureStockRoutes } from "./stock-routes.js";
+import { configureStockRoutes, stockErrorToHttp } from "./stock-routes.js";
 import { StockService } from "./stock-service.js";
 
 export type V1Configurator = (router: Hono<ApiEnv>) => void;
@@ -224,9 +225,42 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
       scopeMiddleware,
     });
   }
+  v1.onError((error, context) => errorResponse(context, apiErrorToHttp(error, context.req.path)));
   app.route("/v1", v1);
 
   return app;
+}
+
+function apiErrorToHttp(error: unknown, path: string): unknown {
+  const mappers = path.includes("/data/imports")
+    ? [importErrorToHttp, dataExchangeErrorToHttp]
+    : path.includes("/data/")
+      ? [dataExchangeErrorToHttp]
+      : path.includes("/stock/")
+        ? [stockErrorToHttp]
+        : isFinancePath(path)
+          ? [financeErrorToHttp]
+          : [];
+  for (const mapper of mappers) {
+    const mapped = mapper(error);
+    if (mapped !== error) return mapped;
+  }
+  return error;
+}
+
+function isFinancePath(path: string): boolean {
+  return [
+    "/transactions",
+    "/wallet",
+    "/loans",
+    "/categories",
+    "/cards",
+    "/statements",
+    "/recurrences",
+    "/installments",
+    "/goals",
+    "/insights",
+  ].some((segment) => path.includes(segment));
 }
 
 async function defaultActorResolver(context: Parameters<MiddlewareHandler<ApiEnv>>[0]) {

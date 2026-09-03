@@ -378,7 +378,9 @@ describe("data exchange UI ports", () => {
     ).rejects.toMatchObject({
       code: "permission",
     });
-    await expect(adapter.cancelImport("other-workspace", first.id)).rejects.toMatchObject({
+    await expect(
+      adapter.cancelImport("other-workspace", first.id, "other-cancel-key"),
+    ).rejects.toMatchObject({
       code: "permission",
     });
 

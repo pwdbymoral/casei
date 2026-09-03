@@ -1,8 +1,11 @@
 import { correlationIdSchema, domainIdSchema, workspaceMembershipSchema } from "@casei/contracts";
+import type { Pool } from "@casei/database";
+import { IdempotencyConflictError } from "@casei/database";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createApp } from "../src/app.js";
+import type { FinanceService } from "../src/finance-service.js";
 import {
   assertIfMatch,
   createActorMiddleware,
@@ -17,6 +20,7 @@ import {
   requireIfMatch,
   setVersionHeaders,
 } from "../src/http/index.js";
+import type { StockService } from "../src/stock-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
 const otherWorkspaceId = "0190f3c8-2a10-7abc-8def-1234567890ac";
@@ -58,6 +62,68 @@ describe("HTTP boundary transversal", () => {
       headers: { "X-Correlation-ID": supplied },
     });
     expect(withSupplied.headers.get("x-correlation-id")).toBe(supplied);
+  });
+
+  it("preserva mapeamentos financeiros quando DATA-006 também está montado", async () => {
+    const identityService = {
+      resolveScope: async (_actor: unknown, workspaceId: string) => ({
+        actor: { userId: "user-1" },
+        workspaceId,
+        role: "member" as const,
+        correlationId: "correlation-composed",
+      }),
+    };
+    const financeService = {
+      createTransaction: async () => {
+        throw new IdempotencyConflictError();
+      },
+    } as unknown as FinanceService;
+    const stockService = {
+      createProduct: async () => {
+        throw new IdempotencyConflictError();
+      },
+    } as unknown as StockService;
+    const app = createApp(undefined, {
+      identity: {
+        pool: {} as Pool,
+        service: identityService as never,
+        actorResolver: async () => ({ userId: "user-1" }),
+      },
+      finance: { pool: {} as Pool, service: financeService },
+      stock: { pool: {} as Pool, service: stockService },
+      dataExchange: {},
+    });
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "finance-key-123456" },
+        body: JSON.stringify({
+          kind: "expense",
+          amount: { currency: "BRL", minor: "100" },
+          description: "Teste",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "idempotency_conflict" },
+    });
+
+    const stockResponse = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/stock/products`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "stock-key-123456" },
+        body: JSON.stringify({ name: "Arroz" }),
+      },
+    );
+    expect(stockResponse.status).toBe(409);
+    await expect(stockResponse.json()).resolves.toMatchObject({
+      error: { code: "idempotency_conflict" },
+    });
   });
 
   it("faz parsing Zod de JSON e devolve fieldErrors no envelope", async () => {

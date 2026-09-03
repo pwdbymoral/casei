@@ -1,6 +1,6 @@
 # Plano: DATA-006 — boundary HTTP de intercâmbio
 
-- Status: boundary HTTP e preflight server-side implementados; hardening pós-revisão publicado em branch corretiva; export job bootstrap persistente permanece pendente
+- Status: boundary HTTP, preflight server-side e hardening pós-revisão implementados; export job bootstrap persistente permanece pendente
 - Spec: [intercâmbio de dados](../../specs/intercambio-de-dados.md)
 - Relacionados: [DATA-001 storage](data-001-storage.md), [DATA-004 importação](data-004-import.md), [DATA-005 exportação](data-005-export.md)
 
@@ -48,4 +48,13 @@ entrada de arquivo, exigir idempotência nas mutações e não vazar URLs bearer
 - [x] status do job inclui erros de linhas; retry encaminha e persiste a chave,
   payload e resposta pelo mecanismo de idempotência; storage distingue
   ausente/expirado de indisponibilidade transitória;
+- [x] o handler de erros é composto por vertical e não sobrescreve contratos de
+  Finance, Stock ou Identity quando DATA-006 está montado;
+- [x] datas de filtros usam datas civis reais; IDs e versão de schema das
+  exportações Casei permanecem disponíveis no mapeamento da prévia;
+- [x] o preflight recebe consulta de fingerprints existentes escopada ao
+  workspace e encaminha seleção explícita de planilha XLSX;
+- [x] erros acionáveis de validação de storage retornam `422`, enquanto
+  indisponibilidade e falhas de cleanup continuam `503`;
+- [x] cancelamento e retry da UI enviam chaves de idempotência estáveis;
 - [ ] aplicação persistente de export jobs e wiring de produção.

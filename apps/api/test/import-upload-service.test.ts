@@ -1,3 +1,4 @@
+import { fingerprintImportRow } from "@casei/data";
 import {
   ObjectStorageError,
   type ObjectStoragePort,
@@ -7,6 +8,7 @@ import {
 import { describe, expect, it } from "vitest";
 import type { ImportUploadError } from "../src/data-exchange-routes.js";
 import {
+  type ImportFingerprintLookup,
   type ImportPreviewStore,
   ImportUploadService,
   type StoredImportPreview,
@@ -77,10 +79,17 @@ class MemoryPreviews implements ImportPreviewStore {
   }
 }
 
-function service() {
+function service(): {
+  storage: MemoryStorage;
+  previews: MemoryPreviews;
+  fingerprints: ImportFingerprintLookup;
+} {
   return {
     storage: new MemoryStorage(),
     previews: new MemoryPreviews(),
+    fingerprints: {
+      list: async () => new Set<string>(),
+    },
   };
 }
 
@@ -131,6 +140,66 @@ describe("ImportUploadService", () => {
       previewHash: preview.previewHash,
       totalRows: 1,
     });
+  });
+
+  it("preserves Casei metadata columns for round-trip imports", async () => {
+    const dependencies = service();
+    const application = new ImportUploadService({
+      ...dependencies,
+      environment: "test",
+      now: () => now,
+    });
+    const caseiId = "0190f3c8-2a10-7abc-8def-1234567890ac";
+    const bytes = new TextEncoder().encode(
+      `casei_schema_version,casei_id,nome\nproducts.v1,${caseiId},Arroz\n`,
+    );
+
+    const preview = await application.preview({
+      workspaceId,
+      actorId: "user-1",
+      correlationId: "corr-round-trip",
+      domain: "products",
+      locale: "en-US",
+      mapping: {},
+      fileName: "produtos.csv",
+      contentType: "text/csv",
+      bytes,
+    });
+
+    expect(preview.mapping).toMatchObject({
+      casei_schema_version: "casei_schema_version",
+      casei_id: "casei_id",
+    });
+    expect(preview.unknownHeaders).toEqual([]);
+  });
+
+  it("marks fingerprints already present in the workspace as duplicate suggestions", async () => {
+    const dependencies = service();
+    dependencies.fingerprints.list = async ({ fields }) =>
+      new Set([
+        fingerprintImportRow("products", { name: "Arroz", quantity: "2" }, { fields, workspaceId }),
+      ]);
+    const application = new ImportUploadService({
+      ...dependencies,
+      environment: "test",
+      now: () => now,
+    });
+    const bytes = new TextEncoder().encode("nome;quantidade\nArroz;2\n");
+
+    const preview = await application.preview({
+      workspaceId,
+      actorId: "user-1",
+      correlationId: "corr-existing-duplicate",
+      domain: "products",
+      locale: "pt-BR",
+      mapping: {},
+      fileName: "produtos.csv",
+      contentType: "text/csv",
+      bytes,
+    });
+
+    expect(preview.counts.duplicates).toBe(1);
+    expect(preview.rows[0]?.status).toBe("duplicate");
   });
 
   it("rejects a changed source instead of confirming a stale preview", async () => {
@@ -197,6 +266,9 @@ describe("ImportUploadService", () => {
   it.each([
     ["object_not_found", "not_found"],
     ["object_expired", "expired"],
+    ["invalid_object", "invalid_file"],
+    ["invalid_format", "invalid_file"],
+    ["scan_rejected", "invalid_file"],
     ["storage_unavailable", "storage_unavailable"],
   ] as const)("preserves storage state %s while confirming", async (storageCode, errorCode) => {
     const dependencies = service();

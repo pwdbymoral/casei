@@ -335,17 +335,21 @@ export type ExportFormat = z.infer<typeof exportFormatSchema>;
 
 export const exportKindSchema = z.enum(["all", "income", "expense"]);
 
+export const civilDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+    if (year === 0 || month < 1 || month > 12 || day < 1) return false;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return day <= lastDay;
+  }, "date must be a real civil date");
+
 export const exportCreateRequestSchema = z.object({
   domain: dataExchangeDomainSchema,
   format: exportFormatSchema,
-  from: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/u)
-    .optional(),
-  to: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/u)
-    .optional(),
+  from: civilDateSchema.optional(),
+  to: civilDateSchema.optional(),
   kind: exportKindSchema.optional(),
   categoryId: z.string().trim().min(1).max(255).nullable().optional(),
 });
@@ -380,6 +384,8 @@ export const importPreviewResponseSchema = z.object({
   mapping: z.record(z.string().trim().min(1).max(100), z.string().max(1_000)),
   unknownHeaders: z.array(z.string().max(1_000)).max(256),
   locale: dataExchangeLocaleSchema,
+  sheetName: z.string().trim().min(1).max(255).optional(),
+  sheetIndex: z.number().int().nonnegative().max(255).optional(),
   serverBacked: z.literal(true),
   canConfirm: z.boolean(),
   counts: z.object({
@@ -583,18 +589,6 @@ export const errorEnvelopeSchema = z.object({
 });
 
 export type ErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
-
-const civilDateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine((value) => {
-    const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
-    if (year === 0 || month < 1 || month > 12 || day < 1) return false;
-    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    return day <= lastDay;
-  }, "date must be a real civil date");
-
-export { civilDateSchema };
 
 export const insightWindowQuerySchema = z
   .object({

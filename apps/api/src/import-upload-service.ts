@@ -5,7 +5,7 @@ import type {
   ImportPreviewManifestLine,
   ImportPreviewResponse,
 } from "@casei/contracts";
-import { importPreviewResponseSchema } from "@casei/contracts";
+import { domainIdSchema, importPreviewResponseSchema } from "@casei/contracts";
 import {
   type CsvFieldDefinition,
   parseCsv,
@@ -42,9 +42,18 @@ export interface ImportPreviewStore {
   get(workspaceId: string, previewId: string): Promise<StoredImportPreview | null>;
 }
 
+export interface ImportFingerprintLookup {
+  list(input: {
+    readonly workspaceId: string;
+    readonly domain: Exclude<ImportDomain, "full">;
+    readonly fields: readonly string[];
+  }): Promise<ReadonlySet<string>>;
+}
+
 export interface ImportUploadServiceOptions {
   readonly storage: ObjectStoragePort;
   readonly previews: ImportPreviewStore;
+  readonly fingerprints: ImportFingerprintLookup;
   readonly environment: StorageEnvironment;
   readonly now?: () => Date;
 }
@@ -70,17 +79,32 @@ export class ImportUploadService implements ImportUploadApplication {
       format === "csv" && input.contentType === "application/octet-stream"
         ? "text/csv"
         : input.contentType;
-    const parsed = await parseTabular(input.bytes, format, input.locale);
+    const parsed = await parseTabular(
+      input.bytes,
+      format,
+      input.locale,
+      input.sheetName,
+      input.sheetIndex,
+    );
     const fields = fieldsForDomain(input.domain, input.locale);
+    const fingerprintFields = fields
+      .map((field) => field.key)
+      .filter((key) => !key.startsWith("casei_"));
+    const existingFingerprints = await this.options.fingerprints.list({
+      workspaceId: input.workspaceId,
+      domain: input.domain,
+      fields: fingerprintFields,
+    });
     const preflight = preflightCsvImport(parsed, fields, {
       locale: input.locale,
       explicitMapping: input.mapping,
       unknownColumns: "warning",
       fingerprint: {
         domain: input.domain,
-        fields: fields.map((field) => field.key),
+        fields: fingerprintFields,
         workspaceId: input.workspaceId,
       },
+      existingFingerprints,
     });
     const sourceHash = sha256(input.bytes);
     const manifest = preflight.rows.map<ImportPreviewManifestLine>((row) => ({
@@ -124,6 +148,9 @@ export class ImportUploadService implements ImportUploadApplication {
       mapping,
       unknownHeaders: Array.from(preflight.unknownHeaders),
       locale: input.locale,
+      ...("sheetName" in parsed
+        ? { sheetName: parsed.sheetName, sheetIndex: parsed.sheetIndex }
+        : {}),
       serverBacked: true,
       canConfirm: preflight.canConfirm,
       counts: preflight.counts,
@@ -188,6 +215,13 @@ export class ImportUploadService implements ImportUploadApplication {
             "expired",
           );
         }
+        if (
+          error.code === "invalid_object" ||
+          error.code === "invalid_format" ||
+          error.code === "scan_rejected"
+        ) {
+          throw new ImportUploadError(error.message, "invalid_file");
+        }
         throw new ImportUploadError(
           "O armazenamento da importação está indisponível; tente novamente.",
           "storage_unavailable",
@@ -246,7 +280,13 @@ export class ImportUploadService implements ImportUploadApplication {
   }
 }
 
-async function parseTabular(bytes: Uint8Array, format: "csv" | "xlsx", locale: "pt-BR" | "en-US") {
+async function parseTabular(
+  bytes: Uint8Array,
+  format: "csv" | "xlsx",
+  locale: "pt-BR" | "en-US",
+  sheetName?: string,
+  sheetIndex?: number,
+) {
   try {
     return format === "csv"
       ? parseCsv(bytes, { locale, maxBytes: MAX_IMPORT_FILE_BYTES, maxRows: MAX_IMPORT_ROWS })
@@ -254,6 +294,8 @@ async function parseTabular(bytes: Uint8Array, format: "csv" | "xlsx", locale: "
           locale,
           maxBytes: MAX_IMPORT_FILE_BYTES,
           maxRows: MAX_IMPORT_ROWS,
+          sheetName,
+          sheetIndex,
         });
   } catch (error) {
     throw new ImportUploadError(
@@ -276,6 +318,8 @@ function fieldsForDomain(
 ): readonly CsvFieldDefinition<string>[] {
   if (domain === "products") {
     return [
+      field("casei_schema_version", ["casei_schema_version"], false, parseCaseiSchemaVersion),
+      field("casei_id", ["casei_id"], false, parseCaseiId),
       field("name", ["nome", "produto", "product"], true),
       field("quantity", ["quantidade", "qty"]),
       field("unit", ["unidade"]),
@@ -286,6 +330,8 @@ function fieldsForDomain(
     ];
   }
   return [
+    field("casei_schema_version", ["casei_schema_version"], false, parseCaseiSchemaVersion),
+    field("casei_id", ["casei_id"], false, parseCaseiId),
     field("type", ["tipo", "kind"], true),
     field("amount", ["valor", "amount_minor"], true, (value) => parseMinorAmount(value, locale)),
     field("date", ["data", "occurred_on"], true, (value) => parseCsvDate(value, locale)),
@@ -295,6 +341,20 @@ function fieldsForDomain(
     field("due_on", ["vencimento", "due_date"]),
     field("payment_method", ["meio", "payment_method"]),
   ];
+}
+
+function parseCaseiSchemaVersion(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u.test(normalized)) {
+    throw new Error("A versão do schema Casei é inválida.");
+  }
+  return normalized;
+}
+
+function parseCaseiId(value: string): string {
+  const parsed = domainIdSchema.safeParse(value.trim());
+  if (!parsed.success) throw new Error("O ID Casei é inválido.");
+  return parsed.data;
 }
 
 function field(
@@ -310,6 +370,8 @@ function labelForField(key: string): string {
   return (
     {
       type: "Tipo",
+      casei_schema_version: "Versão do schema",
+      casei_id: "ID Casei",
       amount: "Valor",
       date: "Data",
       state: "Estado",

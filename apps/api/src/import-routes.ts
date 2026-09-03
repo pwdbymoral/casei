@@ -4,6 +4,7 @@ import {
   importCreateRequestSchema,
   importLineListQuerySchema,
 } from "@casei/contracts";
+import { IdempotencyConflictError, IdempotencyInProgressError } from "@casei/database";
 import { ObjectStorageError } from "@casei/storage";
 import type { Hono, MiddlewareHandler } from "hono";
 import {
@@ -11,7 +12,7 @@ import {
   ImportUploadError,
   parseMultipartImport,
 } from "./data-exchange-routes.js";
-import { ApiHttpError, errorResponse, notFoundError } from "./http/index.js";
+import { ApiHttpError, notFoundError } from "./http/index.js";
 import { parseJsonBody, parseQuery } from "./http/parsing.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
 import {
@@ -30,7 +31,6 @@ export interface ImportRoutesOptions {
 
 /** API command/query boundary for DATA-004; worker execution is deliberately separate. */
 export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoutesOptions): void {
-  router.onError((error, context) => errorResponse(context, importErrorToHttp(error)));
   for (const path of [
     "/workspaces/:workspaceId/data/imports",
     "/workspaces/:workspaceId/data/imports/*",
@@ -106,6 +106,8 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
       bytes: multipart.bytes,
       domain: multipart.domain,
       locale: multipart.locale,
+      ...(multipart.sheetName === undefined ? {} : { sheetName: multipart.sheetName }),
+      ...(multipart.sheetIndex === undefined ? {} : { sheetIndex: multipart.sheetIndex }),
       mapping: multipart.mapping,
     });
     return context.json(preview);
@@ -341,6 +343,14 @@ function duplicateLinesFromText(value: unknown): readonly number[] {
 }
 
 export function importErrorToHttp(error: unknown): unknown {
+  if (error instanceof IdempotencyConflictError) {
+    return new ApiHttpError(409, "idempotency_conflict");
+  }
+  if (error instanceof IdempotencyInProgressError) {
+    return new ApiHttpError(409, "idempotency_conflict", {
+      message: "A operação equivalente ainda está em processamento; tente novamente.",
+    });
+  }
   if (error instanceof ImportUploadError) {
     if (error.code === "not_found") return new ApiHttpError(404, "not_found");
     if (error.code === "expired")
@@ -357,6 +367,13 @@ export function importErrorToHttp(error: unknown): unknown {
     if (error.code === "object_not_found") return new ApiHttpError(404, "not_found");
     if (error.code === "object_expired")
       return new ApiHttpError(410, "validation_failed", { message: error.message });
+    if (
+      error.code === "invalid_object" ||
+      error.code === "invalid_format" ||
+      error.code === "scan_rejected"
+    ) {
+      return new ApiHttpError(422, "validation_failed", { message: error.message });
+    }
     return new ApiHttpError(503, "internal_error", {
       message: "O armazenamento da importação está indisponível; tente novamente.",
     });

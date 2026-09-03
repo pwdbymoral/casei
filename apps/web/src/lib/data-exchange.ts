@@ -46,6 +46,8 @@ export type ImportPreview = {
   mapping: Readonly<Record<string, string>>;
   unknownHeaders: readonly string[];
   locale: ImportLocale;
+  sheetName?: string;
+  sheetIndex?: number;
   serverBacked: boolean;
   canConfirm: boolean;
   counts: { valid: number; warnings: number; duplicates: number; errors: number };
@@ -86,6 +88,8 @@ export type PreviewImportInput = {
   domain: Exclude<DataDomain, "complete">;
   locale: ImportLocale;
   mapping?: Readonly<Record<string, string>>;
+  sheetName?: string;
+  sheetIndex?: number;
 };
 
 export type StartImportInput = {
@@ -114,7 +118,7 @@ export interface DataExchangeAdapter {
   ): Promise<ImportJob>;
   getImportJob(workspaceId: string, jobId: string): Promise<ImportJob>;
   retryImport(workspaceId: string, jobId: string, idempotencyKey: string): Promise<ImportJob>;
-  cancelImport(workspaceId: string, jobId: string): Promise<ImportJob>;
+  cancelImport(workspaceId: string, jobId: string, idempotencyKey: string): Promise<ImportJob>;
   listExportJobs(workspaceId: string): Promise<ExportJob[]>;
   createExport(
     workspaceId: string,
@@ -557,6 +561,8 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
     form.set("domain", input.domain);
     form.set("locale", input.locale);
     if (input.mapping) form.set("mapping", JSON.stringify(input.mapping));
+    if (input.sheetName) form.set("sheetName", input.sheetName);
+    if (input.sheetIndex !== undefined) form.set("sheetIndex", String(input.sheetIndex));
     return requestJson<ImportPreview>(workspacePath(workspaceId, "/imports/previews"), {
       method: "POST",
       body: form,
@@ -589,10 +595,10 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
       method: "POST",
       headers: { Accept: "application/json", "Idempotency-Key": idempotencyKey },
     }),
-  cancelImport: (workspaceId, jobId) =>
+  cancelImport: (workspaceId, jobId, idempotencyKey) =>
     requestJson(workspacePath(workspaceId, `/imports/${encodeURIComponent(jobId)}/cancel`), {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", "Idempotency-Key": idempotencyKey },
     }),
   listExportJobs: (workspaceId) => requestJson(workspacePath(workspaceId, "/exports")),
   createExport: (workspaceId, input, idempotencyKey) =>
@@ -629,6 +635,8 @@ const fixtureImports = new Map<string, ImportJob>();
 const fixtureExports = new Map<string, ExportJob>();
 const fixtureImportKeys = new Map<string, ImportJob>();
 const fixtureRetryKeys = new Map<string, ImportJob>();
+const fixtureCancelKeys = new Map<string, ImportJob>();
+const fixtureCancelFingerprints = new Map<string, string>();
 const fixtureExportKeys = new Map<string, ExportJob>();
 const fixtureImportFingerprints = new Map<string, string>();
 const fixtureRetryFingerprints = new Map<string, string>();
@@ -693,6 +701,9 @@ function rememberImport(job: ImportJob): ImportJob {
   }
   for (const [key, value] of fixtureRetryKeys) {
     if (value.id === job.id) fixtureRetryKeys.set(key, job);
+  }
+  for (const [key, value] of fixtureCancelKeys) {
+    if (value.id === job.id) fixtureCancelKeys.set(key, job);
   }
   return job;
 }
@@ -804,16 +815,25 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     fixtureRetryFingerprints.set(replayKey, fingerprint);
     return rememberImport(next);
   },
-  async cancelImport(workspaceId, jobId) {
+  async cancelImport(workspaceId, jobId, idempotencyKey) {
     const current = fixtureImports.get(jobId);
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
     if (current.workspaceId !== workspaceId)
       throw fixturePermission("Esta importação pertence a outro espaço.");
+    const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const fingerprint = fixtureFingerprint({ jobId });
+    const replay = fixtureCancelKeys.get(replayKey);
+    if (replay) {
+      if (fixtureCancelFingerprints.get(replayKey) !== fingerprint) throw fixturePayloadConflict();
+      return replay;
+    }
     const next = {
       ...current,
       status: "canceled" as const,
       message: "A aplicação foi cancelada; os lotes já confirmados foram mantidos.",
     };
+    fixtureCancelKeys.set(replayKey, next);
+    fixtureCancelFingerprints.set(replayKey, fingerprint);
     return rememberImport(next);
   },
   async listExportJobs(workspaceId) {

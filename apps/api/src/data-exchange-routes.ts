@@ -8,9 +8,10 @@ import {
   type ImportDomain,
   type ImportPreviewResponse,
 } from "@casei/contracts";
+import { IdempotencyConflictError, IdempotencyInProgressError } from "@casei/database";
 import { ObjectStorageError } from "@casei/storage";
 import type { Hono, MiddlewareHandler } from "hono";
-import { ApiHttpError, errorResponse, validationError } from "./http/index.js";
+import { ApiHttpError, validationError } from "./http/index.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
 import { ImportAuthorizationError, ImportConflictError, ImportFailure } from "./import-service.js";
 
@@ -54,6 +55,8 @@ export type ImportUploadPreviewInput = {
   readonly fileName: string;
   readonly contentType: string;
   readonly bytes: Uint8Array;
+  readonly sheetName?: string;
+  readonly sheetIndex?: number;
 };
 
 export type ImportUploadConfirmInput = {
@@ -114,7 +117,6 @@ export function configureDataExchangeRoutes(
   router: Hono<ApiEnv>,
   options: DataExchangeRoutesOptions,
 ): void {
-  router.onError((error, context) => errorResponse(context, dataExchangeErrorToHttp(error)));
   for (const path of [
     "/workspaces/:workspaceId/data/exports",
     "/workspaces/:workspaceId/data/exports/*",
@@ -207,6 +209,8 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
   readonly bytes: Uint8Array;
   readonly domain?: Exclude<ImportDomain, "full">;
   readonly locale?: "pt-BR" | "en-US";
+  readonly sheetName?: string;
+  readonly sheetIndex?: number;
   readonly mapping: Readonly<Record<string, string>>;
   readonly fields: Readonly<Record<string, string>>;
 }> {
@@ -279,6 +283,13 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
     locale = parsedLocale.data;
   }
   const mapping = parseMapping(body.mapping);
+  const sheetName = optionalSheetName(body.sheetName);
+  const sheetIndex = optionalSheetIndex(body.sheetIndex);
+  if (sheetName !== undefined && sheetIndex !== undefined) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { sheetName: ["Informe o nome ou o índice da planilha, não ambos."] },
+    });
+  }
   const fields: Record<string, string> = {};
   let fieldsBytes = 0;
   let fileBytes = 0;
@@ -316,9 +327,37 @@ export async function parseMultipartImport(context: ApiContext): Promise<{
     bytes,
     domain,
     locale,
+    ...(sheetName === undefined ? {} : { sheetName }),
+    ...(sheetIndex === undefined ? {} : { sheetIndex }),
     mapping,
     fields,
   };
+}
+
+function optionalSheetName(value: unknown): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || value.trim().length === 0 || value.trim().length > 255) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { sheetName: ["O nome da planilha é inválido."] },
+    });
+  }
+  return value.trim();
+}
+
+function optionalSheetIndex(value: unknown): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || !/^\d+$/u.test(value.trim())) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { sheetIndex: ["O índice da planilha é inválido."] },
+    });
+  }
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed > 255) {
+    throw new ApiHttpError(422, "validation_failed", {
+      fieldErrors: { sheetIndex: ["O índice da planilha é inválido."] },
+    });
+  }
+  return parsed;
 }
 
 export function parseMapping(value: unknown): Readonly<Record<string, string>> {
@@ -403,8 +442,16 @@ function contentDisposition(fileName: string): string {
   return `attachment; filename="${fileName}"`;
 }
 
-function dataExchangeErrorToHttp(error: unknown): unknown {
+export function dataExchangeErrorToHttp(error: unknown): unknown {
   if (error instanceof ApiHttpError) return error;
+  if (error instanceof IdempotencyConflictError) {
+    return new ApiHttpError(409, "idempotency_conflict");
+  }
+  if (error instanceof IdempotencyInProgressError) {
+    return new ApiHttpError(409, "idempotency_conflict", {
+      message: "A operação equivalente ainda está em processamento; tente novamente.",
+    });
+  }
   if (error instanceof ImportUploadError) {
     if (error.code === "not_found") return new ApiHttpError(404, "not_found");
     if (error.code === "expired")
@@ -426,6 +473,13 @@ function dataExchangeErrorToHttp(error: unknown): unknown {
     if (error.code === "object_not_found") return new ApiHttpError(404, "not_found");
     if (error.code === "object_expired")
       return new ApiHttpError(410, "validation_failed", { message: error.message });
+    if (
+      error.code === "invalid_object" ||
+      error.code === "invalid_format" ||
+      error.code === "scan_rejected"
+    ) {
+      return new ApiHttpError(422, "validation_failed", { message: error.message });
+    }
     return new ApiHttpError(503, "internal_error", {
       message: "O armazenamento da exportação está indisponível; tente novamente.",
     });

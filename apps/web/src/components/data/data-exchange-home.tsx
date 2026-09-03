@@ -179,6 +179,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [file, setFile] = useState<File | null>(null);
   const [domain, setDomain] = useState<Exclude<DataDomain, "complete">>("transactions");
   const [locale, setLocale] = useState<ImportLocale>("pt-BR");
+  const [sheetName, setSheetName] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [mappingDirty, setMappingDirty] = useState(false);
@@ -189,6 +190,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importPending, setImportPending] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
@@ -209,6 +211,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [exportCategoryId] = useState<string | null>(() => searchParams.get("categoryId") || null);
   const [activeExport, setActiveExport] = useState<ExportJob | null>(null);
   const importOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
+  const cancelOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
 
@@ -286,6 +289,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     const next = event.target.files?.[0] ?? null;
     setFile(next);
     setPreview(null);
+    setSheetName("");
     setMapping({});
     setMappingDirty(false);
     setPreviewStatus("idle");
@@ -293,6 +297,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportJob(null);
     setImportError(null);
     importOperation.current.key = null;
+    cancelOperation.current.key = null;
     retryOperation.current.key = null;
   }
 
@@ -301,7 +306,13 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setPreviewStatus("loading");
     setPreviewError(null);
     try {
-      const next = await adapter.previewImport(workspaceId, { file, domain, locale, mapping });
+      const next = await adapter.previewImport(workspaceId, {
+        file,
+        domain,
+        locale,
+        mapping,
+        ...(sheetName.trim() ? { sheetName: sheetName.trim() } : {}),
+      });
       setPreview(next);
       setMapping({ ...next.mapping });
       setMappingDirty(false);
@@ -348,10 +359,21 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
 
   async function cancelImport() {
     if (!importJob || terminalImport(importJob)) return;
+    const jobId = importJob.id;
+    const operation = beginDataExchangeOperation(
+      cancelOperation.current,
+      "cancel",
+      () => crypto.randomUUID(),
+      (key) => adapter.cancelImport(workspaceId, jobId, key),
+    );
+    if (!operation.started) return;
+    setCancelPending(true);
     try {
-      setImportJob(await adapter.cancelImport(workspaceId, importJob.id));
+      setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
+    } finally {
+      setCancelPending(false);
     }
   }
 
@@ -569,6 +591,28 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     <option value="en-US">Estados Unidos (mm/dd/aaaa)</option>
                   </select>
                 </Field>
+                {file?.name.toLocaleLowerCase("en-US").endsWith(".xlsx") ? (
+                  <Field>
+                    <FieldLabel htmlFor="import-sheet-name">Planilha (opcional)</FieldLabel>
+                    <Input
+                      id="import-sheet-name"
+                      value={sheetName}
+                      placeholder="Nome da planilha"
+                      disabled={
+                        !importAllowed || importPending || importJob?.status === "processing"
+                      }
+                      onChange={(event) => {
+                        setSheetName(event.target.value);
+                        setPreview(null);
+                        importOperation.current.key = null;
+                      }}
+                    />
+                    <FieldDescription>
+                      Se o arquivo tiver mais de uma planilha, informe o nome exibido no erro da
+                      prévia.
+                    </FieldDescription>
+                  </Field>
+                ) : null}
                 <div className="flex items-end">
                   <Button
                     type="button"
@@ -864,8 +908,23 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                 ) : null}
                 <div className="flex flex-wrap gap-3">
                   {!terminalImport(importJob) ? (
-                    <Button type="button" variant="outline" onClick={() => void cancelImport()}>
-                      <PauseCircleIcon data-icon="inline-start" aria-hidden="true" /> Cancelar job
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={cancelPending}
+                      aria-busy={cancelPending}
+                      onClick={() => void cancelImport()}
+                    >
+                      {cancelPending ? (
+                        <LoaderCircleIcon
+                          data-icon="inline-start"
+                          className="animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <PauseCircleIcon data-icon="inline-start" aria-hidden="true" />
+                      )}
+                      {cancelPending ? "Cancelando…" : "Cancelar job"}
                     </Button>
                   ) : null}
                   {importJob.status === "failed" || importJob.status === "canceled" ? (

@@ -50,13 +50,7 @@ import {
   VersionConflictError,
 } from "./finance-service.js";
 import type { GoalService } from "./goal-service.js";
-import {
-  ApiHttpError,
-  errorResponse,
-  InvalidCursorError,
-  notFoundError,
-  validationError,
-} from "./http/index.js";
+import { ApiHttpError, InvalidCursorError, notFoundError, validationError } from "./http/index.js";
 import { parseJsonBody, parseOptionalJsonBody, parseQuery } from "./http/parsing.js";
 import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiEnv } from "./http/types.js";
@@ -74,7 +68,6 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
   const { service } = options;
   const { goalService } = options;
   const { insightService } = options;
-  router.onError((error, context) => errorResponse(context, financeErrorToHttp(error)));
   for (const path of [
     "/workspaces/:workspaceId/transactions",
     "/workspaces/:workspaceId/transactions/*",
