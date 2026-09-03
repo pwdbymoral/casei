@@ -38,7 +38,36 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --prod --audit-level=high
+      - name: Audit production dependencies
+        env:
+          AUDIT_LOG: ${{ runner.temp }}/casei-pnpm-audit.log
+        run: |
+          set -o pipefail
+          set +e
+          pnpm audit --prod --audit-level=high --ignore-registry-errors 2>&1 | tee "$AUDIT_LOG"
+          pipeline_statuses=("${PIPESTATUS[@]}")
+          audit_status=${pipeline_statuses[0]}
+          tee_status=${pipeline_statuses[1]}
+          set -e
+
+          # A non-zero status still blocks CI: it means pnpm received an audit
+          # response containing an advisory (or another unexpected failure).
+          if [ "$audit_status" -ne 0 ]; then
+            exit "$audit_status"
+          fi
+          if [ "$tee_status" -ne 0 ]; then
+            echo "::error title=Production dependency audit failed::The audit output could not be captured."
+            exit "$tee_status"
+          fi
+
+          # A normal successful pnpm audit always includes its vulnerability
+          # summary. Anything else with status 0 is the documented
+          # --ignore-registry-errors path (for example a timeout or HTTP error).
+          if rg -qi '(No known vulnerabilities found|vulnerabilities found)' "$AUDIT_LOG"; then
+            echo "Production dependency audit completed successfully: no high/critical advisories reported."
+          else
+            echo "::warning title=Production dependency audit inconclusive::The npm registry returned an error or timed out. pnpm --ignore-registry-errors intentionally returned 0; this run is not evidence that dependencies are vulnerability-free. Re-run when the registry is available."
+          fi
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test

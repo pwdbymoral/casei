@@ -31,6 +31,7 @@ const previewManifest = [
   },
   { lineNumber: 4, status: "valid" as const, rowDigest: "4".repeat(64) },
 ];
+const importFixtureExpiry = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
 const baseRequest: ImportCreateRequest = {
   domain: "products",
   storageKey: "dev/workspace/job/input.csv",
@@ -45,7 +46,7 @@ const baseRequest: ImportCreateRequest = {
   validRows: 2,
   duplicateRows: 1,
   invalidRows: 0,
-  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  expiresAt: importFixtureExpiry,
 };
 
 function source(rows: readonly ImportSourceRow[]): ImportSource {

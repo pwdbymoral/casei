@@ -56,6 +56,8 @@ Requer Node.js 24 e pnpm 11.3.0. Execute da raiz do repositório:
 - `pnpm check`: executa lint, typecheck, testes e build em sequência.
 - `pnpm audit --prod --audit-level=high`: falha quando dependências de produção possuem vulnerabilidades de severidade alta ou crítica conhecidas.
 
+No CI, o mesmo comando usa a opção oficial `--ignore-registry-errors` para não transformar uma indisponibilidade transitória do endpoint Bulk Advisory do npm em uma falha operacional irrecuperável. A saída é capturada e o workflow emite um warning explícito quando o registry retorna erro ou timeout: nesse caso o processo retorna zero por definição do pnpm, mas o resultado é inconclusivo e não comprova que as dependências estão livres de vulnerabilidades. Um advisory recebido normalmente continua retornando status diferente de zero e bloqueia o job. Ao ver o warning, repita o workflow quando o registry estiver disponível antes de tratar a execução como evidência de segurança.
+
 O adapter DATA-001 é validado com `pnpm --filter @casei/storage test` e
 `pnpm --filter @casei/storage typecheck`. Os testes usam um cliente S3 fake para
 comprovar stream bounded, hash, expiração, metadados sem nome original, MIME/
