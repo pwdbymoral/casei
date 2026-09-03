@@ -9,3 +9,7 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - '@aws-sdk/client-s3@3.1117.0'
+
+overrides:
+  browserslist: 4.28.8
+  fast-uri: 3.1.6
