@@ -1,6 +1,6 @@
 # INSIGHT-001/003 — read model financeiro e valor seguro
 
-Status: em implementação
+Status: concluído para INSIGHT-001/003; INSIGHT-002 segue em fatia própria
 
 ## Requisito
 

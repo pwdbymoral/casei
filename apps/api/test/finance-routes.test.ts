@@ -104,6 +104,10 @@ describe("finance HTTP composition", () => {
             endpoint: "safe-to-spend",
             horizonDays: query.horizonDays,
           }),
+          getProjection: async (_scope: unknown, query: { months: number }) => ({
+            endpoint: "projection",
+            months: query.months,
+          }),
         } as unknown as InsightService,
       },
     });
@@ -127,6 +131,12 @@ describe("finance HTTP composition", () => {
     );
     expect(safe.status).toBe(200);
     await expect(safe.json()).resolves.toEqual({ endpoint: "safe-to-spend", horizonDays: 45 });
+
+    const projection = await app.request(
+      `/v1/workspaces/${workspaceId}/insights/projection?asOf=2026-08-24&months=6`,
+    );
+    expect(projection.status).toBe(200);
+    await expect(projection.json()).resolves.toEqual({ endpoint: "projection", months: 6 });
   });
 
   it("routes category edits and archive actions with preconditions and idempotency", async () => {
