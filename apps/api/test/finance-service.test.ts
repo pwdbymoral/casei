@@ -14,7 +14,7 @@ describe("finance command guards", () => {
     const categoryId = "0190f3c8-2a10-7abc-8def-1234567890ae";
     const transactionId = "0190f3c8-2a10-7abc-8def-1234567890af";
     const client = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(async (sql: string, _values?: unknown[]) => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
         if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
         if (sql.includes("FROM finance_category"))
@@ -89,7 +89,7 @@ describe("finance command guards", () => {
     };
     const changed = { ...source, category_id: categoryId, version: 2 };
     const client = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(async (sql: string, _values?: unknown[]) => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
         if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
         if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
