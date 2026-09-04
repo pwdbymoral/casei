@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@better-auth/drizzle-adapter": "1.6.22",
+    "@better-auth/drizzle-adapter": "1.7.2",
     "@casei/contracts": "workspace:*",
     "@casei/data": "workspace:*",
     "@casei/database": "workspace:*",
