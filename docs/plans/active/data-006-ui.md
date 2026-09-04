@@ -1,6 +1,6 @@
 # Plano: DATA-006 — UI de importação e exportação
 
-- Status: UI e boundary HTTP em incrementos separados; bootstrap de produção ainda depende de adapters explícitos.
+- Status: UI e boundary HTTP em incrementos separados; exportação persistente já possui bootstrap de produção, enquanto upload/preflight continua injetável por ambiente.
 - Spec associada: [intercâmbio de dados](../../specs/intercambio-de-dados.md)
 - Planos relacionados: [DATA-002/003](data-002-003.md) e [DATA-005](data-005-export.md)
 
@@ -32,9 +32,8 @@ Não fazem parte da UI storage, job worker, persistência de perfis ou um parser
 XLSX no navegador. O serviço `ImportUploadService` implementa o preflight
 server-side usando `@casei/data` e `@casei/storage`, mas recebe storage e
 `ImportPreviewStore` por injeção; comandos de domínio e o worker continuam no
-bootstrap DATA-004. Export jobs também recebem uma aplicação explícita, pois a
-composição persistente e os read models de domínio não são inventados neste
-boundary.
+bootstrap DATA-004. Export jobs usam a aplicação persistente no bootstrap de
+produção quando o storage compatível com S3 está configurado.
 
 ## Critérios de aceitação
 
@@ -42,7 +41,6 @@ boundary.
 - [x] CSV e XLSX podem ser selecionados, com limite de 10 MB informado antes do envio.
 - [x] Domínio, locale, mapeamento editável, política de duplicidade e modo de aplicação são explícitos.
 - [x] Prévia mostra válidas, avisos, duplicatas e erros antes de confirmar.
-- [x] Aplicação exibe progresso, parcial, sucesso, cancelamento, retry e relatório de erros.
 - [x] Exportação oferece domínio, período, formato, progresso, expiração e download autorizado pelo adapter.
 - [x] Loading, vazio, erro, offline, permission denied, sucesso e dados parciais possuem feedback acessível.
 - [x] Jornada e helpers possuem testes web; a validação visual fica registrada no PR.
@@ -57,6 +55,12 @@ O fallback local respeita o limite de 50 mil linhas e bloqueia a confirmação
 quando o arquivo excede esse limite. O relatório de erros prefixa células com
 caracteres de fórmula para não transformar mensagens retornadas pelo job em
 fórmulas de planilha; a proteção canônica de exportações continua em DATA-005.
+As chamadas autenticadas usam a fronteira `/v1/workspaces/:workspaceId/data`
+para importações e exportações, incluindo paginação de resultados por linha.
+Enquanto o contrato não possui um comando de decisão individual por duplicata,
+a política “Parar para revisar” fica explicitamente bloqueada na UI e o usuário
+precisa escolher ignorar ou importar; a aplicação nunca finge que uma revisão
+individual foi concluída.
 No adapter de fixtures, chaves de idempotência são isoladas por espaço,
 reproduzem o mesmo resultado e rejeitam uma segunda requisição com payload
 divergente; a aplicação server-side permanece responsabilidade do DATA-004.
