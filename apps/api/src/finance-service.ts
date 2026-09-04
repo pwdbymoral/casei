@@ -2372,7 +2372,43 @@ export class FinanceService {
               "A fatura já foi fechada ou paga; faça um ajuste explícito para estornar esta compra.",
             );
           }
-          const nextTotal = BigInt(statementRow.total_minor) - BigInt(row.settled_minor);
+          const applications = await client.query<{
+            id: string;
+            credit_id: string;
+            remaining_minor: string;
+          }>(
+            `SELECT application.id, application.credit_id, application.remaining_minor
+               FROM card_credit_application application
+               JOIN card_credit credit
+                 ON credit.workspace_id = application.workspace_id
+                AND credit.id = application.credit_id
+              WHERE application.workspace_id = $1
+                AND application.transaction_id = $2
+                AND application.state = 'active'
+                AND application.remaining_minor > 0
+              ORDER BY application.created_at ASC, application.id ASC
+              FOR UPDATE OF application, credit`,
+            [scope.workspaceId, row.id],
+          );
+          let restoredCreditMinor = 0n;
+          for (const application of applications.rows) {
+            const restored = BigInt(application.remaining_minor);
+            restoredCreditMinor += restored;
+            await client.query(
+              `UPDATE card_credit
+                  SET remaining_minor = remaining_minor + $1, state = 'active'
+                WHERE workspace_id = $2 AND id = $3 AND state <> 'canceled'`,
+              [restored, scope.workspaceId, application.credit_id],
+            );
+            await client.query(
+              `UPDATE card_credit_application
+                  SET remaining_minor = 0, state = 'reversed', reversed_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND state = 'active'`,
+              [scope.workspaceId, application.id],
+            );
+          }
+          const nextTotal =
+            BigInt(statementRow.total_minor) - BigInt(row.settled_minor) + restoredCreditMinor;
           if (nextTotal < BigInt(statementRow.paid_minor)) {
             throw new FinanceConflictError("O estorno excede o saldo aberto da fatura.");
           }

@@ -480,7 +480,7 @@ describe("CARD-004 statement payment PostgreSQL", () => {
         { amount_minor: "500", remaining_minor: "500", state: "active" },
       ]);
 
-      const futurePurchase = await finance.createCardPurchase(
+      let futurePurchase = await finance.createCardPurchase(
         scope,
         {
           amount: { currency: "BRL", minor: "600" },
@@ -508,6 +508,39 @@ describe("CARD-004 statement payment PostgreSQL", () => {
       ).resolves.toMatchObject({
         rows: [{ remaining_minor: "0", state: "consumed" }],
       });
+
+      const consumedPurchase = await finance.getTransaction(scope, futurePurchase.transaction.id);
+      if (!consumedPurchase) throw new Error("expected consuming purchase transaction");
+      await finance.reverseTransaction(
+        scope,
+        futurePurchase.transaction.id,
+        "card-payment-future-purchase-cancel-001",
+        consumedPurchase.version,
+        futureStatement.id,
+      );
+      await expect(finance.getStatement(scope, futureStatement.id)).resolves.toMatchObject({
+        total: { minor: "0" },
+        creditApplied: { minor: "0" },
+        state: "open",
+      });
+      await expect(
+        fixture.pool.query(
+          `SELECT remaining_minor, state FROM card_credit WHERE workspace_id = $1`,
+          [scope.workspaceId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [{ remaining_minor: "500", state: "active" }],
+      });
+      futurePurchase = await finance.createCardPurchase(
+        scope,
+        {
+          amount: { currency: "BRL", minor: "600" },
+          occurredOn: "2030-01-11",
+          description: "Compra futura substituta",
+          cardId,
+        },
+        "card-payment-future-purchase-002",
+      );
 
       const futurePayment = await finance.payStatement(
         scope,
@@ -590,7 +623,10 @@ describe("CARD-004 statement payment PostgreSQL", () => {
         `SELECT state, amount_minor FROM card_credit_application WHERE workspace_id = $1`,
         [scope.workspaceId],
       );
-      expect(applications.rows).toEqual([{ state: "reversed", amount_minor: "500" }]);
+      expect(applications.rows).toEqual([
+        { state: "reversed", amount_minor: "500" },
+        { state: "reversed", amount_minor: "500" },
+      ]);
       const totalRefund = await finance.createStatementRefund(
         scope,
         futureStatement.id,

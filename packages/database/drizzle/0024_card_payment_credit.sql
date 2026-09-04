@@ -81,7 +81,10 @@ WITH expected AS (
                       AND t.statement_id = s.id
                       AND t.instrument = 'card'
                       AND t.kind = 'expense'
-                      AND t.state IN ('posted', 'partially_settled')), 0)
+                      AND t.state IN ('posted', 'partially_settled')
+                      AND NOT EXISTS (SELECT 1 FROM card_statement_adjustment adjustment
+                                       WHERE adjustment.workspace_id = t.workspace_id
+                                         AND adjustment.transaction_id = t.id)), 0)
          + COALESCE((SELECT sum(a.amount_minor)
                        FROM card_statement_adjustment a
                        JOIN finance_transaction adjustment_transaction
