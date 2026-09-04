@@ -28,15 +28,15 @@ import type {
 } from "@/lib/stock";
 import { StockAdapterError } from "@/lib/stock";
 
-type BulkDraft = {
+export type BulkDraft = {
   lineNumber: number;
   name: string;
   quantity: string;
   minimum: string;
   unit: string;
   unitLabel: string;
-  shoppingAuto: boolean;
-  markedMissing: boolean;
+  shoppingAuto?: boolean;
+  markedMissing?: boolean;
   category: string;
   location: string;
   note: string;
@@ -69,7 +69,8 @@ function value(row: StockBulkPreviewRow, field: string): string {
   return raw === undefined || raw === null ? "" : String(raw);
 }
 
-function draftsFromPreview(preview: StockBulkPreview): BulkDraft[] {
+export function draftsFromPreview(preview: StockBulkPreview): BulkDraft[] {
+  const has = (row: StockBulkPreviewRow, field: string) => Object.hasOwn(row.values ?? {}, field);
   return preview.rows.map((row) => ({
     lineNumber: row.lineNumber,
     name: row.name,
@@ -77,8 +78,8 @@ function draftsFromPreview(preview: StockBulkPreview): BulkDraft[] {
     minimum: value(row, "minimum"),
     unit: value(row, "unit"),
     unitLabel: value(row, "unitLabel"),
-    shoppingAuto: value(row, "shoppingAuto") !== "false",
-    markedMissing: value(row, "markedMissing") === "true",
+    ...(has(row, "shoppingAuto") ? { shoppingAuto: value(row, "shoppingAuto") !== "false" } : {}),
+    ...(has(row, "markedMissing") ? { markedMissing: value(row, "markedMissing") === "true" } : {}),
     category: value(row, "category"),
     location: value(row, "location"),
     note: value(row, "note"),
@@ -89,7 +90,7 @@ function csvCell(raw: string): string {
   return raw.includes("\t") || raw.includes('"') ? `"${raw.replaceAll('"', '""')}"` : raw;
 }
 
-function contentFromDrafts(rows: BulkDraft[]): string {
+export function contentFromDrafts(rows: BulkDraft[]): string {
   return [
     "Nome\tQuantidade\tMínimo\tUnidade\tRótulo\tComprar automaticamente\tFaltando\tCategoria\tLocal\tNota",
     ...rows.map((row) =>
@@ -99,8 +100,8 @@ function contentFromDrafts(rows: BulkDraft[]): string {
         row.minimum,
         row.unit,
         row.unitLabel,
-        row.shoppingAuto ? "sim" : "não",
-        row.markedMissing ? "sim" : "não",
+        row.shoppingAuto === undefined ? "" : row.shoppingAuto ? "sim" : "não",
+        row.markedMissing === undefined ? "" : row.markedMissing ? "sim" : "não",
         row.category,
         row.location,
         row.note,
