@@ -1171,6 +1171,8 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       string,
       { fingerprint: string; value: { id: string; occurrences: string[] } }
     >;
+    recurrenceEditCommands: Map<string, { fingerprint: string; value: RecurrenceEditResponse }>;
+    recurrenceTransitionCommands: Map<string, { fingerprint: string; value: Recurrence }>;
     installmentPlans: Map<
       string,
       {
@@ -1185,6 +1187,8 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         value: InstallmentPlan;
       }
     >;
+    installmentEditCommands: Map<string, { fingerprint: string; value: InstallmentPlan }>;
+    installmentCancelCommands: Map<string, { fingerprint: string; value: InstallmentPlan }>;
     reverseCommands: Map<
       string,
       { transactionId: string; fingerprint: string; transaction: Transaction }
@@ -1246,8 +1250,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       statementAdjustments: new Map(),
       recurrences: new Map(),
       recurrenceCommands: new Map(),
+      recurrenceEditCommands: new Map(),
+      recurrenceTransitionCommands: new Map(),
       installmentPlans: new Map(),
       installmentCommands: new Map(),
+      installmentEditCommands: new Map(),
+      installmentCancelCommands: new Map(),
       reverseCommands: new Map(),
     };
   };
@@ -2241,22 +2249,21 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.recurrences.get(recurrence.id)?.value;
       if (!current) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
+      const fingerprint = JSON.stringify({ recurrenceId: recurrence.id, input });
+      if (commandKey) {
+        const previous = state.recurrenceEditCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra recorrência.", 409);
+          return previous.value;
+        }
+      }
       if (current.version !== recurrence.version)
         throw new FinanceAdapterError(
           "A recorrência foi alterada por outra pessoa.",
           412,
           current.version,
         );
-      const fingerprint = JSON.stringify({ recurrenceId: recurrence.id, input });
-      if (commandKey) {
-        const previous = state.recurrenceCommands.get(commandKey);
-        if (previous) {
-          if (previous.fingerprint !== fingerprint)
-            throw new FinanceAdapterError("A chave já foi usada para outra recorrência.", 409);
-          const saved = state.recurrences.get(previous.value.id)?.value;
-          if (saved) return { recurrence: saved, affectedOccurrences: [] };
-        }
-      }
       const next: Recurrence = {
         ...current,
         amount: input.amount ?? current.amount,
@@ -2267,17 +2274,27 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         version: current.version + 1,
       };
       state.recurrences.set(next.id, { input: current, value: next });
+      const response = { recurrence: next, affectedOccurrences: [input.effectiveOn] };
       if (commandKey)
-        state.recurrenceCommands.set(commandKey, {
+        state.recurrenceEditCommands.set(commandKey, {
           fingerprint,
-          value: { id: next.id, occurrences: [] },
+          value: response,
         });
-      return { recurrence: next, affectedOccurrences: [input.effectiveOn] };
+      return response;
     },
     transitionRecurrence: async (workspaceId, recurrence, action, effectiveOn, _commandKey) => {
       const state = stateFor(workspaceId);
       const current = state.recurrences.get(recurrence.id)?.value;
+      const fingerprint = JSON.stringify({ recurrenceId: recurrence.id, action, effectiveOn });
       if (!current) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
+      if (_commandKey) {
+        const previous = state.recurrenceTransitionCommands.get(_commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra transição.", 409);
+          return previous.value;
+        }
+      }
       if (current.version !== recurrence.version)
         throw new FinanceAdapterError(
           "A recorrência foi alterada por outra pessoa.",
@@ -2291,6 +2308,11 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         version: current.version + 1,
       };
       state.recurrences.set(next.id, { input: current, value: next });
+      if (_commandKey)
+        state.recurrenceTransitionCommands.set(_commandKey, {
+          fingerprint,
+          value: next,
+        });
       return next;
     },
     createInstallmentPlan: async (workspaceId, input, commandKey) => {
@@ -2340,6 +2362,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
+      const fingerprint = JSON.stringify({ planId: plan.id, input });
+      if (_commandKey) {
+        const previous = state.installmentEditCommands.get(_commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outro parcelamento.", 409);
+          return previous.value;
+        }
+      }
       if (current.version !== plan.version)
         throw new FinanceAdapterError(
           "O parcelamento foi alterado por outra pessoa.",
@@ -2348,9 +2379,22 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         );
       const nextCount = input.count ?? current.count;
       const nextTotal = input.total ?? current.total;
-      const amounts = previewInstallmentMinor(nextTotal.minor, nextCount);
+      const realized = current.installments.filter(
+        (item) => item.state === "posted" || item.state === "partially_settled",
+      );
+      if (nextCount < realized.length)
+        throw new FinanceAdapterError("Não é possível remover parcelas realizadas.", 409);
+      const realizedTotal = realized.reduce(
+        (sum, item) => sum + BigInt(item.amount.minor),
+        BigInt(0),
+      );
+      const futureCount = nextCount - realized.length;
+      const remaining = BigInt(nextTotal.minor) - realizedTotal;
+      if (futureCount < 1 || remaining <= BigInt(0))
+        throw new FinanceAdapterError("O total precisa manter saldo futuro positivo.", 409);
+      const amounts = previewInstallmentMinor(remaining.toString(), futureCount);
       const dates = previewInstallmentDates(input.firstDueOn ?? current.firstDueOn, nextCount);
-      if (!amounts.length || amounts.length !== dates.length)
+      if (!amounts.length || dates.length !== nextCount)
         throw new FinanceAdapterError("O parcelamento não é válido.", 422);
       const next: InstallmentPlan = {
         ...current,
@@ -2358,22 +2402,37 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         count: nextCount,
         firstDueOn: input.firstDueOn ?? current.firstDueOn,
         version: current.version + 1,
-        installments: amounts.map((minor, index) => ({
-          ...(current.installments[index] ?? {
-            id: fixtureId(400 + index),
-            transactionId: fixtureId(500 + index),
-            state: "planned",
-            version: 0,
-          }),
-          number: index + 1,
-          amount: { ...nextTotal, minor },
-          dueOn: dates[index] as string,
-        })),
+        installments: (() => {
+          let futureIndex = 0;
+          return Array.from({ length: nextCount }, (_, index) => {
+            const existing = current.installments[index];
+            if (existing && (existing.state === "posted" || existing.state === "partially_settled"))
+              return existing;
+            const value = {
+              ...(existing ?? {
+                id: fixtureId(400 + index),
+                transactionId: fixtureId(500 + index),
+                state: "planned",
+                version: 0,
+              }),
+              number: index + 1,
+              amount: { ...nextTotal, minor: amounts[futureIndex] as string },
+              dueOn: dates[index] as string,
+            };
+            futureIndex += 1;
+            return value;
+          });
+        })(),
       };
       state.installmentPlans.set(plan.id, { input: current, value: next });
+      if (_commandKey)
+        state.installmentEditCommands.set(_commandKey, {
+          fingerprint: JSON.stringify({ planId: plan.id, input }),
+          value: next,
+        });
       return next;
     },
-    updateInstallment: async (workspaceId, plan, installment, input) => {
+    updateInstallment: async (workspaceId, plan, installment, input, commandKey) => {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
@@ -2383,6 +2442,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           412,
           current.version,
         );
+      const fingerprint = JSON.stringify({ planId: plan.id, installmentId: installment.id, input });
+      if (commandKey) {
+        const previous = state.installmentEditCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra parcela.", 409);
+          return previous.value;
+        }
+      }
       const target = current.installments.find((item) => item.id === installment.id);
       if (target?.state !== "planned")
         throw new FinanceAdapterError("Somente parcelas futuras podem ser alteradas.", 409);
@@ -2412,9 +2480,10 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         };
       }
       state.installmentPlans.set(plan.id, { input: current, value: next });
+      if (commandKey) state.installmentEditCommands.set(commandKey, { fingerprint, value: next });
       return next;
     },
-    cancelFutureInstallments: async (workspaceId, plan) => {
+    cancelFutureInstallments: async (workspaceId, plan, commandKey) => {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
@@ -2424,6 +2493,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           412,
           current.version,
         );
+      const fingerprint = JSON.stringify({ planId: plan.id, confirm: true });
+      if (commandKey) {
+        const previous = state.installmentCancelCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outro cancelamento.", 409);
+          return previous.value;
+        }
+      }
       const next = {
         ...current,
         version: current.version + 1,
@@ -2432,6 +2510,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         ),
       };
       state.installmentPlans.set(plan.id, { input: current, value: next });
+      if (commandKey) state.installmentCancelCommands.set(commandKey, { fingerprint, value: next });
       return next;
     },
   };

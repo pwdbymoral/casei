@@ -1700,4 +1700,32 @@ describe("finance adapter", () => {
       updated.installments.reduce((sum, item) => sum + BigInt(item.amount.minor), BigInt(0)),
     ).toBe(BigInt(1000));
   });
+
+  it("replays plan edits and never redistributes a realized installment", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createInstallmentPlan(
+      "plan-invariants",
+      { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
+      "plan-create-invariants",
+    );
+    const plan = await adapter.getInstallmentPlan("plan-invariants", created.id);
+    plan.installments[0] = { ...plan.installments[0], state: "posted" };
+    const updated = await adapter.updateInstallmentPlan(
+      "plan-invariants",
+      plan,
+      { total: { currency: "BRL", minor: "1300" }, count: 4 },
+      "plan-edit-invariants",
+    );
+    const replay = await adapter.updateInstallmentPlan(
+      "plan-invariants",
+      plan,
+      { total: { currency: "BRL", minor: "1300" }, count: 4 },
+      "plan-edit-invariants",
+    );
+    expect(replay).toEqual(updated);
+    expect(updated.installments[0]?.amount.minor).toBe("334");
+    expect(
+      updated.installments.reduce((sum, item) => sum + BigInt(item.amount.minor), BigInt(0)),
+    ).toBe(BigInt(1300));
+  });
 });

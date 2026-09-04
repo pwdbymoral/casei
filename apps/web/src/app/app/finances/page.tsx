@@ -284,6 +284,9 @@ function FinanceDashboard({
   const statementPaymentCommandKey = useRef<string | null>(null);
   const recurrenceCommandKey = useRef<string | null>(null);
   const installmentCommandKey = useRef<string | null>(null);
+  const recurrenceEditCommandKey = useRef<string | null>(null);
+  const installmentPlanEditCommandKey = useRef<string | null>(null);
+  const installmentItemEditCommandKey = useRef<string | null>(null);
   const walletAdjustmentCommandKey = useRef<string | null>(null);
   const statementAdjustmentCommandKey = useRef<string | null>(null);
   const transactionCommandWorkspace = useRef(workspaceId);
@@ -424,6 +427,9 @@ function FinanceDashboard({
     setSavingRecurrenceEdit(false);
     setSavingInstallmentEdit(false);
     settlementCommandKey.current = null;
+    recurrenceEditCommandKey.current = null;
+    installmentPlanEditCommandKey.current = null;
+    installmentItemEditCommandKey.current = null;
   }, [
     statementDeepLinkRequest,
     statementItemsRequest,
@@ -729,6 +735,12 @@ function FinanceDashboard({
         ...current.filter((transaction) => transaction.id !== updated.id),
         updated,
       ]);
+      try {
+        setWallet(await adapter.getWallet(workspaceId));
+      } catch {
+        // The settlement succeeded; keep the transaction visible and let the next refresh
+        // reconcile the aggregate if the follow-up read was interrupted.
+      }
       setCommitmentTransactions((current) =>
         updated.state === "posted" || updated.state === "canceled"
           ? current.filter((transaction) => transaction.id !== updated.id)
@@ -871,7 +883,7 @@ function FinanceDashboard({
         setEditingRecurrence(recurrence);
         setRecurrenceEditScope("this_and_future");
         setRecurrenceEditEffectiveOn(transaction.dueOn ?? transaction.occurredOn);
-        setRecurrenceEditAmount(recurrence.amount.minor);
+        setRecurrenceEditAmount(transaction.amount.minor);
         setRecurrenceEditDescription(recurrence.description);
         setRecurrenceEditEndOn(recurrence.endOn ?? "");
         setRecurrenceEditEstimate(recurrence.estimatedAmount?.minor ?? "");
@@ -906,6 +918,9 @@ function FinanceDashboard({
     }
     setSavingRecurrenceEdit(true);
     setError(null);
+    const commandKey =
+      recurrenceEditCommandKey.current ?? `web-recurrence-edit-${crypto.randomUUID()}`;
+    recurrenceEditCommandKey.current = commandKey;
     try {
       const result = await adapter.updateRecurrence(
         workspaceId,
@@ -924,12 +939,14 @@ function FinanceDashboard({
               }
             : {}),
         },
-        `web-recurrence-edit-${crypto.randomUUID()}`,
+        commandKey,
       );
       setEditingRecurrence(null);
+      recurrenceEditCommandKey.current = null;
       setNotice(`Recorrência atualizada (${result.affectedOccurrences.length} ocorrência(s)).`);
       await load(false);
     } catch (cause) {
+      if (!shouldRetryIdempotentCommand(cause)) recurrenceEditCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível editar a recorrência.");
     } finally {
       setSavingRecurrenceEdit(false);
@@ -946,6 +963,9 @@ function FinanceDashboard({
     }
     setSavingInstallmentEdit(true);
     setError(null);
+    const commandKey =
+      installmentPlanEditCommandKey.current ?? `web-installment-edit-${crypto.randomUUID()}`;
+    installmentPlanEditCommandKey.current = commandKey;
     try {
       const updated = await adapter.updateInstallmentPlan(
         workspaceId,
@@ -956,12 +976,14 @@ function FinanceDashboard({
           firstDueOn: installmentEditFirstDueOn,
           description: installmentEditDescription.trim(),
         },
-        `web-installment-edit-${crypto.randomUUID()}`,
+        commandKey,
       );
       setEditingInstallmentPlan(updated);
+      installmentPlanEditCommandKey.current = null;
       setNotice("Parcelamento atualizado; parcelas já realizadas foram preservadas.");
       await load(false);
     } catch (cause) {
+      if (!shouldRetryIdempotentCommand(cause)) installmentPlanEditCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível editar o parcelamento.");
     } finally {
       setSavingInstallmentEdit(false);
@@ -985,19 +1007,24 @@ function FinanceDashboard({
     }
     setSavingInstallmentEdit(true);
     setError(null);
+    const commandKey =
+      installmentItemEditCommandKey.current ?? `web-installment-item-edit-${crypto.randomUUID()}`;
+    installmentItemEditCommandKey.current = commandKey;
     try {
       const updated = await adapter.updateInstallment(
         workspaceId,
         editingInstallmentPlan,
         editingInstallment,
         { amount: { currency, minor: amount.toString() }, dueOn: installmentEditDueOn },
-        `web-installment-item-edit-${crypto.randomUUID()}`,
+        commandKey,
       );
       setEditingInstallmentPlan(updated);
       setEditingInstallment(null);
+      installmentItemEditCommandKey.current = null;
       setNotice("Parcela atualizada.");
       await load(false);
     } catch (cause) {
+      if (!shouldRetryIdempotentCommand(cause)) installmentItemEditCommandKey.current = null;
       setError(cause instanceof Error ? cause.message : "Não foi possível editar a parcela.");
     } finally {
       setSavingInstallmentEdit(false);
@@ -2991,6 +3018,7 @@ function FinanceDashboard({
         open={editingRecurrence !== null}
         onOpenChange={(open) => {
           if (!open && !savingRecurrenceEdit) setEditingRecurrence(null);
+          if (!open && !savingRecurrenceEdit) recurrenceEditCommandKey.current = null;
         }}
       >
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
@@ -3094,6 +3122,8 @@ function FinanceDashboard({
           if (!open && !savingInstallmentEdit) {
             setEditingInstallmentPlan(null);
             setEditingInstallment(null);
+            installmentPlanEditCommandKey.current = null;
+            installmentItemEditCommandKey.current = null;
           }
         }}
       >
