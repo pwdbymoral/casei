@@ -726,6 +726,14 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     );
   });
 
+  router.get("/workspaces/:workspaceId/recurrences/:recurrenceId", async (context) => {
+    const recurrenceId = parseDomainId(context.req.param("recurrenceId"));
+    const recurrence = await service.getRecurrence(scopeOf(context), recurrenceId);
+    if (!recurrence) throw notFoundError();
+    setVersionHeaders(context, recurrence.version);
+    return context.json(recurrence);
+  });
+
   router.patch("/workspaces/:workspaceId/recurrences/:recurrenceId", async (context) => {
     const recurrenceId = parseDomainId(context.req.param("recurrenceId"));
     const input = await parseJsonBody(context, updateRecurrenceSchema);

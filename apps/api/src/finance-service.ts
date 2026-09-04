@@ -91,6 +91,8 @@ export interface TransactionView {
   categoryId: string | null;
   cardId: string | null;
   statementId: string | null;
+  recurrenceId?: string | null;
+  installmentPlanId?: string | null;
   version: number;
 }
 
@@ -1316,7 +1318,7 @@ export class FinanceService {
       const limitParameter = addValue(limit + 1);
       const result = await client.query<TransactionRow>(
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
-                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, created_at, version
+                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, created_at, version
            FROM finance_transaction
           WHERE ${conditions.join(" AND ")}
           ORDER BY occurred_on DESC, created_at DESC, id DESC
@@ -1344,7 +1346,7 @@ export class FinanceService {
     return this.withScopedClient(scope, async (client) => {
       const result = await client.query<TransactionRow>(
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
-                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version
+                occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, version
            FROM finance_transaction WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, id],
       );
@@ -2178,7 +2180,7 @@ export class FinanceService {
           `UPDATE finance_transaction
             SET state = $3, settled_minor = $4, posted_on = coalesce(posted_on, now()), cash_settled_on = CASE WHEN instrument = 'wallet' THEN coalesce(cash_settled_on, now()) ELSE cash_settled_on END, version = version + 1, updated_at = now()
           WHERE workspace_id = $1 AND id = $2 AND version = $5
-          RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
+          RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, version`,
           [scope.workspaceId, id, nextState, settledMinor, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
@@ -2471,7 +2473,7 @@ export class FinanceService {
           }
         }
         const result = await client.query<TransactionRow>(
-          `UPDATE finance_transaction SET state = 'canceled', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version`,
+          `UPDATE finance_transaction SET state = 'canceled', version = version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, version`,
           [scope.workspaceId, id, row.version],
         );
         if (!result.rows[0]) throw new VersionConflictError();
@@ -3822,6 +3824,24 @@ export class FinanceService {
    * is persisted as an exception; broad edits skip exceptions so a later
    * series change cannot erase a user's correction.
    */
+  async getRecurrence(scope: FinanceScope, recurrenceId: string): Promise<RecurrenceView | null> {
+    return this.withScopedClient(scope, async (client) => {
+      const result = await client.query<RecurrenceRuleRow>(
+        `SELECT id, workspace_id, kind, amount_minor, frequency, interval,
+                start_on::text AS start_on, end_on::text AS end_on,
+                max_occurrences, variable, estimated_minor, description,
+                status, paused_on::text AS paused_on, version
+           FROM recurrence_rule
+          WHERE workspace_id = $1 AND id = $2`,
+        [scope.workspaceId, recurrenceId],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const currency = await this.workspaceCurrency(client, scope.workspaceId);
+      return toRecurrenceView(row, currency);
+    });
+  }
+
   async updateRecurrence(
     scope: FinanceScope,
     recurrenceId: string,
@@ -4291,7 +4311,7 @@ export class FinanceService {
        VALUES ($1, $2, $3, $4, $5::bigint, CASE WHEN $3 = 'posted' THEN $5::bigint ELSE 0::bigint END, $6, $7, $8, CASE WHEN $3 = 'posted' THEN now() ELSE null END, CASE WHEN $3 = 'posted' AND $4 = 'wallet' THEN now() ELSE null END, $9, $10, $11)
        RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
                  occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
-                 description, category_id, card_id, statement_id, recurrence_id, version`,
+                 description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, version`,
       [
         scope.workspaceId,
         input.kind,
@@ -4313,7 +4333,7 @@ export class FinanceService {
       const refreshed = await client.query<TransactionRow>(
         `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
                 occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
-                description, category_id, card_id, statement_id, recurrence_id, version
+                description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, version
            FROM finance_transaction
           WHERE workspace_id = $1 AND id = $2`,
         [scope.workspaceId, row.id],
@@ -4866,7 +4886,7 @@ export class FinanceService {
         request,
         execute: async () => {
           const current = await client.query<TransactionRow>(
-            `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+            `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code, occurred_on, due_on, posted_on, description, category_id, card_id, statement_id, recurrence_id, installment_plan_id, version FROM finance_transaction WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
             [scope.workspaceId, id],
           );
           const row = current.rows[0];
@@ -5327,6 +5347,8 @@ function toTransactionView(row: TransactionRow): TransactionView {
     categoryId: row.category_id,
     cardId: row.card_id,
     statementId: row.statement_id,
+    recurrenceId: row.recurrence_id ?? null,
+    installmentPlanId: row.installment_plan_id ?? null,
     version: row.version,
   };
 }

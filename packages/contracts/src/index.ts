@@ -935,6 +935,8 @@ export const transactionSchema = z.object({
   categoryId: domainIdSchema.nullable(),
   cardId: domainIdSchema.nullable(),
   statementId: domainIdSchema.nullable(),
+  recurrenceId: domainIdSchema.nullable().optional(),
+  installmentPlanId: domainIdSchema.nullable().optional(),
   version: versionSchema,
 });
 
