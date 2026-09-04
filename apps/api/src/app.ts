@@ -1,4 +1,5 @@
 import { getDatabasePool, type Pool } from "@casei/database";
+import { createS3ObjectStorageFromEnvironment, type StorageEnvironment } from "@casei/storage";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -14,6 +15,11 @@ import {
   dataExchangeErrorToHttp,
   type ImportUploadApplication,
 } from "./data-exchange-routes.js";
+import {
+  ExportApplication,
+  PostgresExportJobStore,
+  PostgresExportSource,
+} from "./export-service.js";
 import { configureFinanceRoutes, financeErrorToHttp } from "./finance-routes.js";
 import { FinanceService } from "./finance-service.js";
 import { GoalService } from "./goal-service.js";
@@ -85,6 +91,28 @@ export interface ImportAppOptions {
 
 export interface DataExchangeAppOptions {
   exports?: DataExchangeExportApplication;
+}
+
+/**
+ * Builds the default export application when the deployment has configured
+ * object storage. Tests and alternate deployments can continue to inject the
+ * application through `dataExchange.exports`.
+ */
+export function createDefaultExportApplication(input: {
+  pool: Pool;
+  applicationRole?: string;
+  env?: Readonly<Record<string, string | undefined>>;
+}): DataExchangeExportApplication | undefined {
+  const env = input.env ?? process.env;
+  if (!env.CASEI_OBJECT_STORAGE_BUCKET?.trim()) return undefined;
+  const applicationRole = input.applicationRole ?? env.DATABASE_ROLE ?? "casei_app";
+  const environment = storageEnvironment(env.NODE_ENV);
+  return new ExportApplication(
+    new PostgresExportJobStore(input.pool, applicationRole),
+    new PostgresExportSource(input.pool, applicationRole),
+    createS3ObjectStorageFromEnvironment(env),
+    { environment },
+  );
 }
 
 export function createApp(configureV1?: V1Configurator, options: AppOptions = {}): Hono<ApiEnv> {
@@ -276,8 +304,17 @@ async function defaultActorResolver(context: Parameters<MiddlewareHandler<ApiEnv
 }
 
 const appPool = getDatabasePool();
+const defaultExportApplication = createDefaultExportApplication({ pool: appPool });
 export const app = createApp(undefined, {
   identity: { pool: appPool },
   finance: { pool: appPool },
   stock: { pool: appPool },
+  ...(defaultExportApplication ? { dataExchange: { exports: defaultExportApplication } } : {}),
 });
+
+function storageEnvironment(value: string | undefined): StorageEnvironment {
+  if (value === "production") return "prod";
+  if (value === "test") return "test";
+  if (value === "staging") return "staging";
+  return "dev";
+}

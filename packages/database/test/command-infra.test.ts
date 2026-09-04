@@ -264,6 +264,40 @@ if (!adminUrl) {
       );
       assert.deepEqual(success.rows[0], { state: "succeeded", attempts: 1 });
 
+      const finalRevocationJob = await pool.query<{ id: string }>(
+        `INSERT INTO "job"
+          (job_type, job_version, workspace_id, actor_id, required_capability,
+           idempotency_key, payload, available_at, correlation_id)
+         VALUES ('final-revocation.job', 1, $1, $2, 'test.run', 'final-revocation-key', '{}'::jsonb,
+                 now(), '01ARZ3NDEKTSV4RRFFQ69G5FAV')
+         RETURNING id`,
+        [workspaceId, actorId],
+      );
+      const finalRevocationJobId = finalRevocationJob.rows[0]?.id;
+      assert.ok(finalRevocationJobId);
+      let finalRevocationChecks = 0;
+      let finalRevocationCleanup = 0;
+      const finalRevocationWorker = new PostgresJobWorker(
+        pool,
+        new Map([["final-revocation.job:1", async () => undefined]]),
+        {
+          applicationRole: "casei_app",
+          authorizeCapability: () => {
+            finalRevocationChecks += 1;
+            return finalRevocationChecks === 1;
+          },
+          onAuthorizationRevoked: async (job) => {
+            assert.equal(job.id, finalRevocationJobId);
+            finalRevocationCleanup += 1;
+          },
+        },
+      );
+      assert.deepEqual(
+        await finalRevocationWorker.runOnce(workspaceId, new Date(Date.now() + 60_000)),
+        { state: "cancelled", jobId: finalRevocationJobId },
+      );
+      assert.equal(finalRevocationCleanup, 1);
+
       await pool.query(
         `INSERT INTO "job"
           (job_type, job_version, workspace_id, actor_id, required_capability,

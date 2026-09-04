@@ -651,6 +651,75 @@ export const importJob = pgTable(
   ],
 );
 
+export const exportJob = pgTable(
+  "export_job",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    actorId: text("actor_id").notNull(),
+    jobId: uuid("job_id").references(() => job.id, { onDelete: "set null" }),
+    idempotencyKey: varchar("idempotency_key", { length: 128 }).notNull(),
+    requiredCapability: text("required_capability").notNull().default("export"),
+    domain: text("domain").notNull(),
+    format: text("format").notNull(),
+    request: jsonb("request").notNull(),
+    fileName: text("file_name"),
+    storageKey: text("storage_key"),
+    outputSha256: text("output_sha256"),
+    outputBytes: integer("output_bytes"),
+    totalRows: integer("total_rows"),
+    processedRows: integer("processed_rows").notNull().default(0),
+    progress: integer("progress").notNull().default(0),
+    state: text("state").notNull().default("queued"),
+    expiresAt: instant("expires_at").notNull(),
+    version: integer("version").notNull().default(0),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    lastError: text("last_error"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+    completedAt: instant("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("export_job_workspace_idempotency_unique").on(
+      table.workspaceId,
+      table.idempotencyKey,
+    ),
+    uniqueIndex("export_job_workspace_id_unique").on(table.workspaceId, table.id),
+    index("export_job_workspace_state_idx").on(
+      table.workspaceId,
+      table.state,
+      table.updatedAt,
+      table.id,
+    ),
+    check("export_job_capability_check", sql`${table.requiredCapability} = 'export'`),
+    check(
+      "export_job_domain_check",
+      sql`${table.domain} in ('transactions', 'products', 'complete')`,
+    ),
+    check("export_job_format_check", sql`${table.format} in ('csv', 'zip')`),
+    check(
+      "export_job_state_check",
+      sql`${table.state} in ('queued', 'running', 'completed', 'failed', 'expired')`,
+    ),
+    check("export_job_progress_check", sql`${table.progress} between 0 and 100`),
+    check(
+      "export_job_output_sha256_check",
+      sql`${table.outputSha256} is null or ${table.outputSha256} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "export_job_output_bytes_check",
+      sql`${table.outputBytes} is null or ${table.outputBytes} between 1 and 10000000`,
+    ),
+    check(
+      "export_job_counts_check",
+      sql`${table.totalRows} is null or (${table.totalRows} between 0 and 50000 and ${table.processedRows} between 0 and ${table.totalRows})`,
+    ),
+    check("export_job_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
 export const importJobLine = pgTable(
   "import_job_line",
   {
