@@ -1127,6 +1127,13 @@ export function exportJobIsActive(job: Pick<ExportJob, "status">): boolean {
   return job.status === "queued" || job.status === "processing";
 }
 
+export function exportJobBelongsToWorkspace(
+  job: Pick<ExportJob, "workspaceId"> | null,
+  workspaceId: string,
+): boolean {
+  return job?.workspaceId === workspaceId;
+}
+
 export function exportJobToPoll<
   T extends Pick<ExportJob, "status">,
   U extends Pick<ExportJob, "status">,
@@ -1145,7 +1152,30 @@ export function exportExpirationLabel(expiresAt: string | null): string {
   return `Expira em ${formatted}`;
 }
 
+export function normalizeExportJobState(job: ExportJob, now = Date.now()): ExportJob {
+  if (job.status !== "completed" || !job.expiresAt) return job;
+  const expiresAt = Date.parse(job.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt > now) return job;
+  return {
+    ...job,
+    status: "expired",
+    message: job.message ?? "O arquivo expirou. Gere uma nova exportação para baixar os dados.",
+  };
+}
+
 export function exportDateRangeError(from: string, to: string): string | null {
+  const validCivilDate = (value: string): boolean => {
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+    const [year, month, day] = value.split("-").map(Number);
+    const date = new Date(Date.UTC(year ?? 0, (month ?? 0) - 1, day ?? 0));
+    return (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() === (month ?? 0) - 1 &&
+      date.getUTCDate() === day
+    );
+  };
+  if (from && !validCivilDate(from)) return "Informe uma data inicial válida.";
+  if (to && !validCivilDate(to)) return "Informe uma data final válida.";
   if (!from || !to || from <= to) return null;
   return "A data final deve ser igual ou posterior à data inicial.";
 }

@@ -11,6 +11,7 @@ import {
   exportDateRangeError,
   exportExpirationLabel,
   exportHistorySurfaceStatus,
+  exportJobBelongsToWorkspace,
   exportJobToPoll,
   formatDataFileSize,
   importErrorEntriesForReport,
@@ -19,6 +20,7 @@ import {
   importResultsPageIsValid,
   inferMapping,
   MAX_IMPORT_ROWS,
+  normalizeExportJobState,
   parseLocalCsvPreview,
   serializeImportErrorReport,
 } from "./data-exchange";
@@ -167,6 +169,27 @@ describe("data exchange UI ports", () => {
     expect(exportDateRangeError("2026-09-05", "2026-09-04")).toContain("igual ou posterior");
     expect(exportDateRangeError("2026-09-04", "2026-09-04")).toBeNull();
     expect(exportDateRangeError("", "2026-09-04")).toBeNull();
+    expect(exportDateRangeError("2026-02-31", "2026-03-01")).toContain("data inicial válida");
+  });
+
+  it("não reutiliza exportação de outro espaço e marca arquivo expirado", () => {
+    const completed = {
+      id: "export-1",
+      workspaceId: "workspace-1",
+      domain: "transactions" as const,
+      format: "csv" as const,
+      status: "completed" as const,
+      progress: 100,
+      fileName: "transactions.csv",
+      createdAt: "2026-09-03T15:00:00.000Z",
+      expiresAt: "2026-09-04T15:00:00.000Z",
+    };
+
+    expect(exportJobBelongsToWorkspace(completed, "workspace-1")).toBe(true);
+    expect(exportJobBelongsToWorkspace(completed, "workspace-2")).toBe(false);
+    expect(
+      normalizeExportJobState(completed, Date.parse("2026-09-04T16:00:00.000Z")),
+    ).toMatchObject({ status: "expired" });
   });
 
   it("ignora duplo clique de retry e export enquanto o adapter deferred está pendente", async () => {

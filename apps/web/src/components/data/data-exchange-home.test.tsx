@@ -64,4 +64,15 @@ describe("DataExchangeHome", () => {
       "disabled",
     );
   });
+
+  it("bloqueia uma data civil impossível antes de chamar a API", () => {
+    currentRole = "member";
+    const html = renderSurface("from=2026-02-31");
+
+    expect(html).toContain("Informe uma data inicial válida.");
+    const generateButtonIndex = html.indexOf("Gerar exportação");
+    expect(html.slice(Math.max(0, generateButtonIndex - 2_000), generateButtonIndex)).toContain(
+      "disabled",
+    );
+  });
 });

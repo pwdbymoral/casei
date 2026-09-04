@@ -63,6 +63,7 @@ import {
   exportDateRangeError,
   exportExpirationLabel,
   exportHistorySurfaceStatus,
+  exportJobBelongsToWorkspace,
   exportJobIsActive,
   exportJobToPoll,
   exportStatusLabel,
@@ -78,6 +79,7 @@ import {
   importResultsPageIsValid,
   importStatusLabel,
   MAX_IMPORT_ROWS,
+  normalizeExportJobState,
   serializeImportErrorReport,
 } from "@/lib/data-exchange";
 
@@ -235,6 +237,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const workspaceRef = useRef(workspaceId);
 
   const importAllowed = canImportData(role);
   const exportAllowed = canExportData(role);
@@ -251,15 +254,57 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     };
   }, []);
 
+  useEffect(() => {
+    if (workspaceRef.current === workspaceId) return;
+    workspaceRef.current = workspaceId;
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setFile(null);
+    setPreview(null);
+    setSheetName("");
+    setAcceptedDuplicateLines([]);
+    setMapping({});
+    setMappingDirty(false);
+    setPreviewStatus("idle");
+    setPreviewError(null);
+    setImportJob(null);
+    setImportError(null);
+    setImportPending(false);
+    setCancelPending(false);
+    setImportResults([]);
+    setImportResultsStatus("idle");
+    setImportResultsError(null);
+    setImportResultsNextAfterLine(null);
+    setImportResultsMorePending(false);
+    setImportResultsMoreError(null);
+    setErrorReportPending(false);
+    setErrorReportError(null);
+    setRetryPending(false);
+    setExportJobs([]);
+    setExportStatus("loading");
+    setExportError(null);
+    setExportPending(false);
+    setActiveExport(null);
+    importOperation.current = { pending: false, key: null };
+    cancelOperation.current = { pending: false, key: null };
+    retryOperation.current = { pending: false, key: null };
+    exportOperation.current = { pending: false, key: null };
+  }, [workspaceId]);
+
   const loadExports = useCallback(async () => {
     setExportStatus("loading");
     setExportError(null);
     try {
-      const jobs = await adapter.listExportJobs(workspaceId);
+      const jobs = (await adapter.listExportJobs(workspaceId)).map(normalizeExportJobState);
+      if (workspaceRef.current !== workspaceId) return;
       setExportJobs(jobs);
-      setActiveExport((current) => exportJobToPoll(jobs, current));
+      setActiveExport((current) =>
+        current && exportJobBelongsToWorkspace(current, workspaceId)
+          ? exportJobToPoll<ExportJob, ExportJob>(jobs, current)
+          : exportJobToPoll<ExportJob, ExportJob>(jobs, null),
+      );
       setExportStatus("success");
     } catch (error) {
+      if (workspaceRef.current !== workspaceId) return;
       setExportStatus(errorStatus(error));
       setExportError(errorMessage(error));
     }
@@ -308,6 +353,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       .listImportResults(workspaceId, importJob.id)
       .then((page) => {
         if (!active) return;
+        if (!importResultsPageIsValid(page)) {
+          throw new DataExchangeError("Os resultados retornaram um cursor inválido.");
+        }
         setImportResults(page.items);
         setImportResultsNextAfterLine(page.nextAfterLine);
         setImportResultsStatus("success");
@@ -325,17 +373,28 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }, [adapter, importJob, workspaceId]);
 
   useEffect(() => {
-    if (!activeExport || terminalExport(activeExport)) return;
+    if (
+      !activeExport ||
+      !exportJobBelongsToWorkspace(activeExport, workspaceId) ||
+      terminalExport(activeExport)
+    )
+      return;
     let active = true;
     const poll = async () => {
       try {
-        const next = await adapter.getExportJob(workspaceId, activeExport.id);
+        const next = normalizeExportJobState(
+          await adapter.getExportJob(workspaceId, activeExport.id),
+        );
         if (active) {
           setActiveExport(next);
           setExportJobs((current) => [next, ...current.filter((job) => job.id !== next.id)]);
         }
       } catch (error) {
-        if (active) setExportError(errorMessage(error));
+        if (active) {
+          setExportError(errorMessage(error));
+          setExportStatus(errorStatus(error));
+          setActiveExport(null);
+        }
       }
     };
     const timer = window.setInterval(() => void poll(), 700);
@@ -601,7 +660,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setExportPending(true);
     setExportError(null);
     try {
-      const next = await operation.promise;
+      const next = normalizeExportJobState(await operation.promise);
       setActiveExport(next);
       setExportJobs((current) => [next, ...current.filter((job) => job.id !== next.id)]);
       setExportStatus("success");
@@ -614,11 +673,28 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }
 
   async function downloadExport(job: ExportJob) {
-    if (!online || job.status !== "completed") return;
+    const normalizedJob = normalizeExportJobState(job);
+    if (!online) return;
+    if (normalizedJob.status !== "completed") {
+      setExportJobs((current) =>
+        current.map((item) => (item.id === normalizedJob.id ? normalizedJob : item)),
+      );
+      if (exportJobBelongsToWorkspace(normalizedJob, workspaceId)) {
+        setActiveExport((current) => (current?.id === normalizedJob.id ? normalizedJob : current));
+      }
+      setExportError(
+        normalizedJob.message ?? "A exportação não está mais disponível para download.",
+      );
+      return;
+    }
     try {
-      const blob = await adapter.downloadExport(workspaceId, job.id);
-      downloadBlob(blob, job.fileName ?? `casei-${job.domain}.${job.format}`);
+      const blob = await adapter.downloadExport(workspaceId, normalizedJob.id);
+      downloadBlob(
+        blob,
+        normalizedJob.fileName ?? `casei-${normalizedJob.domain}.${normalizedJob.format}`,
+      );
     } catch (error) {
+      setExportStatus(errorStatus(error));
       setExportError(errorMessage(error));
     }
   }
@@ -641,6 +717,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     exportJobs.length > 0,
   );
   const exportDateError = exportDateRangeError(exportFrom, exportTo);
+  const workspaceActiveExport = exportJobBelongsToWorkspace(activeExport, workspaceId)
+    ? activeExport
+    : null;
   const importStepIndex = !file
     ? 0
     : !preview
@@ -1481,11 +1560,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                 !online ||
                 exportPending ||
                 Boolean(exportDateError) ||
-                Boolean(activeExport && !terminalExport(activeExport))
+                Boolean(workspaceActiveExport && !terminalExport(workspaceActiveExport))
               }
               onClick={() => void createExport()}
             >
-              {exportPending || (activeExport && !terminalExport(activeExport)) ? (
+              {exportPending ||
+              (workspaceActiveExport && !terminalExport(workspaceActiveExport)) ? (
                 <LoaderCircleIcon
                   data-icon="inline-start"
                   className="animate-spin"
@@ -1496,41 +1576,43 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
               )}{" "}
               {exportPending ? "Gerando exportação…" : "Gerar exportação"}
             </Button>
-            {activeExport && !terminalExport(activeExport) ? (
+            {workspaceActiveExport && !terminalExport(workspaceActiveExport) ? (
               <div aria-live="polite">
-                <ProgressBar value={activeExport.progress} label="Gerando arquivo" />
+                <ProgressBar value={workspaceActiveExport.progress} label="Gerando arquivo" />
               </div>
             ) : null}
-            {activeExport?.status === "completed" ? (
+            {workspaceActiveExport?.status === "completed" ? (
               <Alert aria-live="polite">
                 <CheckCircle2Icon aria-hidden="true" />
                 <AlertTitle>Exportação pronta</AlertTitle>
                 <AlertDescription className="flex flex-wrap items-center gap-3">
                   <span>
-                    {activeExport.fileName} · {exportExpirationLabel(activeExport.expiresAt)}.
+                    {workspaceActiveExport.fileName} ·{" "}
+                    {exportExpirationLabel(workspaceActiveExport.expiresAt)}.
                   </span>
                   <Button
                     type="button"
                     size="sm"
                     disabled={!online}
-                    aria-label={`Baixar ${activeExport.fileName ?? "exportação"}`}
-                    onClick={() => void downloadExport(activeExport)}
+                    aria-label={`Baixar ${workspaceActiveExport.fileName ?? "exportação"}`}
+                    onClick={() => void downloadExport(workspaceActiveExport)}
                   >
                     <DownloadIcon data-icon="inline-start" aria-hidden="true" /> Baixar arquivo
                   </Button>
                 </AlertDescription>
               </Alert>
             ) : null}
-            {activeExport &&
-            (activeExport.status === "failed" || activeExport.status === "expired") ? (
+            {workspaceActiveExport &&
+            (workspaceActiveExport.status === "failed" ||
+              workspaceActiveExport.status === "expired") ? (
               <Alert variant="destructive" aria-live="polite">
                 <AlertCircleIcon aria-hidden="true" />
                 <AlertTitle>
-                  Exportação {exportStatusLabel(activeExport.status).toLowerCase()}
+                  Exportação {exportStatusLabel(workspaceActiveExport.status).toLowerCase()}
                 </AlertTitle>
                 <AlertDescription>
-                  {activeExport.message ??
-                    (activeExport.status === "expired"
+                  {workspaceActiveExport.message ??
+                    (workspaceActiveExport.status === "expired"
                       ? "O arquivo expirou. Gere uma nova exportação para baixar os dados."
                       : "Não foi possível gerar o arquivo. Tente novamente.")}
                 </AlertDescription>
