@@ -66,7 +66,7 @@ divergente; a aplicação server-side permanece responsabilidade do DATA-004.
 
 ## Validação da jornada web
 
-- `apps/web`: 18 arquivos de teste, 170 testes passando; o typecheck e o
+- `apps/web`: 19 arquivos de teste, 179 testes passando; o typecheck e o
   build Next com webpack também passaram.
 - A validação manual com fixtures percorreu prévia, confirmação, resultado por
   linha, geração e download de exportação no navegador. O layout foi
