@@ -15,6 +15,9 @@ explícitas como eventos desconhecidos.
 - Transações planejadas de carteira, faturas abertas, empréstimos em aberto,
   parcelas e recorrências são normalizadas em eventos; compras de cartão não
   são subtraídas novamente, apenas a fatura gera saída de caixa.
+- Reservas de metas não geram saída de caixa e contribuições futuras só entram
+  quando registradas como transação planejada; o domínio atual não persiste um
+  calendário separado de contribuições, portanto nenhum valor é inventado.
 - O saldo inicial vem do mesmo read model reconstruível do valor seguro.
 - O contrato e o adaptador web preservam origem, data, direção, valor nulo e
   contagem de desconhecidos.
@@ -24,6 +27,7 @@ explícitas como eventos desconhecidos.
 - [x] Cada ponto mensal reconcilia seu saldo com os eventos conhecidos da janela.
 - [x] Evento variável sem estimativa aparece com `amount: null` e reduz a confiança;
       nunca é tratado silenciosamente como zero.
+- [x] Ausência de evidência de saldo mantém a confiança baixa, mesmo com eventos conhecidos.
 - [x] Horizonte é limitado a 12 meses e datas civis inválidas são rejeitadas.
 - [ ] Tela de projeção permite abrir a composição de cada ponto em telefone e desktop.
 - [ ] Jornada crítica possui validação browser/E2E com dados reais de um espaço.

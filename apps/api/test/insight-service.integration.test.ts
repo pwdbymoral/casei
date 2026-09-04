@@ -114,6 +114,25 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
     },
   );
 
+  integrationIt("keeps projection confidence low when balance evidence is absent", async () => {
+    const fixture = await createFixture({ withOpening: false });
+    try {
+      const projection = await new InsightService(fixture.pool).getProjection(fixture.scope, {
+        asOf: "2026-08-05",
+        months: 1,
+      });
+      expect(projection.confidence).toEqual({
+        level: "low",
+        reasons: [
+          "saldo_sem_evidencia_de_abertura_ou_conferencia",
+          "evento_variavel_sem_estimativa",
+        ],
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
   integrationIt(
     "reconciles monthly and category report rows with published transactions",
     async () => {

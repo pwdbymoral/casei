@@ -445,7 +445,10 @@ export class InsightService {
                     CASE WHEN ft.kind = 'income' THEN 'income' ELSE 'outflow' END AS direction,
                     CASE
                       WHEN rr.variable = true AND rr.estimated_minor IS NULL THEN NULL
-                      WHEN rr.variable = true THEN COALESCE(rr.estimated_minor, ft.amount_minor - ft.settled_minor)
+                      WHEN rr.variable = true THEN GREATEST(
+                        COALESCE(rr.estimated_minor, ft.amount_minor - ft.settled_minor) - ft.settled_minor,
+                        0
+                      )
                       ELSE ft.amount_minor - ft.settled_minor
                     END AS amount_minor,
                     CASE
@@ -505,7 +508,7 @@ export class InsightService {
           ORDER BY projected.event_date, projected.id`,
         [scope.workspaceId, config.currency, asOf, to],
       );
-      return projectCashFlow({
+      const projection = projectCashFlow({
         asOf,
         months: parsed.months,
         currency: config.currency,
@@ -525,6 +528,25 @@ export class InsightService {
           },
         })),
       });
+      const sourceConfidence = confidenceFor(snapshot);
+      const reasons = new Set([
+        ...sourceConfidence.reasons,
+        ...projection.confidence.reasons.filter(
+          (reason) => reason !== "eventos_projetados_com_valor_conhecido",
+        ),
+      ]);
+      return {
+        ...projection,
+        confidence: {
+          level:
+            sourceConfidence.level === "low" || projection.confidence.level === "low"
+              ? "low"
+              : sourceConfidence.level === "medium" || projection.confidence.level === "medium"
+                ? "medium"
+                : "high",
+          reasons: [...reasons],
+        },
+      };
     });
   }
 
