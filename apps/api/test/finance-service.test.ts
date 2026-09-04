@@ -3,12 +3,20 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertStatementCanReopen,
   assertVariableRecurrenceSettlementAllowed,
+  calculateStatementPayment,
   FinanceConflictError,
   FinanceService,
 } from "../src/finance-service.js";
 import { decodeCursor, InvalidCursorError } from "../src/http/cursor.js";
 
 describe("finance command guards", () => {
+  it("allocates an invoice payment into applied amount and explicit card credit", () => {
+    expect(calculateStatementPayment(1_000n, 1_250n, true)).toEqual({
+      appliedMinor: 1_000n,
+      creditMinor: 250n,
+    });
+    expect(() => calculateStatementPayment(1_000n, 1_250n, false)).toThrow(/excede/);
+  });
   it("paginates loan payments with a signed cursor inside the workspace", async () => {
     const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
     const loanId = "0190f3c8-2a10-7abc-8def-1234567890ac";

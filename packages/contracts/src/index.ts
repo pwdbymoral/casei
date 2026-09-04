@@ -1159,6 +1159,14 @@ export const payStatementSchema = z.object({
   occurredOn: civilDateSchema.optional(),
   allowCredit: z.boolean().default(false),
 });
+export const statementPaymentResponseSchema = z.object({
+  transactionId: domainIdSchema,
+  statementId: domainIdSchema,
+  amount: moneySchema,
+  applied: moneySchema,
+  credit: moneySchema,
+});
+export type StatementPaymentResponse = z.infer<typeof statementPaymentResponseSchema>;
 
 export const createRecurrenceSchema = z
   .object({

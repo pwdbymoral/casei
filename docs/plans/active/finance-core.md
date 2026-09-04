@@ -25,7 +25,9 @@ Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara 
 
 - `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública, histórico auditável detalhado e defaults de categorias.
 - `PLAN`: janela móvel materializada por job, pausa/retomada, comandos de edição por escopo e UI de compromissos permanecem; PLAN-001 backend já liquida parcialmente, enquanto a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
-- `CARD`: movimentação entre faturas abertas, ajuste pós-fechamento, estorno/tarifas e crédito excedente ainda permanecem; listagem, fechamento, composição e reabertura sem pagamentos já possuem API e interface.
+- `CARD`: movimentação entre faturas abertas permanece; ajuste pós-fechamento, estorno/tarifas e
+  crédito excedente já possuem comandos auditáveis, enquanto listagem, fechamento, composição e
+  reabertura sem pagamentos já possuem API e interface.
 - `GOAL/INSIGHT`: persistência de metas/reservas, projeção/read models e UI ficam em fatias próprias; as funções puras de contribuição/valor seguro não persistem dados.
 - A UI financeira recebe `workspaceId` e `role` do shell autenticado; ela não escolhe escopo por `localStorage`, não concede papel padrão e desabilita escrita para `viewer`. Fixtures só ficam disponíveis com `CASEI_UI_FIXTURES=1`; sem origem explícita `NEXT_PUBLIC_CASEI_API_ORIGIN`, os adapters terminam em estado não autenticado.
 - A migration `0010_plan_partial_settlement` segue estoque `0008` e auditoria `0009`; se a sequência de migrations mudar antes do merge, ela deve ser renumerada para o próximo número livre sem aplicar duas vezes nem descartar dados.

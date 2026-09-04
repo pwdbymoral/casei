@@ -408,6 +408,107 @@ describe("CARD-003 statement adjustment PostgreSQL", () => {
   );
 });
 
+describe("CARD-004 statement payment PostgreSQL", () => {
+  integrationIt("separates confirmed excess credit and reverses it atomically", async () => {
+    const fixture = await createFixture();
+    try {
+      const identity = new IdentityService(fixture.pool);
+      const onboarding = await identity.createOnboarding(
+        { userId: fixture.actorId, email: fixture.email },
+        {
+          displayName: "Card payment owner",
+          workspaceName: "Casa pagamento",
+          currency: "BRL",
+          timeZone: "America/Fortaleza",
+          includeInitialBalance: false,
+          initialBalanceMinor: "0",
+        },
+        "card-payment-onboarding-001",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      );
+      const scope = {
+        workspaceId: onboarding.workspace.id,
+        actorId: fixture.actorId,
+        role: "owner" as const,
+        correlationId: "01ARZ3NDEKTSV4RRQ69G5FB0",
+      };
+      const finance = new FinanceService(fixture.pool, { cursorSecret: "card-payment-secret" });
+      const card = await finance.createCard(
+        scope,
+        { name: "Cartão principal", closingDay: 10, dueDay: 17 },
+        "card-payment-card-001",
+      );
+      const cardId = (card.response as { id: string }).id;
+      const purchase = await finance.createCardPurchase(
+        scope,
+        {
+          amount: { currency: "BRL", minor: "1000" },
+          occurredOn: "2030-01-05",
+          description: "Compra",
+          cardId,
+        },
+        "card-payment-purchase-001",
+      );
+      const statement = (await finance.listStatements(scope, cardId))[0];
+      if (!statement) throw new Error("expected statement");
+      const payment = await finance.payStatement(
+        scope,
+        statement.id,
+        {
+          amount: { currency: "BRL", minor: "1500" },
+          allowCredit: true,
+          occurredOn: "2030-01-10",
+        },
+        "card-payment-pay-001",
+      );
+      expect(payment.response).toMatchObject({
+        amount: { currency: "BRL", minor: "1500" },
+        applied: { currency: "BRL", minor: "1000" },
+        credit: { currency: "BRL", minor: "500" },
+      });
+      const afterPayment = await finance.getStatement(scope, statement.id);
+      expect(afterPayment?.paid.minor).toBe("1000");
+      expect(afterPayment?.openAmount.minor).toBe("0");
+      const credit = await fixture.pool.query<{ amount_minor: string; state: string }>(
+        `SELECT amount_minor, state FROM card_credit WHERE workspace_id = $1`,
+        [scope.workspaceId],
+      );
+      expect(credit.rows).toEqual([{ amount_minor: "500", state: "active" }]);
+
+      const transaction = await finance.getTransaction(scope, payment.response.transactionId);
+      if (!transaction) throw new Error("expected payment transaction");
+      await finance.reverseTransaction(
+        scope,
+        payment.response.transactionId,
+        "card-payment-cancel-001",
+        transaction.version,
+        statement.id,
+      );
+      const afterCancel = await finance.getStatement(scope, statement.id);
+      expect(afterCancel?.paid.minor).toBe("0");
+      expect(afterCancel?.openAmount.minor).toBe("1000");
+      const canceledCredit = await fixture.pool.query<{ state: string }>(
+        `SELECT state FROM card_credit WHERE workspace_id = $1`,
+        [scope.workspaceId],
+      );
+      expect(canceledCredit.rows).toEqual([{ state: "canceled" }]);
+      const audit = await fixture.pool.query<{ action: string }>(
+        `SELECT action FROM audit_event WHERE workspace_id = $1 AND target_id = $2 ORDER BY occurred_at`,
+        [scope.workspaceId, payment.response.transactionId],
+      );
+      expect(audit.rows.map((row) => row.action)).toContain("transaction.reversed");
+      const statementAudit = await fixture.pool.query<{ action: string }>(
+        `SELECT action FROM audit_event WHERE workspace_id = $1 AND target_id = $2`,
+        [scope.workspaceId, statement.id],
+      );
+      expect(statementAudit.rows.map((row) => row.action)).toContain("statement.payment_reversed");
+      expect(purchase.transaction.cardId).toBe(cardId);
+    } finally {
+      await fixture.close();
+    }
+  });
+});
+
 async function createFixture() {
   if (!adminUrl) throw new Error("DATABASE_URL_TEST is required");
   const adminPool = getDatabasePool({ connectionString: adminUrl });

@@ -15,6 +15,7 @@ import {
   installmentUpdateSchema,
   loanPaymentSchema,
   type PaginationQuery,
+  payStatementSchema,
   recurrenceTransitionSchema,
   settleTransactionSchema,
   type TransactionListQuery,
@@ -267,6 +268,14 @@ export interface StatementAdjustmentResultView {
   statement: StatementView;
 }
 
+export interface StatementPaymentResponseView {
+  transactionId: string;
+  statementId: string;
+  amount: { currency: string; minor: string };
+  applied: { currency: string; minor: string };
+  credit: { currency: string; minor: string };
+}
+
 export interface StatementItemsPage {
   items: StatementItemView[];
   nextCursor: string | null;
@@ -354,6 +363,22 @@ export function calculateSettlement({
     settledMinor: nextSettledMinor,
     state: nextSettledMinor === plannedMinor ? "posted" : "partially_settled",
   };
+}
+
+/** Allocates a payment without ever inflating the statement's paid balance. */
+export function calculateStatementPayment(
+  openMinor: bigint,
+  requestedMinor: bigint,
+  allowCredit: boolean,
+): { appliedMinor: bigint; creditMinor: bigint } {
+  if (openMinor < 0n || requestedMinor <= 0n) {
+    throw new FinanceConflictError("O pagamento deve ser positivo.");
+  }
+  if (requestedMinor > openMinor && !allowCredit) {
+    throw new FinanceConflictError("O pagamento excede o valor em aberto.");
+  }
+  const appliedMinor = requestedMinor > openMinor ? openMinor : requestedMinor;
+  return { appliedMinor, creditMinor: requestedMinor - appliedMinor };
 }
 
 /** Canonical signed delta from the ledger balance to what the user observed. */
@@ -1982,16 +2007,23 @@ export class FinanceService {
     id: string,
     idempotencyKey: string,
     expectedVersion: number,
+    expectedStatementId?: string,
   ): Promise<TransactionView> {
     assertFinanceCapability(scope, "finance.write");
+    const commandPath = expectedStatementId
+      ? "statements/:statementId/payments/:paymentId/cancel"
+      : "transactions/:id/reverse";
     return this.mutateTransaction(
       scope,
       id,
       idempotencyKey,
       expectedVersion,
-      "transactions/:id/reverse",
-      { id, expectedVersion },
+      commandPath,
+      { id, expectedVersion, expectedStatementId },
       async (client, row) => {
+        if (expectedStatementId !== undefined && row.statement_id !== expectedStatementId) {
+          throw new FinanceNotFoundError();
+        }
         if (row.state !== "posted" && row.state !== "partially_settled") {
           throw new FinanceConflictError("A transação não está realizada.");
         }
@@ -2024,15 +2056,15 @@ export class FinanceService {
         if (original.rows.length === 0)
           throw new FinanceConflictError("O lançamento original não foi encontrado.");
         const cardPayment = row.statement_id
-          ? await client.query<{ amount_minor: string }>(
-              `SELECT amount_minor
+          ? await client.query<{ amount_minor: string; applied_minor: string }>(
+              `SELECT amount_minor, applied_minor
                  FROM card_payment
                 WHERE workspace_id = $1 AND statement_id = $2 AND transaction_id = $3`,
               [scope.workspaceId, row.statement_id, id],
             )
-          : { rows: [] as { amount_minor: string }[] };
+          : { rows: [] as { amount_minor: string; applied_minor: string }[] };
         if (row.statement_id && cardPayment.rows[0]) {
-          const paymentAmount = BigInt(cardPayment.rows[0].amount_minor);
+          const paymentAmount = BigInt(cardPayment.rows[0].applied_minor);
           const statement = await client.query<{
             state: string;
             total_minor: string;
@@ -2056,12 +2088,24 @@ export class FinanceService {
             throw new FinanceConflictError("O pagamento já não está refletido na fatura.");
           await client.query(
             `UPDATE credit_statement
-                SET paid_minor = $1,
-                    state = CASE WHEN $1 = 0 THEN 'closed' ELSE 'partially_paid' END,
+                SET paid_minor = $1::bigint,
+                    state = CASE
+                      WHEN $1::bigint = 0 THEN 'closed'
+                      WHEN $1::bigint >= total_minor THEN 'paid'
+                      ELSE 'partially_paid'
+                    END,
                     version = version + 1,
                     updated_at = now()
-              WHERE workspace_id = $2 AND id = $3`,
+              WHERE workspace_id = $2::uuid AND id = $3::uuid`,
             [paid, scope.workspaceId, row.statement_id],
+          );
+          await client.query(
+            `UPDATE card_credit
+                SET state = 'canceled', canceled_at = now()
+              WHERE workspace_id = $1
+                AND payment_id = (SELECT id FROM card_payment WHERE workspace_id = $1 AND transaction_id = $2)
+                AND state = 'active'`,
+            [scope.workspaceId, id],
           );
         } else if (row.statement_id) {
           const statement = await client.query<{
@@ -2142,6 +2186,14 @@ export class FinanceService {
           transactionAuditSnapshot(row),
           transactionAuditSnapshot(result.rows[0]),
         );
+        if (cardPayment.rows[0] && row.statement_id) {
+          await this.recordStatementAudit(
+            client,
+            scope,
+            row.statement_id,
+            "statement.payment_reversed",
+          );
+        }
         return toTransactionView(result.rows[0]);
       },
     );
@@ -2559,18 +2611,18 @@ export class FinanceService {
     statementId: string,
     input: unknown,
     idempotencyKey: string,
-  ) {
+  ): Promise<{
+    replayed: boolean;
+    statusCode: number;
+    response: StatementPaymentResponseView;
+  }> {
     assertFinanceCapability(scope, "finance.write");
-    const amountInput = input as {
-      amount?: { currency: string; minor: string };
-      allowCredit?: boolean;
-      occurredOn?: string;
-    };
-    return this.withUnitOfWork(scope, async ({ client }) =>
+    const amountInput = payStatementSchema.parse(input);
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
       executeIdempotent(client, {
         scope: `${scope.actorId}:${scope.workspaceId}:POST:/statements/${statementId}/payments`,
         key: idempotencyKey,
-        request: input,
+        request: amountInput,
         execute: async () => {
           const statement = await client.query<{
             card_id: string;
@@ -2592,8 +2644,11 @@ export class FinanceService {
             throw new FinanceConflictError("A moeda do pagamento difere da fatura.");
           const open = BigInt(row.total_minor) - BigInt(row.paid_minor);
           const amount = amountInput.amount ? BigInt(amountInput.amount.minor) : open;
-          if (amount <= 0n || (!amountInput.allowCredit && amount > open))
-            throw new FinanceConflictError("O pagamento excede o valor em aberto.");
+          const allocation = calculateStatementPayment(
+            open,
+            amount,
+            amountInput.allowCredit === true,
+          );
           const wallet = await this.ensureAccount(
             client,
             scope.workspaceId,
@@ -2633,11 +2688,20 @@ export class FinanceService {
             }).map((entry) => ({ accountId: entry.accountId, amount: entry.amount.minor })),
             amountInput.occurredOn ?? (await this.workspaceToday(client, scope.workspaceId)),
           );
-          await client.query(
-            `INSERT INTO card_payment (workspace_id, statement_id, transaction_id, amount_minor) VALUES ($1, $2, $3, $4)`,
-            [scope.workspaceId, statementId, txId, amount],
+          const payment = await client.query<{ id: string }>(
+            `INSERT INTO card_payment (workspace_id, statement_id, transaction_id, amount_minor, applied_minor) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [scope.workspaceId, statementId, txId, amount, allocation.appliedMinor],
           );
-          const paid = BigInt(row.paid_minor) + amount;
+          const paymentId = payment.rows[0]?.id;
+          if (!paymentId) throw new Error("card payment insert failed");
+          if (allocation.creditMinor > 0n) {
+            await client.query(
+              `INSERT INTO card_credit (workspace_id, card_id, payment_id, amount_minor)
+               VALUES ($1, $2, $3, $4)`,
+              [scope.workspaceId, row.card_id, paymentId, allocation.creditMinor],
+            );
+          }
+          const paid = BigInt(row.paid_minor) + allocation.appliedMinor;
           await client.query(
             `UPDATE credit_statement SET paid_minor = $1, state = CASE WHEN $1 >= total_minor THEN 'paid' ELSE 'partially_paid' END, version = version + 1, updated_at = now() WHERE id = $2`,
             [paid, statementId],
@@ -2656,11 +2720,17 @@ export class FinanceService {
               transactionId: txId,
               statementId,
               amount: { currency: row.currency_code, minor: amount.toString() },
+              applied: { currency: row.currency_code, minor: allocation.appliedMinor.toString() },
+              credit: { currency: row.currency_code, minor: allocation.creditMinor.toString() },
             } as JsonValue,
           };
         },
       }),
     );
+    return {
+      ...result,
+      response: result.response as unknown as StatementPaymentResponseView,
+    };
   }
 
   async previewInstallmentPlan(
@@ -4085,9 +4155,9 @@ export class FinanceService {
     );
     await client.query(
       `INSERT INTO credit_statement (workspace_id, card_id, period_start, closing_on, due_on, state, total_minor)
-       VALUES ($1, $2, $3, $4, $5, 'open', $6)
+       VALUES ($1, $2, $3, $4, $5, 'open', 0)
        ON CONFLICT (card_id, closing_on) DO NOTHING`,
-      [workspaceId, cardId, dates.periodStart, dates.closingOn, dates.dueOn, amount],
+      [workspaceId, cardId, dates.periodStart, dates.closingOn, dates.dueOn],
     );
     const statement = await client.query<{ id: string; state: string }>(
       `SELECT id, state FROM credit_statement WHERE workspace_id = $1 AND card_id = $2 AND closing_on = $3 FOR UPDATE`,
@@ -4245,7 +4315,12 @@ export class FinanceService {
     client: PgPoolClient,
     scope: FinanceScope,
     statementId: string,
-    action: "statement.closed" | "statement.reopened" | "statement.adjustment" | "statement.refund",
+    action:
+      | "statement.closed"
+      | "statement.reopened"
+      | "statement.adjustment"
+      | "statement.refund"
+      | "statement.payment_reversed",
   ): Promise<void> {
     await client.query(
       `INSERT INTO audit_event

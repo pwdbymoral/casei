@@ -1393,11 +1393,53 @@ export const cardPayment = pgTable(
       .notNull()
       .references(() => financeTransaction.id, { onDelete: "restrict" }),
     amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    appliedMinor: bigint("applied_minor", { mode: "bigint" }).notNull(),
     createdAt: instant("created_at").defaultNow().notNull(),
   },
   (table) => [
     check("card_payment_amount_check", sql`${table.amountMinor} > 0`),
+    check(
+      "card_payment_applied_check",
+      sql`${table.appliedMinor} >= 0 and ${table.appliedMinor} <= ${table.amountMinor}`,
+    ),
+    uniqueIndex("card_payment_workspace_id_id_unique").on(table.workspaceId, table.id),
     uniqueIndex("card_payment_transaction_unique").on(table.transactionId),
+  ],
+);
+
+/** Excess invoice payments are explicit card credit, reversible by source payment. */
+export const cardCredit = pgTable(
+  "card_credit",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => creditCard.id, { onDelete: "restrict" }),
+    paymentId: uuid("payment_id")
+      .notNull()
+      .references(() => cardPayment.id, { onDelete: "restrict" }),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    state: text("state").notNull().default("active"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    canceledAt: instant("canceled_at"),
+  },
+  (table) => [
+    check("card_credit_amount_check", sql`${table.amountMinor} > 0`),
+    check("card_credit_state_check", sql`${table.state} in ('active', 'canceled')`),
+    uniqueIndex("card_credit_payment_unique").on(table.paymentId),
+    foreignKey({
+      columns: [table.workspaceId, table.cardId],
+      foreignColumns: [creditCard.workspaceId, creditCard.id],
+      name: "card_credit_card_workspace_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.paymentId],
+      foreignColumns: [cardPayment.workspaceId, cardPayment.id],
+      name: "card_credit_payment_workspace_fk",
+    }).onDelete("restrict"),
   ],
 );
 
