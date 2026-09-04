@@ -137,6 +137,75 @@ export const workspaceMembersSchema = z.object({
 });
 export type WorkspaceMemberContract = z.infer<typeof workspaceMemberSchema>;
 
+/** Platform roles are intentionally independent from workspace memberships. */
+export const platformRoleSchema = z.enum(["platform_admin", "platform_support"]);
+export type PlatformRole = z.infer<typeof platformRoleSchema>;
+
+export const platformAccountStatusSchema = z.enum(["active", "suspended"]);
+export type PlatformAccountStatus = z.infer<typeof platformAccountStatusSchema>;
+
+export const adminAccountSearchQuerySchema = z.object({
+  query: z.string().trim().min(1).max(320),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(512).optional(),
+});
+export type AdminAccountSearchQuery = z.infer<typeof adminAccountSearchQuerySchema>;
+
+const adminInstantSchema = z.string().datetime({ offset: true });
+
+export const adminAccountSummarySchema = z.object({
+  userId: userIdSchema,
+  displayName: z.string().min(1).max(200),
+  email: z.string().email(),
+  role: platformRoleSchema.nullable(),
+  status: platformAccountStatusSchema,
+  createdAt: adminInstantSchema,
+  lastActivityAt: adminInstantSchema.nullable(),
+  workspaceCount: z.number().int().nonnegative(),
+  activeSessionCount: z.number().int().nonnegative(),
+});
+export type AdminAccountSummary = z.infer<typeof adminAccountSummarySchema>;
+
+export const adminWorkspaceMetadataSchema = z.object({
+  id: workspaceIdSchema,
+  name: z.string().min(1).max(200),
+  status: z.enum(["active", "deletion_pending", "deactivated"]),
+});
+
+export const adminSessionSchema = z.object({
+  id: userIdSchema,
+  createdAt: adminInstantSchema,
+  updatedAt: adminInstantSchema.nullable(),
+  expiresAt: adminInstantSchema,
+  /** IP is truncated by the server before it crosses the administrative boundary. */
+  ipAddress: z.string().max(64).nullable(),
+  userAgent: z.string().max(500).nullable(),
+});
+export type AdminSession = z.infer<typeof adminSessionSchema>;
+
+export const adminAccountDetailSchema = adminAccountSummarySchema.extend({
+  workspaces: z.array(adminWorkspaceMetadataSchema),
+  sessions: z.array(adminSessionSchema),
+});
+export type AdminAccountDetail = z.infer<typeof adminAccountDetailSchema>;
+
+export const adminAccountListSchema = z.object({
+  items: z.array(adminAccountSummarySchema),
+  page: z.object({ nextCursor: z.string().nullable(), hasMore: z.boolean() }),
+});
+export type AdminAccountList = z.infer<typeof adminAccountListSchema>;
+
+export const adminAccountActionSchema = z.object({
+  reason: z.string().trim().min(1).max(500),
+});
+export type AdminAccountAction = z.infer<typeof adminAccountActionSchema>;
+
+export const adminPlatformRoleUpdateSchema = z.object({
+  role: platformRoleSchema.nullable(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type AdminPlatformRoleUpdate = z.infer<typeof adminPlatformRoleUpdateSchema>;
+
 /** Invitation listings never include the bearer token or invite URL. */
 export const workspaceInvitationListItemSchema = invitationSchema.omit({ inviteUrl: true });
 export const workspaceInvitationsSchema = z.object({
@@ -566,6 +635,7 @@ export const errorCodeSchema = z.enum([
   "malformed_request",
   "validation_failed",
   "unauthenticated",
+  "step_up_required",
   "not_found",
   "permission_denied",
   "precondition_required",

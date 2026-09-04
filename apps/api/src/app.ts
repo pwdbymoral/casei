@@ -3,6 +3,10 @@ import { createS3ObjectStorageFromEnvironment, type StorageEnvironment } from "@
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { BetterAuthAdminAuthPort } from "./admin-auth-port.js";
+import { configureAdminRoutes } from "./admin-routes.js";
+import { type AdminAccountStore, type AdminAuthPort, AdminService } from "./admin-service.js";
+import { PostgresAdminAccountStore } from "./admin-store.js";
 import {
   auth,
   defaultAuthOrigins,
@@ -31,6 +35,7 @@ import {
   errorResponse,
   notFoundError,
 } from "./http/index.js";
+import type { RequestActor } from "./http/types.js";
 import { configureIdentityRoutes } from "./identity-routes.js";
 import { IdentityService } from "./identity-service.js";
 import { configureImportRoutes, importErrorToHttp } from "./import-routes.js";
@@ -46,6 +51,7 @@ export interface AppOptions {
   finance?: FinanceAppOptions;
   stock?: StockAppOptions;
   identity?: IdentityAppOptions;
+  admin?: AdminAppOptions;
   import?: ImportAppOptions;
   dataExchange?: DataExchangeAppOptions;
 }
@@ -61,7 +67,22 @@ export interface IdentityAppOptions {
     email?: string;
     displayName?: string;
     recentAuthentication?: boolean;
+    twoFactorEnabled?: boolean;
+    platformRole?: "platform_admin" | "platform_support" | null;
+    stepUpToken?: string;
+    ipAddress?: string | null;
+    endpoint?: string | null;
   } | null>;
+}
+
+export interface AdminAppOptions {
+  /** Injectable service boundary for HTTP contract tests; production wires the pool adapter. */
+  service?: AdminService;
+  pool?: Pool;
+  store?: AdminAccountStore;
+  authPort?: AdminAuthPort;
+  applicationRole?: string;
+  webOrigin?: string;
 }
 
 export interface FinanceAppOptions {
@@ -135,7 +156,13 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
     "/v1/*",
     cors({
       origin: (origin) => (isAllowedAuthOrigin(origin, authOrigins) ? origin : undefined),
-      allowHeaders: ["Content-Type", "X-Correlation-ID", "Idempotency-Key", "If-Match"],
+      allowHeaders: [
+        "Content-Type",
+        "X-Correlation-ID",
+        "Idempotency-Key",
+        "If-Match",
+        "X-Admin-Step-Up",
+      ],
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       credentials: true,
     }),
@@ -159,16 +186,45 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
   app.get("/health", (context) => context.json({ service: "casei-api", status: "ok" }));
   configureV1?.(v1);
 
-  const identityPool = options.identity?.pool ?? options.finance?.pool ?? options.stock?.pool;
+  const identityPool =
+    options.identity?.pool ?? options.finance?.pool ?? options.stock?.pool ?? options.admin?.pool;
   const identityService =
     options.identity?.service ??
     (identityPool
       ? new IdentityService(identityPool, {
-          applicationRole: options.identity?.applicationRole ?? options.finance?.applicationRole,
+          applicationRole:
+            options.identity?.applicationRole ??
+            options.finance?.applicationRole ??
+            options.admin?.applicationRole,
           webOrigin: options.identity?.webOrigin,
         })
       : undefined);
-  const actorResolver = options.identity?.actorResolver ?? defaultActorResolver;
+  const adminStore = options.admin
+    ? (options.admin.store ??
+      (options.admin.pool
+        ? new PostgresAdminAccountStore(options.admin.pool, options.admin.applicationRole)
+        : undefined))
+    : undefined;
+  const actorResolver =
+    options.identity?.actorResolver ??
+    ((context: Parameters<MiddlewareHandler<ApiEnv>>[0]) =>
+      defaultActorResolver(context, adminStore));
+  const adminService = options.admin
+    ? (options.admin.service ??
+      (adminStore
+        ? new AdminService(
+            adminStore,
+            options.admin.authPort ??
+              new BetterAuthAdminAuthPort(
+                authHandler,
+                process.env.BETTER_AUTH_URL ??
+                  process.env.CASEI_API_ORIGIN ??
+                  "http://localhost:3001",
+                options.admin.webOrigin ?? process.env.CASEI_WEB_ORIGIN ?? "http://localhost:3000",
+              ),
+          )
+        : undefined))
+    : undefined;
   const actorMiddleware = identityService ? createActorMiddleware(actorResolver) : undefined;
   const scopeMiddleware = identityService
     ? createWorkspaceScopeMiddleware(async ({ actor, workspaceId, context }) =>
@@ -254,6 +310,13 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
     });
   }
   v1.onError((error, context) => errorResponse(context, apiErrorToHttp(error, context.req.path)));
+  if (options.admin) {
+    if (!identityService || !actorMiddleware) {
+      throw new Error("Admin auth boundary is unavailable");
+    }
+    if (!adminService) throw new Error("Admin service is unavailable");
+    configureAdminRoutes(v1, { service: adminService, actorMiddleware });
+  }
   app.route("/v1", v1);
 
   return app;
@@ -291,15 +354,25 @@ function isFinancePath(path: string): boolean {
   ].some((segment) => path.includes(segment));
 }
 
-async function defaultActorResolver(context: Parameters<MiddlewareHandler<ApiEnv>>[0]) {
+async function defaultActorResolver(
+  context: Parameters<MiddlewareHandler<ApiEnv>>[0],
+  adminStore?: AdminAccountStore,
+): Promise<RequestActor | null> {
   const session = await auth.api.getSession({ headers: context.req.raw.headers });
   if (!session) return null;
+  const platformAccess = await adminStore?.resolvePlatformActor?.(session.user.id);
+  if (platformAccess?.suspended) return null;
   const createdAt = new Date(session.session.createdAt).getTime();
   return {
     userId: session.user.id,
     email: session.user.email,
     displayName: session.user.name,
+    stepUpToken: context.req.header("X-Admin-Step-Up") ?? undefined,
+    ipAddress: session.session.ipAddress ?? null,
+    endpoint: new URL(context.req.url).pathname,
     recentAuthentication: Number.isFinite(createdAt) && Date.now() - createdAt <= 15 * 60 * 1_000,
+    twoFactorEnabled: session.user.twoFactorEnabled === true,
+    platformRole: platformAccess?.role ?? null,
   };
 }
 
@@ -307,6 +380,7 @@ const appPool = getDatabasePool();
 const defaultExportApplication = createDefaultExportApplication({ pool: appPool });
 export const app = createApp(undefined, {
   identity: { pool: appPool },
+  admin: { pool: appPool },
   finance: { pool: appPool },
   stock: { pool: appPool },
   ...(defaultExportApplication ? { dataExchange: { exports: defaultExportApplication } } : {}),

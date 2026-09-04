@@ -1,4 +1,4 @@
-import type { CorrelationId, WorkspaceRole } from "@casei/contracts";
+import type { CorrelationId, PlatformRole, WorkspaceRole } from "@casei/contracts";
 import type { Context, Env } from "hono";
 
 export interface RequestActor {
@@ -7,6 +7,15 @@ export interface RequestActor {
   email?: string;
   displayName?: string;
   recentAuthentication?: boolean;
+  /** One-use server-issued proof for mutating platform commands. */
+  stepUpToken?: string;
+  /** Better Auth's persisted enrollment state, never accepted from the client. */
+  twoFactorEnabled?: boolean;
+  /** Request provenance retained for administrative audit, never authorization. */
+  ipAddress?: string | null;
+  endpoint?: string | null;
+  /** Platform role is separate from workspace membership and is absent for ordinary users. */
+  platformRole?: PlatformRole | null;
 }
 
 export interface WorkspaceScope {

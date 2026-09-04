@@ -63,6 +63,8 @@ O console fica no mesmo PWA para reduzir operação, mas em rota/layout/boundary
 
 - `platform_admin`: gerencia contas, estado do serviço e outros administradores, com autenticação reforçada.
 - `platform_support`: consulta metadados mínimos e executa ações de suporte permitidas; não promove administradores nem acessa conteúdo doméstico.
+- Ambos os papéis precisam concluir o cadastro de TOTP antes de entrar no console; as capacidades
+  continuam distintas e suporte nunca recebe a capacidade de alterar papéis.
 
 Papel de plataforma é independente do papel em espaços e nunca concede acesso automático a um espaço.
 
@@ -81,7 +83,9 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
 ### Bootstrap e segurança
 
 - O primeiro `platform_admin` é criado por procedimento único documentado no deploy; depois, administradores são geridos no console.
-- `platform_admin` deve ativar TOTP antes de usar o console. Ações críticas exigem autenticação recente e novo desafio de segundo fator; recovery codes são mostrados uma vez e armazenados conforme o Better Auth.
+- `platform_admin` e `platform_support` devem ativar TOTP antes de usar o console. Ações críticas
+  exigem autenticação recente e novo desafio de segundo fator; recovery codes são mostrados uma vez
+  e armazenados conforme o Better Auth.
 - Toda ação exige motivo, registra ator, alvo, horário, IP truncado/adequado à política, resultado e correlation ID.
 - Uma pessoa não pode remover o último `platform_admin` ativo.
 - Suspensão não apaga dados; exportação e exclusão por solicitação do titular serão uma jornada de privacidade própria antes de produção pública.

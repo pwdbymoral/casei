@@ -299,6 +299,7 @@ export interface PlatformAdminSession {
   userId: string;
   displayName: string;
   role: "platform_admin" | "platform_support";
+  twoFactorEnabled: boolean;
 }
 
 export interface PlatformAdminSessionPort {
