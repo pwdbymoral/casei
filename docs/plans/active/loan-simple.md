@@ -1,6 +1,6 @@
 # Plano: LOAN-001/002 IOU simples
 
-- Status: em andamento — histórico persistente LOAN-003
+- Status: concluído — LOAN-003 (UI e histórico persistente)
 - Spec associada: [finanças](../../specs/financas.md)
 - Plano macro: [MVP Casei](mvp-casei.md)
 
@@ -39,7 +39,7 @@ efeito de caixa no ledger.
    migration serializada após a base atual.
 3. Implementar comandos transacionais no `FinanceService`, rotas e testes de
    isolamento/idempotência/ledger.
-4. Atualizar documentação e checklist do MVP; UI ficará para LOAN-003.
+4. Atualizar documentação e checklist do MVP; a UI de LOAN-003 é validada em incremento separado.
 
 ## Validação
 
@@ -56,6 +56,10 @@ RLS e ausência de contas income/expense nos eventos.
 - A jornada visual foi adicionada em LOAN-003 depois da estabilização do
   contrato; o histórico detalhado é carregado pela leitura persistente
   paginada do contrato.
+- A cobertura de componente de `LoanCard` valida os estados de saldo,
+  cronograma, previsão, progresso, ação de pagamento, histórico, somente
+  leitura, contrato quitado e vencimento ausente. O ciclo Red/Green foi
+  demonstrado removendo/restaurando o export nomeado do componente.
 
 ## LOAN-003 — incremento web
 

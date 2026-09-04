@@ -130,7 +130,7 @@ Podem ser desenvolvidos em paralelo após Gate 2, desde que migrations sejam ser
 
 - [x] **LOAN-001 Empréstimo concedido/recebido (IOU simples):** contrato, contraparte, principal, data, vencimento opcional e eventos ledger sem renda/despesa.
 - [x] **LOAN-002 Pagamentos (IOU simples):** pagamentos de principal parciais/totais, saldo/status, idempotência, versão e excedente rejeitado; juros, tarifas, baixa e perdão ficam fora do MVP.
-- [ ] **LOAN-003 UI empréstimos:** resumo de saldo, cronograma, registrar pagamento, histórico e previsão de quitação.
+- [x] **LOAN-003 UI empréstimos:** resumo de saldo, cronograma, registrar pagamento, histórico e previsão de quitação. A cobertura de componente valida saldo/cronograma/previsão/progresso/ação, histórico, permissões e vencimento ausente.
 - [x] **GOAL-001 Subledger de reservas:** criar/editar/pausar/cancelar, allocate/release e cobertura (backend/API).
 - [x] **GOAL-002 Gasto de meta:** transação vinculada e liberação atômica; completar parcial/total (backend/API).
 - [x] **GOAL-003 UI metas:** captura simples, progresso, ritmo, reserva descoberta e simulação de contribuição.
