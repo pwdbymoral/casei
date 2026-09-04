@@ -2255,7 +2255,11 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           422,
         );
       }
-      const fingerprint = JSON.stringify({ recurrenceId: recurrence.id, input });
+      const fingerprint = JSON.stringify({
+        recurrenceId: recurrence.id,
+        expectedVersion: recurrence.version,
+        input,
+      });
       if (commandKey) {
         const previous = state.recurrenceEditCommands.get(commandKey);
         if (previous) {
@@ -2291,7 +2295,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     transitionRecurrence: async (workspaceId, recurrence, action, effectiveOn, _commandKey) => {
       const state = stateFor(workspaceId);
       const current = state.recurrences.get(recurrence.id)?.value;
-      const fingerprint = JSON.stringify({ recurrenceId: recurrence.id, action, effectiveOn });
+      const fingerprint = JSON.stringify({
+        recurrenceId: recurrence.id,
+        expectedVersion: recurrence.version,
+        action,
+        effectiveOn,
+      });
       if (!current) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
       if (_commandKey) {
         const previous = state.recurrenceTransitionCommands.get(_commandKey);

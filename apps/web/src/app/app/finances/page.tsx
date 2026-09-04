@@ -877,9 +877,11 @@ function FinanceDashboard({
   async function openRecurringOrInstallmentEditor(transaction: Transaction) {
     if (!writeAccess) return;
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       if (transaction.recurrenceId) {
         const recurrence = await adapter.getRecurrence(workspaceId, transaction.recurrenceId);
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setEditingRecurrence(recurrence);
         setRecurrenceEditScope("this_and_future");
         setRecurrenceEditEffectiveOn(transaction.dueOn ?? transaction.occurredOn);
@@ -891,6 +893,7 @@ function FinanceDashboard({
       }
       if (transaction.installmentPlanId) {
         const plan = await adapter.getInstallmentPlan(workspaceId, transaction.installmentPlanId);
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setEditingInstallmentPlan(plan);
         setInstallmentEditTotal(plan.total.minor);
         setInstallmentEditCount(String(plan.count));
@@ -898,7 +901,8 @@ function FinanceDashboard({
         setInstallmentEditDescription(transactionLabel(transaction));
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível carregar o plano.");
+      if (workspaceRequests.isCurrent(workspaceRequest))
+        setError(cause instanceof Error ? cause.message : "Não foi possível carregar o plano.");
     }
   }
 
@@ -918,6 +922,7 @@ function FinanceDashboard({
     }
     setSavingRecurrenceEdit(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     const commandKey =
       recurrenceEditCommandKey.current ?? `web-recurrence-edit-${crypto.randomUUID()}`;
     recurrenceEditCommandKey.current = commandKey;
@@ -941,15 +946,18 @@ function FinanceDashboard({
         },
         commandKey,
       );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setEditingRecurrence(null);
       recurrenceEditCommandKey.current = null;
       setNotice(`Recorrência atualizada (${result.affectedOccurrences.length} ocorrência(s)).`);
       await load(false);
     } catch (cause) {
-      if (!shouldRetryIdempotentCommand(cause)) recurrenceEditCommandKey.current = null;
-      setError(cause instanceof Error ? cause.message : "Não foi possível editar a recorrência.");
+      if (workspaceRequests.isCurrent(workspaceRequest)) {
+        if (!shouldRetryIdempotentCommand(cause)) recurrenceEditCommandKey.current = null;
+        setError(cause instanceof Error ? cause.message : "Não foi possível editar a recorrência.");
+      }
     } finally {
-      setSavingRecurrenceEdit(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingRecurrenceEdit(false);
     }
   }
 
@@ -963,6 +971,7 @@ function FinanceDashboard({
     }
     setSavingInstallmentEdit(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     const commandKey =
       installmentPlanEditCommandKey.current ?? `web-installment-edit-${crypto.randomUUID()}`;
     installmentPlanEditCommandKey.current = commandKey;
@@ -978,15 +987,20 @@ function FinanceDashboard({
         },
         commandKey,
       );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setEditingInstallmentPlan(updated);
       installmentPlanEditCommandKey.current = null;
       setNotice("Parcelamento atualizado; parcelas já realizadas foram preservadas.");
       await load(false);
     } catch (cause) {
-      if (!shouldRetryIdempotentCommand(cause)) installmentPlanEditCommandKey.current = null;
-      setError(cause instanceof Error ? cause.message : "Não foi possível editar o parcelamento.");
+      if (workspaceRequests.isCurrent(workspaceRequest)) {
+        if (!shouldRetryIdempotentCommand(cause)) installmentPlanEditCommandKey.current = null;
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível editar o parcelamento.",
+        );
+      }
     } finally {
-      setSavingInstallmentEdit(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingInstallmentEdit(false);
     }
   }
 
@@ -1007,6 +1021,7 @@ function FinanceDashboard({
     }
     setSavingInstallmentEdit(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     const commandKey =
       installmentItemEditCommandKey.current ?? `web-installment-item-edit-${crypto.randomUUID()}`;
     installmentItemEditCommandKey.current = commandKey;
@@ -1018,16 +1033,19 @@ function FinanceDashboard({
         { amount: { currency, minor: amount.toString() }, dueOn: installmentEditDueOn },
         commandKey,
       );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setEditingInstallmentPlan(updated);
       setEditingInstallment(null);
       installmentItemEditCommandKey.current = null;
       setNotice("Parcela atualizada.");
       await load(false);
     } catch (cause) {
-      if (!shouldRetryIdempotentCommand(cause)) installmentItemEditCommandKey.current = null;
-      setError(cause instanceof Error ? cause.message : "Não foi possível editar a parcela.");
+      if (workspaceRequests.isCurrent(workspaceRequest)) {
+        if (!shouldRetryIdempotentCommand(cause)) installmentItemEditCommandKey.current = null;
+        setError(cause instanceof Error ? cause.message : "Não foi possível editar a parcela.");
+      }
     } finally {
-      setSavingInstallmentEdit(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingInstallmentEdit(false);
     }
   }
 

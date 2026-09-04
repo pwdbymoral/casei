@@ -1709,6 +1709,43 @@ describe("finance adapter", () => {
     ).toBe(BigInt(1000));
   });
 
+  it("binds recurrence edit idempotency to the expected version", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createRecurrence(
+      "recurrence-invariants",
+      {
+        kind: "expense",
+        amount: { currency: "BRL", minor: "1000" },
+        frequency: "monthly",
+        interval: 1,
+        startOn: "2026-08-01",
+        variable: false,
+        description: "Conta",
+      },
+      "recurrence-plan-create",
+    );
+    const recurrence = await adapter.getRecurrence("recurrence-invariants", created.id);
+    const input = {
+      scope: "this_and_future" as const,
+      effectiveOn: "2026-08-01",
+      amount: { currency: "BRL", minor: "1200" },
+    };
+    const updated = await adapter.updateRecurrence(
+      "recurrence-invariants",
+      recurrence,
+      input,
+      "recurrence-edit-command",
+    );
+    await expect(
+      adapter.updateRecurrence(
+        "recurrence-invariants",
+        updated.recurrence,
+        input,
+        "recurrence-edit-command",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
   it("replays plan edits and never redistributes a realized installment", async () => {
     const adapter = createFixtureFinanceAdapter();
     const created = await adapter.createInstallmentPlan(
