@@ -9,6 +9,7 @@ import {
   detectPreviewDelimiter,
   exportHistorySurfaceStatus,
   formatDataFileSize,
+  importJobCanRetry,
   inferMapping,
   MAX_IMPORT_ROWS,
   parseLocalCsvPreview,
@@ -16,6 +17,12 @@ import {
 } from "./data-exchange";
 
 describe("data exchange UI ports", () => {
+  it("expõe retry para falha parcial, mas não para parcial concluído", () => {
+    expect(importJobCanRetry({ retryable: true })).toBe(true);
+    expect(importJobCanRetry({ retryable: false })).toBe(false);
+    expect(importJobCanRetry({})).toBe(false);
+  });
+
   it("infere o separador pt-BR e preserva campos desconhecidos como aviso", () => {
     const preview = parseLocalCsvPreview(
       "Tipo;Valor;Data;Observação\ndespesa;10,00;2026-08-25;mercado",
@@ -378,7 +385,9 @@ describe("data exchange UI ports", () => {
     ).rejects.toMatchObject({
       code: "permission",
     });
-    await expect(adapter.cancelImport("other-workspace", first.id)).rejects.toMatchObject({
+    await expect(
+      adapter.cancelImport("other-workspace", first.id, "other-cancel-key"),
+    ).rejects.toMatchObject({
       code: "permission",
     });
 
@@ -423,14 +432,43 @@ describe("data exchange UI ports", () => {
         file: duplicateFile,
         mapping: duplicatePreview.mapping,
         duplicatePolicy: "review",
+        acceptedDuplicateLines: [],
         applyMode: "valid_only",
       },
       "review-key",
     );
-    expect(review.status).toBe("failed");
+    expect(review.status).toBe("processing");
+    expect(review.ignoredRows).toBe(1);
     expect(review.appliedRows).toBe(0);
-    const reviewRetry = await adapter.retryImport("workspace-review", review.id, "review-retry");
-    expect(reviewRetry.id).toBe(review.id);
+    const reviewCompleted = await adapter.getImportJob("workspace-review", review.id);
+    await adapter.getImportJob("workspace-review", review.id);
+    const reviewFinal = await adapter.getImportJob("workspace-review", review.id);
+    expect(reviewCompleted.status).toBe("processing");
+    expect(reviewFinal.status).toBe("completed");
+
+    const accepted = await adapter.startImport(
+      "workspace-review",
+      {
+        preview: duplicatePreview,
+        file: duplicateFile,
+        mapping: duplicatePreview.mapping,
+        duplicatePolicy: "review",
+        acceptedDuplicateLines: [3],
+        applyMode: "valid_only",
+      },
+      "review-accepted-key",
+    );
+    expect(accepted.status).toBe("processing");
+    expect(accepted.ignoredRows).toBe(0);
+    const canceled = await adapter.cancelImport(
+      "workspace-review",
+      accepted.id,
+      "cancel-review-key",
+    );
+    expect(canceled.status).toBe("canceled");
+    await expect(
+      adapter.retryImport("workspace-review", accepted.id, "retry-canceled-key"),
+    ).rejects.toThrow("cancelada");
 
     const secondImport = await adapter.startImport(
       "workspace-isolated",

@@ -8,8 +8,10 @@ import type {
 } from "@casei/contracts";
 import type { JobExecutionContext, Pool, PoolClient } from "@casei/database";
 import {
+  executeIdempotent,
   hashRequest,
   JobLeaseLostError,
+  type JsonValue,
   PostgresJobWorker,
   validateIdempotencyKey,
   withUnitOfWork,
@@ -52,6 +54,8 @@ export interface ImportJobRecord {
   readonly batchSize: number;
   readonly state: ImportJobState;
   readonly expiresAt: string;
+  readonly createdAt?: string;
+  readonly lastError?: string;
   readonly version: number;
   readonly correlationId: string;
 }
@@ -189,6 +193,13 @@ export interface ImportStore {
     jobId: string,
     workspaceId: string,
     requester?: ImportRequester,
+    idempotencyKey?: string,
+  ): Promise<ImportJobRecord>;
+  retry?(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+    idempotencyKey?: string,
   ): Promise<ImportJobRecord>;
   markCancelled(
     jobId: string,
@@ -322,13 +333,6 @@ export class ImportApplication {
       )
     ) {
       throw new ImportConflictError("As linhas de duplicata confirmadas são inválidas.");
-    }
-    if (
-      input.request.duplicatePolicy === "review" &&
-      input.request.acceptedDuplicateLines.length === 0
-    ) {
-      // The job may still contain duplicates, but no duplicate can be imported by accident.
-      // They will be reported as skipped until the caller confirms individual lines.
     }
     const expiresAt = Date.parse(input.request.expiresAt);
     if (
@@ -547,8 +551,23 @@ export class ImportApplication {
     jobId: string,
     workspaceId: string,
     requester?: ImportRequester,
+    idempotencyKey?: string,
   ): Promise<ImportJobRecord> {
-    return this.store.requestCancel(jobId, workspaceId, requester);
+    return this.store.requestCancel(jobId, workspaceId, requester, idempotencyKey);
+  }
+
+  async retry(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+    idempotencyKey?: string,
+  ): Promise<ImportJobRecord> {
+    const job = await this.store.getJob(jobId, workspaceId);
+    if (!job) throw new ImportConflictError("Importação não encontrada.");
+    if (!this.store.retry) {
+      throw new ImportFailure("A repetição de importação não foi configurada.");
+    }
+    return this.store.retry(jobId, workspaceId, requester, idempotencyKey);
   }
 
   async reverse(
@@ -1014,13 +1033,104 @@ export class PostgresImportStore implements ImportStore {
     jobId: string,
     workspaceId: string,
     requester?: ImportRequester,
+    idempotencyKey?: string,
   ): Promise<ImportJobRecord> {
+    if (idempotencyKey === undefined) {
+      return this.transition(
+        jobId,
+        workspaceId,
+        "cancel_requested",
+        ["queued", "running"],
+        requester,
+      );
+    }
+    const auditRequester: ImportRequester = requester ?? {
+      actorId: null,
+      correlationId: "import-cancel",
+      origin: "api",
+    };
     return this.transition(
       jobId,
       workspaceId,
       "cancel_requested",
       ["queued", "running"],
-      requester,
+      auditRequester,
+      idempotencyKey,
+    );
+  }
+
+  async retry(
+    jobId: string,
+    workspaceId: string,
+    requester?: ImportRequester,
+    idempotencyKey?: string,
+  ): Promise<ImportJobRecord> {
+    return withUnitOfWork(
+      this.pool,
+      {
+        workspaceId,
+        actorId: requester?.actorId ?? undefined,
+        applicationRole: this.applicationRole,
+      },
+      async ({ client }) => {
+        const key = idempotencyKey ?? `import-retry:${jobId}`;
+        const auditRequester: ImportRequester = requester ?? {
+          actorId: null,
+          correlationId: "import-retry",
+          origin: "api",
+        };
+        validateIdempotencyKey(key);
+        const result = await executeIdempotent<JsonValue>(client, {
+          scope: `${auditRequester.actorId ?? "anonymous"}:${workspaceId}:POST:/imports/${jobId}/retry`,
+          key,
+          request: { jobId, workspaceId },
+          execute: async () => {
+            const updated = await client.query<ImportJobRow>(
+              `UPDATE "import_job"
+                  SET state = 'queued', last_error = NULL, version = version + 1, updated_at = now()
+                WHERE id = $1 AND workspace_id = $2 AND state = 'failed'
+                RETURNING *`,
+              [jobId, workspaceId],
+            );
+            let row = updated.rows[0];
+            if (!row) {
+              const current = await client.query<ImportJobRow>(
+                `SELECT * FROM "import_job" WHERE id = $1 AND workspace_id = $2`,
+                [jobId, workspaceId],
+              );
+              if (!current.rows[0]) throw new ImportConflictError("Importação não encontrada.");
+              if (current.rows[0].state !== "queued") {
+                throw new ImportConflictError("A importação não está disponível para repetição.");
+              }
+              row = current.rows[0];
+            } else {
+              await client.query(
+                `UPDATE "job"
+                    SET state = 'pending', available_at = now(), lease_until = NULL, lease_token = NULL,
+                        last_error = NULL, updated_at = now()
+                  WHERE id = $1 AND workspace_id = $2
+                    AND state IN ('failed', 'pending', 'running', 'dead')`,
+                [row.job_id, workspaceId],
+              );
+              await client.query(
+                `INSERT INTO audit_event
+                   (category, action, actor_id, workspace_id, target_type, target_id, origin,
+                    correlation_id, result)
+                 VALUES ('data', 'import.retried', $1, $2, 'import_job', $3, $4, $5, 'success')`,
+                [
+                  auditRequester.actorId,
+                  workspaceId,
+                  row.id,
+                  auditRequester.origin,
+                  auditRequester.correlationId,
+                ],
+              );
+            }
+            return { statusCode: 202, response: mapImportJob(row) as unknown as JsonValue };
+          },
+        });
+        return result.response as unknown as ImportJobRecord;
+      },
     );
   }
 
@@ -1071,43 +1181,80 @@ export class PostgresImportStore implements ImportStore {
     state: ImportJobState,
     from: readonly ImportJobState[],
     requester?: ImportRequester,
+    idempotencyKey?: string,
   ): Promise<ImportJobRecord> {
     return withUnitOfWork(
       this.pool,
-      { workspaceId, applicationRole: this.applicationRole },
+      {
+        workspaceId,
+        actorId: requester?.actorId ?? undefined,
+        correlationId: requester?.correlationId,
+        applicationRole: this.applicationRole,
+      },
       async ({ client }) => {
-        const result = await client.query<ImportJobRow>(
-          `UPDATE "import_job" SET state = $3, version = version + 1, updated_at = now()
-            WHERE id = $1 AND workspace_id = $2 AND state = ANY($4::text[])
-            RETURNING *`,
-          [jobId, workspaceId, state, from],
-        );
-        if (!result.rows[0]) {
-          const current = await client.query<ImportJobRow>(
-            `SELECT * FROM "import_job" WHERE id = $1 AND workspace_id = $2`,
-            [jobId, workspaceId],
-          );
-          if (!current.rows[0]) throw new ImportConflictError("Importação não encontrada.");
-          return mapImportJob(current.rows[0]);
+        if (idempotencyKey === undefined) {
+          return this.transitionWithClient(client, jobId, workspaceId, state, from, requester);
         }
-        const auditRequester = requester ?? systemRequester(mapImportJob(result.rows[0]), "worker");
-        await client.query(
-          `INSERT INTO audit_event
-             (category, action, actor_id, workspace_id, target_type, target_id, origin,
-              correlation_id, result)
-           VALUES ('data', $1, $2, $3, 'import_job', $4, $5, $6, 'success')`,
-          [
-            state === "cancel_requested" ? "import.cancel_requested" : "import.cancelled",
-            auditRequester.actorId,
-            result.rows[0].workspace_id,
-            result.rows[0].id,
-            auditRequester.origin,
-            auditRequester.correlationId,
-          ],
-        );
-        return mapImportJob(result.rows[0]);
+        validateIdempotencyKey(idempotencyKey);
+        const result = await executeIdempotent<JsonValue>(client, {
+          scope: `${requester?.actorId ?? "anonymous"}:${workspaceId}:POST:/imports/${jobId}/cancel`,
+          key: idempotencyKey,
+          request: { jobId, workspaceId },
+          execute: async () => ({
+            statusCode: 202,
+            response: (await this.transitionWithClient(
+              client,
+              jobId,
+              workspaceId,
+              state,
+              from,
+              requester,
+            )) as unknown as JsonValue,
+          }),
+        });
+        return result.response as unknown as ImportJobRecord;
       },
     );
+  }
+
+  private async transitionWithClient(
+    client: PoolClient,
+    jobId: string,
+    workspaceId: string,
+    state: ImportJobState,
+    from: readonly ImportJobState[],
+    requester?: ImportRequester,
+  ): Promise<ImportJobRecord> {
+    const result = await client.query<ImportJobRow>(
+      `UPDATE "import_job" SET state = $3, version = version + 1, updated_at = now()
+        WHERE id = $1 AND workspace_id = $2 AND state = ANY($4::text[])
+        RETURNING *`,
+      [jobId, workspaceId, state, from],
+    );
+    if (!result.rows[0]) {
+      const current = await client.query<ImportJobRow>(
+        `SELECT * FROM "import_job" WHERE id = $1 AND workspace_id = $2`,
+        [jobId, workspaceId],
+      );
+      if (!current.rows[0]) throw new ImportConflictError("Importação não encontrada.");
+      return mapImportJob(current.rows[0]);
+    }
+    const auditRequester = requester ?? systemRequester(mapImportJob(result.rows[0]), "worker");
+    await client.query(
+      `INSERT INTO audit_event
+         (category, action, actor_id, workspace_id, target_type, target_id, origin,
+          correlation_id, result)
+       VALUES ('data', $1, $2, $3, 'import_job', $4, $5, $6, 'success')`,
+      [
+        state === "cancel_requested" ? "import.cancel_requested" : "import.cancelled",
+        auditRequester.actorId,
+        result.rows[0].workspace_id,
+        result.rows[0].id,
+        auditRequester.origin,
+        auditRequester.correlationId,
+      ],
+    );
+    return mapImportJob(result.rows[0]);
   }
 }
 
@@ -1194,6 +1341,8 @@ interface ImportJobRow {
   batch_size: number;
   state: ImportJobState;
   expires_at: Date | string;
+  created_at: Date | string;
+  last_error: string | null;
   version: number;
   correlation_id: string;
 }
@@ -1244,6 +1393,11 @@ function mapImportJob(row: ImportJobRow): ImportJobRecord {
       row.expires_at instanceof Date
         ? row.expires_at.toISOString()
         : new Date(row.expires_at).toISOString(),
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : new Date(row.created_at).toISOString(),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
     version: row.version,
     correlationId: row.correlation_id,
   };

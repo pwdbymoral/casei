@@ -1,6 +1,6 @@
 # Plano: DATA-006 — UI de importação e exportação
 
-- Status: incremento parcial intencional; aplicação durável depende de DATA-001/DATA-004.
+- Status: UI e boundary HTTP em incrementos separados; bootstrap de produção ainda depende de adapters explícitos.
 - Spec associada: [intercâmbio de dados](../../specs/intercambio-de-dados.md)
 - Planos relacionados: [DATA-002/003](data-002-003.md) e [DATA-005](data-005-export.md)
 
@@ -14,8 +14,10 @@ completas.
 ## Fronteira desta fatia
 
 `DataExchangeAdapter` é o port tipado entre a PWA e os jobs DATA-001/DATA-004.
-O adapter HTTP envia `multipart/form-data` para os endpoints previstos e não
-fabrica sucesso quando o backend ainda não estiver disponível. O adapter de
+O boundary server-side agora expõe preview/upload, criação/status/retry/cancel
+de importação e listagem/criação/status/download de exportação. O adapter HTTP
+envia `multipart/form-data` para esses endpoints e não fabrica sucesso quando
+o bootstrap de aplicação ainda não estiver disponível. O adapter de
 fixtures exercita a jornada completa em desenvolvimento e testes sem gravar
 dados reais. A prévia CSV local é somente um fallback de UX para poder revisar
 um arquivo antes da aplicação; a validação canônica continua no servidor.
@@ -26,10 +28,13 @@ Depois que a conexão volta, uma prévia CSV local precisa ser atualizada e
 validada pelo servidor antes da confirmação; o fixture de desenvolvimento é a
 única exceção explícita.
 
-Não fazem parte desta fatia storage, job worker, persistência de perfis,
-autorização server-side, reimportação efetiva ou um parser XLSX no navegador.
-Um arquivo XLSX segue para o endpoint de prévia quando DATA-004 estiver
-disponível.
+Não fazem parte da UI storage, job worker, persistência de perfis ou um parser
+XLSX no navegador. O serviço `ImportUploadService` implementa o preflight
+server-side usando `@casei/data` e `@casei/storage`, mas recebe storage e
+`ImportPreviewStore` por injeção; comandos de domínio e o worker continuam no
+bootstrap DATA-004. Export jobs também recebem uma aplicação explícita, pois a
+composição persistente e os read models de domínio não são inventados neste
+boundary.
 
 ## Critérios de aceitação
 
@@ -44,9 +49,10 @@ disponível.
 
 ## Limitações conhecidas
 
-Os endpoints DATA-001/DATA-004 ainda não existem na API deste branch. Em
-ambiente autenticado a UI mostra a indisponibilidade do boundary e preserva o
-arquivo/configuração para retry; nenhum sucesso simulado é exibido.
+Os endpoints agora existem na API e passam pelo actor/workspace scope. Sem um
+bootstrap explícito de upload/exportação, a API responde 503 operacional em
+vez de 404; em ambiente autenticado a UI mostra a indisponibilidade e preserva
+o arquivo/configuração para retry. Nenhum sucesso simulado é exibido.
 O fallback local respeita o limite de 50 mil linhas e bloqueia a confirmação
 quando o arquivo excede esse limite. O relatório de erros prefixa células com
 caracteres de fórmula para não transformar mensagens retornadas pelo job em

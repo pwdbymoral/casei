@@ -1,6 +1,6 @@
 import type { ImportCreateRequest } from "@casei/contracts";
 import type { JobExecutionContext } from "@casei/database";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   ImportBatchContext,
   ImportCommandContext,
@@ -17,6 +17,7 @@ import {
   createImportPreviewHash,
   ImportApplication,
   ImportAuthorizationError,
+  PostgresImportStore,
 } from "../src/import-service.js";
 
 const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
@@ -418,6 +419,247 @@ describe("DATA-004 aplicação de importação", () => {
     await app.run(job.id, workspaceId);
 
     expect(commands.applied).toHaveLength(2);
+  });
+
+  it("permite rejeitar todas as duplicatas na revisão individual", async () => {
+    const app = new ImportApplication(new MemoryStore(), source(rows()), new MemoryCommands());
+
+    await expect(
+      app.create({
+        workspaceId,
+        actorId,
+        correlationId: "corr-review",
+        request: {
+          ...baseRequest,
+          duplicatePolicy: "review",
+          acceptedDuplicateLines: [],
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it("permite selecionar apenas parte das duplicatas na revisão individual", async () => {
+    const manifest = [
+      {
+        lineNumber: 2,
+        status: "duplicate" as const,
+        rowDigest: "2".repeat(64),
+        fingerprint: "f".repeat(64),
+      },
+      {
+        lineNumber: 3,
+        status: "duplicate" as const,
+        rowDigest: "3".repeat(64),
+        fingerprint: "f".repeat(64),
+      },
+    ];
+    const app = new ImportApplication(new MemoryStore(), source([]), new MemoryCommands());
+
+    await expect(
+      app.create({
+        workspaceId,
+        actorId,
+        correlationId: "corr-review-partial",
+        request: {
+          ...baseRequest,
+          previewHash: createImportPreviewHash(manifest),
+          previewManifest: manifest,
+          duplicatePolicy: "review",
+          acceptedDuplicateLines: [2],
+          totalRows: 2,
+          validRows: 0,
+          duplicateRows: 2,
+          invalidRows: 0,
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it("aplica as duplicatas aceitas e ignora as demais", async () => {
+    const manifest = [
+      {
+        lineNumber: 2,
+        status: "duplicate" as const,
+        rowDigest: "2".repeat(64),
+        fingerprint: "f".repeat(64),
+      },
+      {
+        lineNumber: 3,
+        status: "duplicate" as const,
+        rowDigest: "3".repeat(64),
+        fingerprint: "f".repeat(64),
+      },
+    ];
+    const rowsToProcess: ImportSourceRow[] = manifest.map((line) => ({
+      lineNumber: line.lineNumber,
+      status: "duplicate",
+      rowDigest: line.rowDigest,
+      values: { name: `Produto ${line.lineNumber}` },
+      fingerprint: "f".repeat(64),
+    }));
+    const store = new MemoryStore();
+    const commands = new MemoryCommands();
+    const app = new ImportApplication(store, source(rowsToProcess), commands, { batchSize: 2 });
+    const job = await app.create({
+      workspaceId,
+      actorId,
+      correlationId: "corr-review-run",
+      request: {
+        ...baseRequest,
+        previewHash: createImportPreviewHash(manifest),
+        previewManifest: manifest,
+        duplicatePolicy: "review",
+        acceptedDuplicateLines: [2],
+        totalRows: 2,
+        validRows: 0,
+        duplicateRows: 2,
+        invalidRows: 0,
+      },
+    });
+
+    const result = await app.run(job.id, workspaceId);
+
+    expect(result.state).toBe("succeeded");
+    expect(result.appliedRows).toBe(1);
+    expect(result.skippedRows).toBe(1);
+    expect(commands.applied.map((command) => command.lineNumber)).toEqual([2]);
+    expect(store.resultsFor(job.id)).toContainEqual({
+      lineNumber: 3,
+      status: "skipped",
+      fingerprint: "f".repeat(64),
+      errorCode: "duplicate_suggestion",
+      errorMessage: "Duplicata provável não confirmada.",
+    });
+  });
+
+  it("encaminha a chave de idempotência ao store ao cancelar", async () => {
+    const calls: unknown[] = [];
+    const job = { id: "job-cancel", workspaceId, state: "cancel_requested" } as ImportJobRecord;
+    const store = {
+      requestCancel: async (...args: unknown[]) => {
+        calls.push(args);
+        return job;
+      },
+    } as unknown as ImportStore;
+    const app = new ImportApplication(store, source([]), new MemoryCommands());
+    const requester = { actorId, correlationId: "corr-cancel", origin: "api" as const };
+
+    await expect(app.cancel(job.id, workspaceId, requester, "cancel-key-123456")).resolves.toBe(
+      job,
+    );
+    expect(calls).toEqual([[job.id, workspaceId, requester, "cancel-key-123456"]]);
+  });
+
+  it("persiste e reproduz o cancelamento idempotente no store PostgreSQL", async () => {
+    const row = {
+      id: "job-cancel-pg",
+      workspace_id: workspaceId,
+      actor_id: actorId,
+      job_id: "worker-job",
+      idempotency_key: "import-create-key",
+      required_capability: "import" as const,
+      domain: "products" as const,
+      storage_key: "dev/input.csv",
+      source_hash: "a".repeat(64),
+      mapping_version: "products-v1",
+      preview_hash: "b".repeat(64),
+      preview_manifest: [],
+      mode: "valid_only" as const,
+      duplicate_policy: "skip" as const,
+      accepted_duplicate_lines: [],
+      total_rows: 0,
+      valid_rows: 0,
+      duplicate_rows: 0,
+      invalid_rows: 0,
+      applied_rows: 0,
+      skipped_rows: 0,
+      rejected_rows: 0,
+      cursor: 0,
+      batch_size: 100,
+      state: "queued" as "queued" | "cancel_requested",
+      expires_at: new Date(Date.now() + 60_000),
+      created_at: new Date(),
+      last_error: null,
+      version: 0,
+      correlation_id: "corr-create",
+    };
+    let idempotencyHash: string | undefined;
+    let idempotencyResponse: unknown;
+    let transitionCalls = 0;
+    const client = {
+      query: vi.fn(async (sql: string, values?: readonly unknown[]) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"')) {
+          if (idempotencyHash !== undefined) return { rowCount: 0, rows: [] };
+          idempotencyHash = String(values?.[2]);
+          return { rowCount: 1, rows: [{ id: "cancel-idempotency" }] };
+        }
+        if (sql.includes("SELECT request_hash, status_code, response")) {
+          return {
+            rows: [
+              { request_hash: idempotencyHash, status_code: 202, response: idempotencyResponse },
+            ],
+          };
+        }
+        if (sql.includes('UPDATE "import_job"')) {
+          transitionCalls += 1;
+          row.state = "cancel_requested";
+          row.version += 1;
+          return { rows: [row] };
+        }
+        if (sql.includes('SELECT * FROM "import_job"')) return { rows: [row] };
+        if (sql.includes("INSERT INTO audit_event")) return { rows: [] };
+        if (sql.includes('UPDATE "idempotency_key"')) {
+          idempotencyResponse = values?.[3];
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const store = new PostgresImportStore({ connect: vi.fn(async () => client) } as never);
+    const requester = { actorId, correlationId: "corr-cancel", origin: "api" as const };
+
+    const first = await store.requestCancel(row.id, workspaceId, requester, "cancel-key-123456");
+    const second = await store.requestCancel(row.id, workspaceId, requester, "cancel-key-123456");
+
+    expect(first.state).toBe("cancel_requested");
+    expect(second).toEqual(first);
+    expect(transitionCalls).toBe(1);
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO "idempotency_key"'),
+      expect.arrayContaining(["cancel-key-123456"]),
+    );
+  });
+
+  it("permite que o store reproduza um retry idempotente após o job já estar enfileirado", async () => {
+    const calls: unknown[] = [];
+    const queuedJob = { id: "job-retry", workspaceId, state: "queued" } as ImportJobRecord;
+    const store = {
+      getJob: async () => queuedJob,
+      retry: async (...args: unknown[]) => {
+        calls.push(args);
+        return queuedJob;
+      },
+    } as unknown as ImportStore;
+    const app = new ImportApplication(store, source([]), new MemoryCommands());
+
+    await expect(
+      app.retry(
+        queuedJob.id,
+        workspaceId,
+        { actorId, correlationId: "corr-retry", origin: "api" },
+        "retry-key-123456",
+      ),
+    ).resolves.toBe(queuedJob);
+    expect(calls[0]).toEqual([
+      queuedJob.id,
+      workspaceId,
+      { actorId, correlationId: "corr-retry", origin: "api" },
+      "retry-key-123456",
+    ]);
   });
 
   it("propaga o lease de execução para cada lote e renova antes da leitura", async () => {

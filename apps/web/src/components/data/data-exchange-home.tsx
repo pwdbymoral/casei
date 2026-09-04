@@ -66,6 +66,7 @@ import {
   type ImportJob,
   type ImportLocale,
   type ImportPreview,
+  importJobCanRetry,
   importStatusLabel,
   MAX_IMPORT_ROWS,
   serializeImportErrorReport,
@@ -179,16 +180,19 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [file, setFile] = useState<File | null>(null);
   const [domain, setDomain] = useState<Exclude<DataDomain, "complete">>("transactions");
   const [locale, setLocale] = useState<ImportLocale>("pt-BR");
+  const [sheetName, setSheetName] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [mappingDirty, setMappingDirty] = useState(false);
   const [previewStatus, setPreviewStatus] = useState<SurfaceStatus>("idle");
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [duplicatePolicy, setDuplicatePolicy] = useState<DuplicatePolicy>("ignore");
+  const [acceptedDuplicateLines, setAcceptedDuplicateLines] = useState<number[]>([]);
   const [applyMode, setApplyMode] = useState<ImportApplyMode>("valid_only");
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importPending, setImportPending] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   const [retryPending, setRetryPending] = useState(false);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportStatus, setExportStatus] = useState<SurfaceStatus>("loading");
@@ -209,6 +213,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [exportCategoryId] = useState<string | null>(() => searchParams.get("categoryId") || null);
   const [activeExport, setActiveExport] = useState<ExportJob | null>(null);
   const importOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
+  const cancelOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const retryOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
   const exportOperation = useRef<DataExchangeOperationState>({ pending: false, key: null });
 
@@ -286,6 +291,8 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     const next = event.target.files?.[0] ?? null;
     setFile(next);
     setPreview(null);
+    setSheetName("");
+    setAcceptedDuplicateLines([]);
     setMapping({});
     setMappingDirty(false);
     setPreviewStatus("idle");
@@ -293,6 +300,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setImportJob(null);
     setImportError(null);
     importOperation.current.key = null;
+    cancelOperation.current.key = null;
     retryOperation.current.key = null;
   }
 
@@ -301,9 +309,16 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setPreviewStatus("loading");
     setPreviewError(null);
     try {
-      const next = await adapter.previewImport(workspaceId, { file, domain, locale, mapping });
+      const next = await adapter.previewImport(workspaceId, {
+        file,
+        domain,
+        locale,
+        mapping,
+        ...(sheetName.trim() ? { sheetName: sheetName.trim() } : {}),
+      });
       setPreview(next);
       setMapping({ ...next.mapping });
+      setAcceptedDuplicateLines([]);
       setMappingDirty(false);
       importOperation.current.key = null;
       setPreviewStatus("success");
@@ -329,7 +344,14 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       (key) =>
         adapter.startImport(
           workspaceId,
-          { preview, file, mapping, duplicatePolicy, applyMode },
+          {
+            preview,
+            file,
+            mapping,
+            duplicatePolicy,
+            applyMode,
+            ...(duplicatePolicy === "review" ? { acceptedDuplicateLines } : {}),
+          },
           key,
         ),
     );
@@ -348,10 +370,21 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
 
   async function cancelImport() {
     if (!importJob || terminalImport(importJob)) return;
+    const jobId = importJob.id;
+    const operation = beginDataExchangeOperation(
+      cancelOperation.current,
+      "cancel",
+      () => crypto.randomUUID(),
+      (key) => adapter.cancelImport(workspaceId, jobId, key),
+    );
+    if (!operation.started) return;
+    setCancelPending(true);
     try {
-      setImportJob(await adapter.cancelImport(workspaceId, importJob.id));
+      setImportJob(await operation.promise);
     } catch (error) {
       setImportError(errorMessage(error));
+    } finally {
+      setCancelPending(false);
     }
   }
 
@@ -433,6 +466,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       !mappingDirty &&
       (applyMode === "valid_only" || preview.counts.errors === 0),
   );
+  const duplicateRows = preview?.rows.filter((row) => row.status === "duplicate") ?? [];
   const exportSurfaceStatus = exportHistorySurfaceStatus(
     exportStatus === "idle" ? "loading" : exportStatus,
     exportJobs.length > 0,
@@ -569,6 +603,28 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     <option value="en-US">Estados Unidos (mm/dd/aaaa)</option>
                   </select>
                 </Field>
+                {file?.name.toLocaleLowerCase("en-US").endsWith(".xlsx") ? (
+                  <Field>
+                    <FieldLabel htmlFor="import-sheet-name">Planilha (opcional)</FieldLabel>
+                    <Input
+                      id="import-sheet-name"
+                      value={sheetName}
+                      placeholder="Nome da planilha"
+                      disabled={
+                        !importAllowed || importPending || importJob?.status === "processing"
+                      }
+                      onChange={(event) => {
+                        setSheetName(event.target.value);
+                        setPreview(null);
+                        importOperation.current.key = null;
+                      }}
+                    />
+                    <FieldDescription>
+                      Se o arquivo tiver mais de uma planilha, informe o nome exibido no erro da
+                      prévia.
+                    </FieldDescription>
+                  </Field>
+                ) : null}
                 <div className="flex items-end">
                   <Button
                     type="button"
@@ -774,6 +830,65 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     </select>
                   </Field>
                 </div>
+                {duplicatePolicy === "review" && duplicateRows.length > 0 ? (
+                  <FieldSet className="rounded-lg border p-4">
+                    <FieldLegend>Duplicatas sugeridas</FieldLegend>
+                    <FieldDescription>
+                      Marque somente as linhas que deseja importar. As demais serão mantidas como
+                      ignoradas no resultado.
+                    </FieldDescription>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="min-h-11"
+                        onClick={() => {
+                          setAcceptedDuplicateLines(duplicateRows.map((row) => row.rowNumber));
+                          importOperation.current.key = null;
+                        }}
+                      >
+                        Marcar todas
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="min-h-11"
+                        onClick={() => {
+                          setAcceptedDuplicateLines([]);
+                          importOperation.current.key = null;
+                        }}
+                      >
+                        Desmarcar todas
+                      </Button>
+                    </div>
+                    <div className="grid max-h-56 gap-2 overflow-y-auto rounded-md border p-3 sm:grid-cols-2">
+                      {duplicateRows.map((row) => (
+                        <label
+                          className="flex min-h-11 items-center gap-2 rounded-md px-2 text-sm hover:bg-muted/60"
+                          key={row.rowNumber}
+                        >
+                          <input
+                            type="checkbox"
+                            className="size-4 accent-primary"
+                            checked={acceptedDuplicateLines.includes(row.rowNumber)}
+                            onChange={(event) => {
+                              setAcceptedDuplicateLines((current) => {
+                                const next = new Set(current);
+                                if (event.target.checked) next.add(row.rowNumber);
+                                else next.delete(row.rowNumber);
+                                importOperation.current.key = null;
+                                return [...next].sort((left, right) => left - right);
+                              });
+                            }}
+                          />
+                          <span>Linha {row.rowNumber}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </FieldSet>
+                ) : null}
                 <div className="flex flex-wrap items-center gap-3">
                   <Button
                     type="button"
@@ -864,11 +979,26 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                 ) : null}
                 <div className="flex flex-wrap gap-3">
                   {!terminalImport(importJob) ? (
-                    <Button type="button" variant="outline" onClick={() => void cancelImport()}>
-                      <PauseCircleIcon data-icon="inline-start" aria-hidden="true" /> Cancelar job
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={cancelPending}
+                      aria-busy={cancelPending}
+                      onClick={() => void cancelImport()}
+                    >
+                      {cancelPending ? (
+                        <LoaderCircleIcon
+                          data-icon="inline-start"
+                          className="animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <PauseCircleIcon data-icon="inline-start" aria-hidden="true" />
+                      )}
+                      {cancelPending ? "Cancelando…" : "Cancelar job"}
                     </Button>
                   ) : null}
-                  {importJob.status === "failed" || importJob.status === "canceled" ? (
+                  {importJobCanRetry(importJob) ? (
                     <Button
                       type="button"
                       variant="outline"

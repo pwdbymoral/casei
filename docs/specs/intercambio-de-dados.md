@@ -12,6 +12,7 @@ Planilhas reduzem o custo de adoção e garantem portabilidade. Importação pre
 - Entrada MVP: CSV UTF-8/Latin-1 detectável e XLSX sem macros.
 - Saída canônica: CSV UTF-8 com cabeçalho versionado; exportação completa pode gerar ZIP com um CSV por domínio e manifesto JSON.
 - Limites iniciais: 10 MB por arquivo, 50 mil linhas e uma planilha selecionada por operação. Limites são configuráveis no servidor e informados antes do upload.
+- O boundary HTTP multipart exige `Content-Length` válido e dentro do limite antes de chamar o parser; requisições chunked ou sem comprimento declarado são rejeitadas sem bufferizar o corpo.
 - Fórmulas são lidas pelo valor armazenado; macros, links externos e conteúdo executável nunca são executados.
 
 O núcleo `@casei/data` converte CSV e uma planilha XLSX visível selecionada para
@@ -42,6 +43,11 @@ O usuário pode salvar um perfil de mapeamento nomeado, sem armazenar o arquivo 
 - Exportações Casei carregam `casei_id` e são reconciliadas por esse identificador dentro do espaço.
 - Arquivos externos usam fingerprint normalizado por domínio, mas coincidência é apresentada como sugestão, não exclusão automática irreversível.
 - Políticas: ignorar prováveis duplicatas, importar mesmo assim ou revisar individualmente.
+- Na política `review`, a confirmação carrega os números de linha aceitos em
+  `acceptedDuplicateLines`; o servidor rejeita confirmação sem uma decisão que
+  cubra todas as duplicatas sugeridas ou com linhas que não pertencem ao
+  manifesto imutável. A interface pode revisar e selecionar as linhas antes de
+  confirmar, sem transformar uma sugestão em mutação silenciosa.
 - Repetir o mesmo job/chave não cria novos registros.
 
 ### Atomicidade e concorrência
@@ -79,6 +85,9 @@ proxy que revalida autorização pertencem à aplicação, não ao pacote puro.
 ## Privacidade e operação
 
 - Arquivo temporário é criptografado em trânsito e repouso, não vai para logs e expira automaticamente em até 24 horas.
+- O boundary multipart rejeita comprimento ausente, inválido ou acima de 10 MB
+  antes do parser, limita campos textuais a 256 KB e também confere o agregado
+  de arquivos e campos após o parse.
 - Apenas owner e member importam; viewer pode exportar somente os domínios que pode visualizar. Export completo é exclusivo do owner.
 - Eventos auditam quem iniciou, confirmou, baixou, cancelou ou reverteu, com contagens e hash, não conteúdo linha a linha.
 

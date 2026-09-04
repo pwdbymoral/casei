@@ -14,13 +14,7 @@ import {
 } from "@casei/contracts";
 import { IdempotencyConflictError } from "@casei/database";
 import type { Hono, MiddlewareHandler } from "hono";
-import {
-  ApiHttpError,
-  errorResponse,
-  InvalidCursorError,
-  notFoundError,
-  validationError,
-} from "./http/index.js";
+import { ApiHttpError, InvalidCursorError, notFoundError, validationError } from "./http/index.js";
 import { parseJsonBody, parseQuery } from "./http/parsing.js";
 import { requireIfMatch, setVersionHeaders } from "./http/preconditions.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
@@ -40,7 +34,6 @@ export interface StockRoutesOptions {
 /** Mounts the household stock vertical below /v1 using the authenticated workspace scope. */
 export function configureStockRoutes(router: Hono<ApiEnv>, options: StockRoutesOptions): void {
   const { service } = options;
-  router.onError((error, context) => errorResponse(context, stockErrorToHttp(error)));
   for (const path of [
     "/workspaces/:workspaceId/stock/products",
     "/workspaces/:workspaceId/stock/products/*",

@@ -294,7 +294,7 @@ export const importCreateRequestSchema = z.object({
   previewManifest: importPreviewManifestSchema,
   mode: importModeSchema,
   duplicatePolicy: importDuplicatePolicySchema,
-  acceptedDuplicateLines: z.array(z.number().int().min(1).max(50_000)).max(50_000).default([]),
+  acceptedDuplicateLines: z.array(z.number().int().min(2).max(50_001)).max(50_000).default([]),
   totalRows: z.number().int().min(1).max(50_000),
   validRows: z.number().int().min(0).max(50_000),
   duplicateRows: z.number().int().min(0).max(50_000),
@@ -319,6 +319,143 @@ export const importLineListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export type ImportLineListQuery = z.infer<typeof importLineListQuerySchema>;
+
+/** HTTP boundary contracts used by the web data-exchange surface. */
+export const dataExchangeDomainSchema = z.enum(["transactions", "products", "complete"]);
+export type DataExchangeDomain = z.infer<typeof dataExchangeDomainSchema>;
+
+export const dataExchangeFileFormatSchema = z.enum(["csv", "xlsx"]);
+export type DataExchangeFileFormat = z.infer<typeof dataExchangeFileFormatSchema>;
+
+export const dataExchangeLocaleSchema = z.enum(["pt-BR", "en-US"]);
+export type DataExchangeLocale = z.infer<typeof dataExchangeLocaleSchema>;
+
+export const exportFormatSchema = z.enum(["csv", "zip"]);
+export type ExportFormat = z.infer<typeof exportFormatSchema>;
+
+export const exportKindSchema = z.enum(["all", "income", "expense"]);
+
+export const civilDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+    if (year === 0 || month < 1 || month > 12 || day < 1) return false;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return day <= lastDay;
+  }, "date must be a real civil date");
+
+export const exportCreateRequestSchema = z.object({
+  domain: dataExchangeDomainSchema,
+  format: exportFormatSchema,
+  from: civilDateSchema.optional(),
+  to: civilDateSchema.optional(),
+  kind: exportKindSchema.optional(),
+  categoryId: z.string().trim().min(1).max(255).nullable().optional(),
+});
+export type ExportCreateRequest = z.infer<typeof exportCreateRequestSchema>;
+
+export const importPreviewRowSchema = z.object({
+  rowNumber: z.number().int().min(2).max(50_001),
+  cells: z.array(z.string()).max(256),
+  status: z.enum(["valid", "duplicate", "invalid"]),
+  errors: z.array(z.string()).max(50),
+  warnings: z.array(z.string()).max(50),
+});
+export type ImportPreviewRowContract = z.infer<typeof importPreviewRowSchema>;
+
+export const importPreviewResponseSchema = z.object({
+  id: z.string().trim().min(1).max(255),
+  workspaceId: workspaceIdSchema,
+  fileName: z.string().trim().min(1).max(255),
+  fileSize: z.number().int().min(1).max(10_000_000),
+  format: dataExchangeFileFormatSchema,
+  domain: importDomainSchema.exclude(["full"]),
+  headers: z.array(z.string().max(1_000)).max(256),
+  rows: z.array(importPreviewRowSchema).max(50_000),
+  fields: z.array(
+    z.object({
+      key: z.string().trim().min(1).max(100),
+      label: z.string().trim().min(1).max(255),
+      required: z.boolean(),
+      aliases: z.array(z.string().max(255)).max(50),
+    }),
+  ),
+  mapping: z.record(z.string().trim().min(1).max(100), z.string().max(1_000)),
+  unknownHeaders: z.array(z.string().max(1_000)).max(256),
+  locale: dataExchangeLocaleSchema,
+  sheetName: z.string().trim().min(1).max(255).optional(),
+  sheetIndex: z.number().int().nonnegative().max(255).optional(),
+  serverBacked: z.literal(true),
+  canConfirm: z.boolean(),
+  counts: z.object({
+    valid: z.number().int().nonnegative(),
+    warnings: z.number().int().nonnegative(),
+    duplicates: z.number().int().nonnegative(),
+    errors: z.number().int().nonnegative(),
+  }),
+  rowLimitExceeded: z.boolean().optional(),
+  message: z.string().max(1_000).optional(),
+  storageKey: z.string().trim().min(1).max(512),
+  sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  previewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  mappingVersion: z.string().trim().min(1).max(80),
+  previewManifest: importPreviewManifestSchema,
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type ImportPreviewResponse = z.infer<typeof importPreviewResponseSchema>;
+
+export const importJobStatusSchema = z.enum([
+  "queued",
+  "processing",
+  "completed",
+  "partial",
+  "failed",
+  "canceled",
+]);
+export type ImportJobStatusContract = z.infer<typeof importJobStatusSchema>;
+
+export const importJobResponseSchema = z.object({
+  id: z.string().trim().min(1).max(255),
+  workspaceId: workspaceIdSchema,
+  status: importJobStatusSchema,
+  progress: z.number().int().min(0).max(100),
+  totalRows: z.number().int().nonnegative(),
+  appliedRows: z.number().int().nonnegative(),
+  ignoredRows: z.number().int().nonnegative(),
+  rejectedRows: z.number().int().nonnegative(),
+  retryable: z.boolean(),
+  errors: z.array(
+    z.object({ rowNumber: z.number().int().min(0), message: z.string().min(1).max(500) }),
+  ),
+  createdAt: z.string().datetime({ offset: true }),
+  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  message: z.string().max(1_000).optional(),
+});
+export type ImportJobResponse = z.infer<typeof importJobResponseSchema>;
+
+export const exportJobStatusSchema = z.enum([
+  "queued",
+  "processing",
+  "completed",
+  "failed",
+  "expired",
+]);
+export type ExportJobStatusContract = z.infer<typeof exportJobStatusSchema>;
+
+export const exportJobResponseSchema = z.object({
+  id: z.string().trim().min(1).max(255),
+  workspaceId: workspaceIdSchema,
+  domain: dataExchangeDomainSchema,
+  format: exportFormatSchema,
+  status: exportJobStatusSchema,
+  progress: z.number().int().min(0).max(100),
+  fileName: z.string().trim().min(1).max(255).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  message: z.string().max(1_000).optional(),
+});
+export type ExportJobResponse = z.infer<typeof exportJobResponseSchema>;
 
 const stockBulkContentSchema = z
   .string()
@@ -453,18 +590,6 @@ export const errorEnvelopeSchema = z.object({
 });
 
 export type ErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
-
-const civilDateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine((value) => {
-    const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
-    if (year === 0 || month < 1 || month > 12 || day < 1) return false;
-    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    return day <= lastDay;
-  }, "date must be a real civil date");
-
-export { civilDateSchema };
 
 export const insightWindowQuerySchema = z
   .object({

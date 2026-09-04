@@ -46,6 +46,8 @@ export type ImportPreview = {
   mapping: Readonly<Record<string, string>>;
   unknownHeaders: readonly string[];
   locale: ImportLocale;
+  sheetName?: string;
+  sheetIndex?: number;
   serverBacked: boolean;
   canConfirm: boolean;
   counts: { valid: number; warnings: number; duplicates: number; errors: number };
@@ -62,6 +64,7 @@ export type ImportJob = {
   appliedRows: number;
   ignoredRows: number;
   rejectedRows: number;
+  retryable?: boolean;
   errors: readonly { rowNumber: number; message: string }[];
   createdAt: string;
   expiresAt: string | null;
@@ -86,12 +89,15 @@ export type PreviewImportInput = {
   domain: Exclude<DataDomain, "complete">;
   locale: ImportLocale;
   mapping?: Readonly<Record<string, string>>;
+  sheetName?: string;
+  sheetIndex?: number;
 };
 
 export type StartImportInput = {
   preview: ImportPreview;
   file: File;
   duplicatePolicy: DuplicatePolicy;
+  acceptedDuplicateLines?: readonly number[];
   applyMode: ImportApplyMode;
   mapping: Readonly<Record<string, string>>;
 };
@@ -114,7 +120,7 @@ export interface DataExchangeAdapter {
   ): Promise<ImportJob>;
   getImportJob(workspaceId: string, jobId: string): Promise<ImportJob>;
   retryImport(workspaceId: string, jobId: string, idempotencyKey: string): Promise<ImportJob>;
-  cancelImport(workspaceId: string, jobId: string): Promise<ImportJob>;
+  cancelImport(workspaceId: string, jobId: string, idempotencyKey: string): Promise<ImportJob>;
   listExportJobs(workspaceId: string): Promise<ExportJob[]>;
   createExport(
     workspaceId: string,
@@ -129,6 +135,10 @@ export type DataExchangeOperationState = {
   pending: boolean;
   key: string | null;
 };
+
+export function importJobCanRetry(job: Pick<ImportJob, "retryable">): boolean {
+  return job.retryable === true;
+}
 
 export type DataExchangeOperationStart<T> =
   | { started: false; key: string | null; promise: null }
@@ -557,6 +567,8 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
     form.set("domain", input.domain);
     form.set("locale", input.locale);
     if (input.mapping) form.set("mapping", JSON.stringify(input.mapping));
+    if (input.sheetName) form.set("sheetName", input.sheetName);
+    if (input.sheetIndex !== undefined) form.set("sheetIndex", String(input.sheetIndex));
     return requestJson<ImportPreview>(workspacePath(workspaceId, "/imports/previews"), {
       method: "POST",
       body: form,
@@ -575,6 +587,9 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
     form.set("previewId", input.preview.id);
     form.set("mapping", JSON.stringify(input.mapping));
     form.set("duplicatePolicy", input.duplicatePolicy);
+    if (input.acceptedDuplicateLines) {
+      form.set("acceptedDuplicateLines", JSON.stringify(input.acceptedDuplicateLines));
+    }
     form.set("applyMode", input.applyMode);
     return requestJson<ImportJob>(workspacePath(workspaceId, "/imports"), {
       method: "POST",
@@ -589,10 +604,10 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
       method: "POST",
       headers: { Accept: "application/json", "Idempotency-Key": idempotencyKey },
     }),
-  cancelImport: (workspaceId, jobId) =>
+  cancelImport: (workspaceId, jobId, idempotencyKey) =>
     requestJson(workspacePath(workspaceId, `/imports/${encodeURIComponent(jobId)}/cancel`), {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", "Idempotency-Key": idempotencyKey },
     }),
   listExportJobs: (workspaceId) => requestJson(workspacePath(workspaceId, "/exports")),
   createExport: (workspaceId, input, idempotencyKey) =>
@@ -629,6 +644,8 @@ const fixtureImports = new Map<string, ImportJob>();
 const fixtureExports = new Map<string, ExportJob>();
 const fixtureImportKeys = new Map<string, ImportJob>();
 const fixtureRetryKeys = new Map<string, ImportJob>();
+const fixtureCancelKeys = new Map<string, ImportJob>();
+const fixtureCancelFingerprints = new Map<string, string>();
 const fixtureExportKeys = new Map<string, ExportJob>();
 const fixtureImportFingerprints = new Map<string, string>();
 const fixtureRetryFingerprints = new Map<string, string>();
@@ -694,6 +711,9 @@ function rememberImport(job: ImportJob): ImportJob {
   for (const [key, value] of fixtureRetryKeys) {
     if (value.id === job.id) fixtureRetryKeys.set(key, job);
   }
+  for (const [key, value] of fixtureCancelKeys) {
+    if (value.id === job.id) fixtureCancelKeys.set(key, job);
+  }
   return job;
 }
 
@@ -720,28 +740,24 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     if (input.applyMode === "all_or_nothing" && input.preview.counts.errors > 0)
       throw new DataExchangeError("Tudo ou nada exige uma prévia sem erros.");
     const duplicateRows = input.preview.rows.filter((row) => row.status === "duplicate");
-    if (input.duplicatePolicy === "review" && duplicateRows.length > 0) {
-      const reviewJob: ImportJob = {
-        id: id("import"),
-        workspaceId,
-        status: "failed",
-        progress: 0,
-        totalRows: input.preview.rows.length,
-        appliedRows: 0,
-        ignoredRows: 0,
-        rejectedRows: duplicateRows.length,
-        errors: duplicateRows.map((row) => ({
-          rowNumber: row.rowNumber,
-          message: "Duplicata provável aguardando revisão; nenhuma linha foi aplicada.",
-        })),
-        createdAt: formatDate(new Date().toISOString()),
-        expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
-        message: "A política de revisão exige uma decisão antes de aplicar duplicatas prováveis.",
-      };
-      fixtureImportKeys.set(replayKey, reviewJob);
-      fixtureImportFingerprints.set(replayKey, fingerprint);
-      return rememberImport(reviewJob);
+    const duplicateLineNumbers = new Set(duplicateRows.map((row) => row.rowNumber));
+    const acceptedDuplicateLines = input.acceptedDuplicateLines ?? [];
+    if (
+      input.duplicatePolicy === "review" &&
+      acceptedDuplicateLines.some((line) => !duplicateLineNumbers.has(line))
+    ) {
+      throw new DataExchangeError("A seleção de duplicatas contém uma linha inválida.", 422);
     }
+    const acceptedDuplicates =
+      input.duplicatePolicy === "import"
+        ? duplicateRows.length
+        : input.duplicatePolicy === "review"
+          ? acceptedDuplicateLines.length
+          : 0;
+    const skippedDuplicates =
+      input.duplicatePolicy === "ignore"
+        ? duplicateRows.length
+        : Math.max(0, duplicateRows.length - acceptedDuplicates);
     const job: ImportJob = {
       id: id("import"),
       workspaceId,
@@ -749,11 +765,21 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
       progress: 0,
       totalRows: input.preview.rows.length,
       appliedRows: 0,
-      ignoredRows: input.duplicatePolicy === "ignore" ? input.preview.counts.duplicates : 0,
+      ignoredRows: skippedDuplicates,
       rejectedRows: input.preview.counts.errors,
       errors: input.preview.rows
-        .filter((row) => row.status === "invalid")
-        .map((row) => ({ rowNumber: row.rowNumber, message: row.errors.join(" ") })),
+        .filter(
+          (row) =>
+            row.status === "invalid" ||
+            (row.status === "duplicate" && !acceptedDuplicateLines.includes(row.rowNumber)),
+        )
+        .map((row) => ({
+          rowNumber: row.rowNumber,
+          message:
+            row.status === "duplicate"
+              ? "Duplicata provável não confirmada."
+              : row.errors.join(" "),
+        })),
       createdAt: formatDate(new Date().toISOString()),
       expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
     };
@@ -787,6 +813,12 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
     if (current.workspaceId !== workspaceId)
       throw fixturePermission("Esta importação pertence a outro espaço.");
+    if (current.status === "canceled") {
+      throw new DataExchangeError(
+        "Uma importação cancelada não está disponível para repetição.",
+        409,
+      );
+    }
     const replayKey = fixtureKey(workspaceId, idempotencyKey);
     const fingerprint = fixtureFingerprint({ jobId });
     const replay = fixtureRetryKeys.get(replayKey);
@@ -804,16 +836,25 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     fixtureRetryFingerprints.set(replayKey, fingerprint);
     return rememberImport(next);
   },
-  async cancelImport(workspaceId, jobId) {
+  async cancelImport(workspaceId, jobId, idempotencyKey) {
     const current = fixtureImports.get(jobId);
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
     if (current.workspaceId !== workspaceId)
       throw fixturePermission("Esta importação pertence a outro espaço.");
+    const replayKey = fixtureKey(workspaceId, idempotencyKey);
+    const fingerprint = fixtureFingerprint({ jobId });
+    const replay = fixtureCancelKeys.get(replayKey);
+    if (replay) {
+      if (fixtureCancelFingerprints.get(replayKey) !== fingerprint) throw fixturePayloadConflict();
+      return replay;
+    }
     const next = {
       ...current,
       status: "canceled" as const,
       message: "A aplicação foi cancelada; os lotes já confirmados foram mantidos.",
     };
+    fixtureCancelKeys.set(replayKey, next);
+    fixtureCancelFingerprints.set(replayKey, fingerprint);
     return rememberImport(next);
   },
   async listExportJobs(workspaceId) {

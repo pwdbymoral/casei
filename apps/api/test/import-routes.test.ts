@@ -43,7 +43,7 @@ describe("DATA-004 HTTP boundary", () => {
     });
 
     const response = await app.request(
-      `http://localhost/v1/workspaces/${workspaceId}/imports/job-1/lines?afterLine=2&limit=1`,
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/job-1/lines?afterLine=2&limit=1`,
     );
 
     expect(response.status).toBe(200);

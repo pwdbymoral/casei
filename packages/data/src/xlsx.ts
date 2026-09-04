@@ -398,7 +398,13 @@ function selectWorksheet(
   if (options.sheetName !== undefined) worksheet = workbook.getWorksheet(options.sheetName);
   else if (options.sheetIndex !== undefined) worksheet = workbook.worksheets[options.sheetIndex];
   else if (visible.length === 1) worksheet = visible[0];
-  else throw importError("sheet_selection_required", "Selecione uma planilha do XLSX.");
+  else {
+    const names = visible.map((item) => item.name).join(", ");
+    throw importError(
+      "sheet_selection_required",
+      `Selecione uma planilha do XLSX${names ? ` (${names})` : ""}.`,
+    );
+  }
   if (worksheet === undefined || worksheet.state !== "visible") {
     throw importError("sheet_not_found", "A planilha selecionada não existe ou está oculta.");
   }
