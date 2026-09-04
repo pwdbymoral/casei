@@ -99,8 +99,8 @@ FIN-005b (histórico auditável detalhado) e a validação E2E do Gate 2.
 
 - [x] **PLAN-001 Planejado/liquidação parcial (backend):** vencimento, valor planejado/efetivo, atraso derivado e múltiplas liquidações com idempotência, versão e delta no ledger. A UI de compromissos permanece em PLAN-005.
 - [x] **PLAN-002 Recurrence engine:** semanal/mensal/anual, variável/fixa, janela civil de 12 meses, meses curtos, pausa inclusiva, cancelamento auditável e job idempotente.
-- [ ] **PLAN-003 Edição de série:** somente esta, esta e futuras, futuras não liquidadas; preservar liquidadas e tratar exceções.
-- [ ] **PLAN-004 Installment engine:** distribuição exata de centavos, preview, edição e cancelamento futuro.
+- [x] **PLAN-003 Edição de série:** somente esta, esta e futuras, futuras não liquidadas; preservar liquidadas e tratar exceções. Implementação consolidada em `origin/main` por `0857813`, com hardenings de `ca93488` já presentes na árvore vigente.
+- [x] **PLAN-004 Installment engine:** distribuição exata de centavos, preview, edição e cancelamento futuro. Implementação consolidada em `origin/main` por `0857813`, com hardenings de `ca93488` já presentes na árvore vigente.
 - [ ] **PLAN-005 UI de compromissos:** próximos, vencidos, confirmar valor variável, pagar/receber parcial e editar escopo.
 
 **Gate 3:** relógio/fuso determinísticos; geração repetida não duplica; soma de parcelas é exata; histórico liquidado é imutável.
