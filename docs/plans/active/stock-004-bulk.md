@@ -1,6 +1,6 @@
 # Plano: STOCK-004 cadastro em lote
 
-- Status: pronto para revisão independente
+- Status: implementado; aguardando revisão independente
 - Spec: [estoque doméstico](../../specs/estoque-domestico.md)
 - Escopo: parser de linhas/colagem tabular, prévia e aplicação transacional pela API.
 
@@ -25,3 +25,14 @@
    separação de modos.
 3. Testes de contrato HTTP verificam preview, hash, idempotência e resposta
    sem aplicação silenciosa de inválidos.
+
+## Entrega web
+
+- A tela de estoque oferece cadastro em lote com colagem simples/tabular, prévia
+  linha a linha, contagem por resultado, filtro de aplicáveis/erros e confirmação
+  explícita entre `valid_only` e `all_or_nothing`.
+- O modo avançado converte a prévia em tabela editável, com campos de produto e
+  navegação normal por teclado; qualquer edição invalida a confirmação até uma
+  nova prévia. A ação de confirmação envia uma única chave de idempotência.
+- O adapter web mantém a mesma separação entre prévia e aplicação nos ambientes
+  HTTP e de fixtures.

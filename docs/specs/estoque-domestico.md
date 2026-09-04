@@ -115,7 +115,7 @@ ordenação retorna `422 validation_failed` no campo `cursor`.
 - [x] Produto pode ser criado somente com nome e enriquecido depois.
 - [x] Toda alteração de quantidade possui histórico append-only e o estoque não fica negativo.
 - [x] Estados de falta/baixo/ok correspondem às regras e não dependem só de cor.
-- [ ] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
+- [x] Cadastro em lote mostra prévia e não aplica linhas inválidas silenciosamente.
 - [x] Lista automática e item livre convivem sem duplicação.
 - [x] Concluir compra só altera estoque após confirmação explícita.
 - [x] A leitura autenticada da lista não muta dados; compra automática sem entrada não reaparece até uma movimentação real.
