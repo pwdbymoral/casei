@@ -82,7 +82,7 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 - [x] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
 - [x] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer por reversão auditável.
 - [x] **FIN-005 Linha do tempo — base:** busca, período, filtros em URL, paginação incremental, detalhe básico e estados de carregamento/vazio/erro.
-- [ ] **FIN-005b Histórico auditável:** detalhe com eventos de auditoria, origem, antes/depois sanitizado e consequências relacionadas.
+- [x] **FIN-005b Histórico auditável:** detalhe com eventos de auditoria, origem, antes/depois sanitizado e consequências relacionadas, com cursores assinados vinculados ao espaço e à transação.
 - [x] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia,
   confirmação atômica, `If-Match`, idempotência, validação de categoria/transações e auditoria
   sanitizada; revisão independente e validação final permanecem pendentes.
@@ -92,8 +92,8 @@ auditável, categorias, idempotência, isolamento por papel e moeda, além dos c
 necessários. A fatia FIN-004/FIN-005 acrescenta captura rápida e linha do tempo autenticadas, com
 filtros/cursor no contrato HTTP e desfazer por reversão. O FIN-002 materializa ajustes por saldo
 observado com prévia, idempotência, concorrência e auditoria; o FIN-003 acrescenta edição e
-cancelamento versionados, com bloqueios por origem e replay idempotente. Permanece pendente o
-FIN-005b (histórico auditável detalhado) e a validação E2E do Gate 2.
+cancelamento versionados, com bloqueios por origem e replay idempotente. Permanece pendente apenas
+a validação E2E do Gate 2.
 
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 

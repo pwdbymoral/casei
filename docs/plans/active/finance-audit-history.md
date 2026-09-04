@@ -1,6 +1,6 @@
 # Plano: histórico auditável financeiro por transação
 
-- Status: implementação pronta para rebase após integrar AUTH e estoque
+- Status: implementado; hardening de cursor pronto para integração
 - Spec associada: [financas.md](../../specs/financas.md#captura-rápida-e-linha-do-tempo)
 
 ## Objetivo
@@ -30,7 +30,7 @@ são criadas por `0005`; esta migration apenas reforça os grants de auditoria.
 
 - [x] Atualizar spec/plano e criar testes red antes da implementação.
 - [x] Migrar o schema de auditoria e cobrir grants/colunas em teste estrutural e integração quando disponível.
-- [x] Implementar contratos, persistência, cursores e endpoints autenticados.
+- [x] Implementar contratos, persistência, cursores vinculados ao espaço/transação e endpoints autenticados.
 - [x] Implementar adaptador HTTP/fixture e histórico no detalhe acessível da transação.
 - [x] Executar testes focados, lint e typecheck; build, navegador e integração PostgreSQL ficam para a validação da cadeia integrada.
 - [x] Atualizar documentação vigente, commit, push e PR sem merge.
@@ -44,7 +44,7 @@ a integração valida a leitura sob o role da aplicação quando `DATABASE_URL_T
 ## Riscos
 
 - Vazamento entre espaços ou transações: toda leitura filtra workspace e target e verifica a transação antes do evento.
-- Cursor manipulável: payload inclui ordenação/posição e é assinado com o segredo já usado pela timeline.
+- Cursor manipulável: payload inclui ordenação/posição, espaço e transação, e é assinado com o segredo já usado pela timeline; qualquer reutilização em outro escopo é rejeitada.
 - Dados sensíveis em auditoria: snapshots são produzidos por allowlist antes da persistência e
   novamente na leitura, sem valor, descrição, e-mail, token ou objetos desconhecidos.
 - Ambiente sem PostgreSQL/browser: manter testes unitários/estruturais e registrar a validação ausente.
