@@ -26,6 +26,23 @@ export type TodayDashboardData = {
   shoppingItems: StockShoppingItem[];
 };
 
+export type SafeToSpendCardState = {
+  kind: "unavailable" | "available" | "deficit";
+  ctaLabel: "Revisar dados necessários" | "Entender o cálculo" | "Revisar déficit";
+};
+
+/** Maps the read model's safe/gross pair to the actionable state shown on Hoje. */
+export function safeToSpendCardState(input: {
+  available: boolean;
+  gross: { minor: string } | null;
+}): SafeToSpendCardState {
+  if (!input.available) return { kind: "unavailable", ctaLabel: "Revisar dados necessários" };
+  if (input.gross !== null && BigInt(input.gross.minor) < BigInt(0)) {
+    return { kind: "deficit", ctaLabel: "Revisar déficit" };
+  }
+  return { kind: "available", ctaLabel: "Entender o cálculo" };
+}
+
 type CommitmentTransaction = Pick<
   Transaction,
   "id" | "kind" | "state" | "amount" | "settledAmount" | "dueOn" | "description"
