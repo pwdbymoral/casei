@@ -858,6 +858,10 @@ export const updateTransactionSchema = z
 
 export type UpdateTransactionInput = z.infer<typeof updateTransactionSchema>;
 
+/** Cancelling a planned transaction is an explicit, auditable command. */
+export const cancelTransactionSchema = z.object({ confirm: z.literal(true) });
+export type CancelTransactionInput = z.infer<typeof cancelTransactionSchema>;
+
 /** Effective settlement amount/date; omitted amount settles the remaining balance. */
 export const settleTransactionSchema = z.object({
   amount: positiveMoneySchema.optional(),
