@@ -1386,7 +1386,7 @@ export class FinanceService {
            FROM (
            SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
                     s.state, s.total_minor, s.paid_minor, c.currency_code, s.version,
-                    COALESCE((SELECT sum(ca.amount_minor) FROM card_credit_application ca
+                    COALESCE((SELECT sum(ca.remaining_minor) FROM card_credit_application ca
                                WHERE ca.workspace_id = s.workspace_id AND ca.statement_id = s.id
                                  AND ca.state = 'active'), 0) AS credit_applied_minor
                FROM credit_statement s
@@ -1420,7 +1420,7 @@ export class FinanceService {
       }>(
         `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
                 s.state, s.total_minor, s.paid_minor, c.currency_code, s.version,
-                COALESCE((SELECT sum(ca.amount_minor) FROM card_credit_application ca
+                COALESCE((SELECT sum(ca.remaining_minor) FROM card_credit_application ca
                            WHERE ca.workspace_id = s.workspace_id AND ca.statement_id = s.id
                              AND ca.state = 'active'), 0) AS credit_applied_minor
            FROM credit_statement s
@@ -1803,7 +1803,53 @@ export class FinanceService {
             }
           }
 
-          const nextTotal = BigInt(statement.total_minor) + input.amountMinor;
+          let restoredCreditMinor = 0n;
+          if (source && input.kind === "refund") {
+            let remainingRefund = -input.amountMinor;
+            const applications = await client.query<{
+              id: string;
+              credit_id: string;
+              remaining_minor: string;
+            }>(
+              `SELECT application.id, application.credit_id, application.remaining_minor
+                 FROM card_credit_application application
+                 JOIN card_credit credit
+                   ON credit.workspace_id = application.workspace_id
+                  AND credit.id = application.credit_id
+                WHERE application.workspace_id = $1
+                  AND application.transaction_id = $2
+                  AND application.state = 'active'
+                  AND application.remaining_minor > 0
+                ORDER BY application.created_at ASC, application.id ASC
+                FOR UPDATE OF application, credit`,
+              [scope.workspaceId, source.id],
+            );
+            for (const application of applications.rows) {
+              if (remainingRefund <= 0n) break;
+              const restored =
+                BigInt(application.remaining_minor) < remainingRefund
+                  ? BigInt(application.remaining_minor)
+                  : remainingRefund;
+              await client.query(
+                `UPDATE card_credit
+                    SET remaining_minor = remaining_minor + $1, state = 'active'
+                  WHERE workspace_id = $2 AND id = $3 AND state <> 'canceled'`,
+                [restored, scope.workspaceId, application.credit_id],
+              );
+              await client.query(
+                `UPDATE card_credit_application
+                    SET remaining_minor = remaining_minor - $1,
+                        state = CASE WHEN remaining_minor - $1 = 0 THEN 'reversed' ELSE 'active' END,
+                        reversed_at = CASE WHEN remaining_minor - $1 = 0 THEN now() ELSE reversed_at END
+                  WHERE workspace_id = $2 AND id = $3 AND state = 'active'`,
+                [restored, scope.workspaceId, application.id],
+              );
+              restoredCreditMinor += restored;
+              remainingRefund -= restored;
+            }
+          }
+
+          const nextTotal = BigInt(statement.total_minor) + input.amountMinor + restoredCreditMinor;
           if (nextTotal < 0n) {
             throw new FinanceConflictError("O ajuste não pode deixar o total da fatura negativo.");
           }
@@ -1900,6 +1946,17 @@ export class FinanceService {
           );
           const updatedStatement = updatedStatementResult.rows[0];
           if (!updatedStatement) throw new VersionConflictError(statement.version);
+          const composedStatement = await client.query(
+            `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version,
+                    COALESCE((SELECT sum(ca.remaining_minor) FROM card_credit_application ca
+                               WHERE ca.workspace_id = s.workspace_id AND ca.statement_id = s.id
+                                 AND ca.state = 'active'), 0) AS credit_applied_minor
+               FROM credit_statement s
+               JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
+              WHERE s.workspace_id = $1 AND s.id = $2`,
+            [scope.workspaceId, statementId],
+          );
           await this.recordTransactionAudit(
             client,
             scope,
@@ -1918,7 +1975,7 @@ export class FinanceService {
             statusCode: 201,
             response: {
               transaction: toTransactionView(transaction),
-              statement: toStatementView(updatedStatement),
+              statement: toStatementView(composedStatement.rows[0] ?? updatedStatement),
             } as unknown as JsonValue,
           };
         },
@@ -2098,9 +2155,9 @@ export class FinanceService {
             id: string;
             credit_id: string;
             statement_id: string;
-            amount_minor: string;
+            remaining_minor: string;
           }>(
-            `SELECT application.id, application.credit_id, application.statement_id, application.amount_minor
+            `SELECT application.id, application.credit_id, application.statement_id, application.remaining_minor
                FROM card_credit_application application
                JOIN card_credit credit
                  ON credit.workspace_id = application.workspace_id AND credit.id = application.credit_id
@@ -2113,7 +2170,7 @@ export class FinanceService {
           );
           const restoredByStatement = new Map<string, bigint>();
           for (const application of applications.rows) {
-            const restored = BigInt(application.amount_minor);
+            const restored = BigInt(application.remaining_minor);
             restoredByStatement.set(
               application.statement_id,
               (restoredByStatement.get(application.statement_id) ?? 0n) + restored,
@@ -4279,7 +4336,14 @@ export class FinanceService {
         WHERE workspace_id = $2 AND id = $3 AND state = 'open'`,
       [amount, workspaceId, statementRow.id],
     );
-    await this.applyCardCredits(client, workspaceId, cardId, statementRow.id, amount);
+    await this.applyCardCredits(
+      client,
+      workspaceId,
+      transactionId,
+      cardId,
+      statementRow.id,
+      amount,
+    );
     await client.query(
       `UPDATE finance_transaction SET statement_id = $1 WHERE workspace_id = $2 AND id = $3`,
       [statementRow.id, workspaceId, transactionId],
@@ -4289,6 +4353,7 @@ export class FinanceService {
   private async applyCardCredits(
     client: PgPoolClient,
     workspaceId: string,
+    transactionId: string,
     cardId: string,
     statementId: string,
     purchaseAmount: bigint,
@@ -4308,9 +4373,10 @@ export class FinanceService {
       const creditRemaining = BigInt(credit.remaining_minor);
       const applied = creditRemaining < remainingPurchase ? creditRemaining : remainingPurchase;
       await client.query(
-        `INSERT INTO card_credit_application (workspace_id, credit_id, statement_id, amount_minor)
-         VALUES ($1, $2, $3, $4)`,
-        [workspaceId, credit.id, statementId, applied],
+        `INSERT INTO card_credit_application
+           (workspace_id, credit_id, transaction_id, statement_id, amount_minor, remaining_minor)
+         VALUES ($1, $2, $3, $4, $5, $5)`,
+        [workspaceId, credit.id, transactionId, statementId, applied],
       );
       await client.query(
         `UPDATE card_credit

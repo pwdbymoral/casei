@@ -535,6 +535,21 @@ describe("CARD-004 statement payment PostgreSQL", () => {
         state: "open",
       });
 
+      const partialRefund = await finance.createStatementRefund(
+        scope,
+        futureStatement.id,
+        {
+          sourceTransactionId: futurePurchase.transaction.id,
+          amount: { currency: "BRL", minor: "200" },
+        },
+        "card-payment-future-refund-partial-001",
+        (await finance.getStatement(scope, futureStatement.id))?.version ?? 0,
+      );
+      expect(partialRefund.response.statement).toMatchObject({
+        total: { minor: "100" },
+        creditApplied: { minor: "300" },
+      });
+
       const transaction = await finance.getTransaction(scope, payment.response.transactionId);
       if (!transaction) throw new Error("expected payment transaction");
       const cardPayment = await fixture.pool.query<{ id: string }>(
@@ -555,9 +570,9 @@ describe("CARD-004 statement payment PostgreSQL", () => {
       expect(afterCancel?.openAmount.minor).toBe("1000");
       const restoredFuture = await finance.getStatement(scope, futureStatement.id);
       expect(restoredFuture).toMatchObject({
-        total: { minor: "600" },
+        total: { minor: "400" },
         paid: { minor: "0" },
-        openAmount: { minor: "600" },
+        openAmount: { minor: "400" },
         creditApplied: { minor: "0" },
         state: "open",
       });
@@ -576,6 +591,21 @@ describe("CARD-004 statement payment PostgreSQL", () => {
         [scope.workspaceId],
       );
       expect(applications.rows).toEqual([{ state: "reversed", amount_minor: "500" }]);
+      const totalRefund = await finance.createStatementRefund(
+        scope,
+        futureStatement.id,
+        {
+          sourceTransactionId: futurePurchase.transaction.id,
+          amount: { currency: "BRL", minor: "400" },
+        },
+        "card-payment-future-refund-total-001",
+        restoredFuture?.version ?? 0,
+      );
+      expect(totalRefund.response.statement).toMatchObject({
+        total: { minor: "0" },
+        paid: { minor: "0" },
+        creditApplied: { minor: "0" },
+      });
       const audit = await fixture.pool.query<{ action: string }>(
         `SELECT action FROM audit_event WHERE workspace_id = $1 AND target_id = $2 ORDER BY occurred_at`,
         [scope.workspaceId, payment.response.transactionId],
