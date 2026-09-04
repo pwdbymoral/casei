@@ -6,6 +6,18 @@ export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 
 export const versionSchema = z.number().int().nonnegative();
 
+export const pageSchema = z.object({
+  nextCursor: z.string().min(1).nullable(),
+  hasMore: z.boolean(),
+});
+
+/** Correlation IDs are uppercase ULIDs at the trusted HTTP boundary. */
+export const correlationIdSchema = z
+  .string()
+  .regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "correlation ID must be an uppercase ULID");
+
+export type CorrelationId = z.infer<typeof correlationIdSchema>;
+
 /** Domain identifiers are PostgreSQL UUIDv7 values in lowercase canonical form. */
 export const domainIdSchema = z
   .string()
@@ -206,6 +218,101 @@ export const adminPlatformRoleUpdateSchema = z.object({
 });
 export type AdminPlatformRoleUpdate = z.infer<typeof adminPlatformRoleUpdateSchema>;
 
+/** Jobs visible in the platform console never include their payload. */
+export const adminJobTypeSchema = z.enum(["data.import", "recurrence.expand"]);
+export type AdminJobType = z.infer<typeof adminJobTypeSchema>;
+export const adminJobStateSchema = z.enum([
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "dead",
+  "cancelled",
+]);
+export type AdminJobState = z.infer<typeof adminJobStateSchema>;
+export const adminJobSearchQuerySchema = z.object({
+  type: adminJobTypeSchema.optional(),
+  state: adminJobStateSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(512).optional(),
+});
+export type AdminJobSearchQuery = z.infer<typeof adminJobSearchQuerySchema>;
+const adminJobInstantSchema = z.string().datetime({ offset: true });
+export const adminJobSummarySchema = z.object({
+  id: domainIdSchema,
+  type: adminJobTypeSchema,
+  version: versionSchema,
+  workspaceId: workspaceIdSchema.nullable(),
+  actorId: userIdSchema.nullable(),
+  requiredCapability: z.string().max(100).nullable(),
+  state: adminJobStateSchema,
+  attempts: z.number().int().nonnegative(),
+  availableAt: adminJobInstantSchema,
+  leaseUntil: adminJobInstantSchema.nullable(),
+  correlationId: correlationIdSchema,
+  lastError: z.string().max(500).nullable(),
+  createdAt: adminJobInstantSchema,
+  updatedAt: adminJobInstantSchema,
+  retryable: z.boolean(),
+});
+export type AdminJobSummary = z.infer<typeof adminJobSummarySchema>;
+export const adminJobHealthSchema = z.object({
+  pending: z.number().int().nonnegative(),
+  running: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  dead: z.number().int().nonnegative(),
+  cancelled: z.number().int().nonnegative(),
+});
+export const adminJobListSchema = z.object({
+  items: z.array(adminJobSummarySchema),
+  page: pageSchema,
+  health: adminJobHealthSchema,
+});
+export type AdminJobList = z.infer<typeof adminJobListSchema>;
+export const adminJobRetrySchema = adminAccountActionSchema;
+export type AdminJobRetryInput = z.infer<typeof adminJobRetrySchema>;
+
+export const adminAuditSearchQuerySchema = z
+  .object({
+    actorId: userIdSchema.optional(),
+    targetId: z.string().trim().min(1).max(255).optional(),
+    action: z.string().trim().min(1).max(120).optional(),
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().min(1).max(512).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.from && value.to && new Date(value.from) > new Date(value.to)) {
+      context.addIssue({
+        code: "custom",
+        path: ["to"],
+        message: "O fim deve ser posterior ao início.",
+      });
+    }
+  });
+export type AdminAuditSearchQuery = z.infer<typeof adminAuditSearchQuerySchema>;
+export const adminAuditEventSchema = z.object({
+  id: domainIdSchema,
+  actorId: userIdSchema.nullable(),
+  targetId: z.string().max(255).nullable(),
+  action: z.string().min(1).max(120),
+  occurredAt: adminInstantSchema,
+  origin: z.string().min(1).max(100),
+  correlationId: correlationIdSchema,
+  ipAddress: z.string().max(64).nullable(),
+  endpoint: z.string().max(500).nullable(),
+  result: z.enum(["success", "failure"]),
+  reason: z.string().max(500),
+});
+export type AdminAuditEvent = z.infer<typeof adminAuditEventSchema>;
+export const adminAuditListSchema = z.object({
+  items: z.array(adminAuditEventSchema),
+  page: pageSchema,
+});
+export type AdminAuditList = z.infer<typeof adminAuditListSchema>;
+
 /** Invitation listings never include the bearer token or invite URL. */
 export const workspaceInvitationListItemSchema = invitationSchema.omit({ inviteUrl: true });
 export const workspaceInvitationsSchema = z.object({
@@ -218,13 +325,6 @@ export const deactivateWorkspaceSchema = z.object({
   workspaceName: z.string().trim().min(2).max(200),
   reason: z.string().trim().min(1).max(500),
 });
-
-/** Correlation IDs are uppercase ULIDs at the trusted HTTP boundary. */
-export const correlationIdSchema = z
-  .string()
-  .regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "correlation ID must be an uppercase ULID");
-
-export type CorrelationId = z.infer<typeof correlationIdSchema>;
 
 export const paginationQuerySchema = z.object({
   cursor: z.string().min(1).optional(),
@@ -624,11 +724,6 @@ export type PurchaseStockShoppingItemInput = z.infer<typeof purchaseStockShoppin
 
 export const stockShoppingListQuerySchema = paginationQuerySchema.extend({
   includePurchased: z.coerce.boolean().default(false),
-});
-
-export const pageSchema = z.object({
-  nextCursor: z.string().min(1).nullable(),
-  hasMore: z.boolean(),
 });
 
 export const errorCodeSchema = z.enum([

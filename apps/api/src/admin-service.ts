@@ -4,6 +4,12 @@ import type {
   AdminAccountDetail,
   AdminAccountList,
   AdminAccountSearchQuery,
+  AdminAuditList,
+  AdminAuditSearchQuery,
+  AdminJobList,
+  AdminJobRetryInput,
+  AdminJobSearchQuery,
+  AdminJobSummary,
   AdminPlatformRoleUpdate,
   PlatformRole,
 } from "@casei/contracts";
@@ -102,6 +108,9 @@ export interface AdminAccountStore {
     role: PlatformRole | null;
     suspended: boolean;
   }>;
+  searchJobs?(input: AdminJobSearchQuery): Promise<AdminJobList>;
+  retryJob?(jobId: string): Promise<AdminJobSummary>;
+  searchAudit?(input: AdminAuditSearchQuery): Promise<AdminAuditList>;
 }
 
 export interface AdminAuthPort {
@@ -149,6 +158,45 @@ export class AdminService {
     assertCanPerformPlatformAction(actor.platformRole, "account:read");
     assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
     return this.withActor(actor, () => this.requireAccount(userId));
+  }
+
+  async searchJobs(actor: AdminActor, input: AdminJobSearchQuery): Promise<AdminJobList> {
+    assertCanPerformPlatformAction(actor.platformRole, "job:read");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
+    if (!this.store.searchJobs) throw new Error("Job administration is unavailable");
+    const searchJobs = this.store.searchJobs.bind(this.store);
+    return this.withActor(actor, () => searchJobs(input));
+  }
+
+  async searchAudit(actor: AdminActor, input: AdminAuditSearchQuery): Promise<AdminAuditList> {
+    assertCanPerformPlatformAction(actor.platformRole, "job:read");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
+    if (!this.store.searchAudit) throw new Error("Audit administration is unavailable");
+    const searchAudit = this.store.searchAudit.bind(this.store);
+    return this.withActor(actor, () => searchAudit(input));
+  }
+
+  async retryJob(
+    actor: AdminActor,
+    jobId: string,
+    input: AdminJobRetryInput,
+    idempotencyKey: string,
+    correlationId: string,
+  ): Promise<CommandResult<AdminJobSummary>> {
+    assertCanPerformPlatformAction(actor.platformRole, "job:retry");
+    assertPlatformTwoFactor(actor.platformRole, actor.twoFactorEnabled);
+    assertRecentPlatformAuthentication(actor.recentAuthentication);
+    if (!this.store.retryJob) throw new Error("Job administration is unavailable");
+    const retryJob = this.store.retryJob.bind(this.store);
+    return this.executeCommand(
+      actor,
+      idempotencyKey,
+      correlationId,
+      "job:retry",
+      jobId,
+      input,
+      () => retryJob(jobId),
+    );
   }
 
   getPlatformSession(actor: AdminActor): {

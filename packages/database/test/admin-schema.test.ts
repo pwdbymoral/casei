@@ -42,3 +42,23 @@ test("ADMIN-001/002 journals platform schema with RLS and Better Auth two-factor
   assert.match(migration, /endpoint/i);
   assert.match(journal, /"idx": 22[\s\S]*"tag": "0022_platform_admin_and_step_up"/i);
 });
+
+test("ADMIN-003 scopes platform job visibility and retry independently from workspace RLS", async () => {
+  const migration = await readFile(
+    fileURLToPath(new URL("../drizzle/0023_platform_job_scope.sql", import.meta.url)),
+    "utf8",
+  );
+
+  assert.match(migration, /DROP POLICY IF EXISTS "job_scope" ON "job"/i);
+  assert.match(migration, /CREATE POLICY "job_platform_read" ON "job"\s+FOR SELECT/i);
+  assert.match(migration, /platform_admin.*platform_support/i);
+  assert.match(migration, /CREATE POLICY "job_platform_retry" ON "job"\s+FOR UPDATE/i);
+  assert.match(migration, /job_type IN \('data\.import', 'recurrence\.expand'\)/i);
+  assert.match(migration, /state IN \('failed', 'dead'\)/i);
+  assert.match(migration, /WITH CHECK[\s\S]*state = 'pending'/i);
+  const journal = await readFile(
+    fileURLToPath(new URL("../drizzle/meta/_journal.json", import.meta.url)),
+    "utf8",
+  );
+  assert.match(journal, /"idx": 23[\s\S]*"tag": "0023_platform_job_scope"/i);
+});

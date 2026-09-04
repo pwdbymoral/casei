@@ -6,6 +6,11 @@ import type {
   AdminAccountList,
   AdminAccountSearchQuery,
   AdminAccountSummary,
+  AdminAuditList,
+  AdminAuditSearchQuery,
+  AdminJobList,
+  AdminJobSearchQuery,
+  AdminJobSummary,
   PlatformRole,
 } from "@casei/contracts";
 import type { Pool, PoolClient } from "@casei/database";
@@ -19,6 +24,7 @@ import {
   type AdminEmailDeliveryAudit,
   AdminNotFoundError,
 } from "./admin-service.js";
+import { decodeCursor, encodeCursor, InvalidCursorError } from "./http/cursor.js";
 
 type QueryResultRow = Record<string, unknown>;
 type AccountRow = QueryResultRow & {
@@ -42,12 +48,58 @@ type SessionRow = QueryResultRow & {
   user_agent: string | null;
 };
 
+type JobRow = QueryResultRow & {
+  id: string;
+  job_type: string;
+  job_version: number;
+  workspace_id: string | null;
+  actor_id: string | null;
+  required_capability: string | null;
+  state: string;
+  attempts: number;
+  available_at: Date;
+  lease_until: Date | null;
+  correlation_id: string;
+  last_error: string | null;
+  created_at: Date;
+  created_at_cursor: string;
+  updated_at: Date;
+};
+
+type AuditRow = QueryResultRow & {
+  id: string;
+  actor_id: string | null;
+  target_id: string | null;
+  action: string;
+  occurred_at: Date;
+  occurred_at_cursor: string;
+  origin: string;
+  correlation_id: string;
+  ip_address: string | null;
+  endpoint: string | null;
+  result: string;
+  reason: string;
+};
+
+const ADMIN_CURSOR_SECRET = process.env.CASEI_ADMIN_CURSOR_SECRET ?? "casei-admin-cursor-mvp-2026";
+const JOB_CURSOR_ORDERING = "admin-jobs:created_at,id:desc";
+const AUDIT_CURSOR_ORDERING = "admin-audit:occurred_at,id:desc";
+
 export class AdminIdempotencyConflictError extends Error {
   readonly code = "idempotency_conflict" as const;
 
   constructor() {
     super("The idempotency key was already used with different content");
     this.name = "AdminIdempotencyConflictError";
+  }
+}
+
+export class AdminJobNotReadyError extends Error {
+  readonly code = "job_not_ready" as const;
+
+  constructor() {
+    super("This job cannot be retried");
+    this.name = "AdminJobNotReadyError";
   }
 }
 
@@ -223,6 +275,134 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
       userId,
     ]);
     if (result.rowCount !== 1) throw new AdminNotFoundError();
+  }
+
+  async searchJobs(input: AdminJobSearchQuery): Promise<AdminJobList> {
+    const cursor = decodePosition(input.cursor, JOB_CURSOR_ORDERING);
+    const rows = await this.query<JobRow>(
+      `SELECT id, job_type, job_version, workspace_id, actor_id, required_capability,
+              state, attempts, available_at, lease_until, correlation_id, last_error,
+              created_at, created_at::text AS created_at_cursor, updated_at
+         FROM job
+        WHERE job_type IN ('data.import', 'recurrence.expand')
+          AND ($1::text IS NULL OR job_type = $1)
+          AND ($2::text IS NULL OR state = $2)
+          AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4::uuid))
+        ORDER BY created_at DESC, id DESC
+        LIMIT $5`,
+      [
+        input.type ?? null,
+        input.state ?? null,
+        cursor?.[0] ?? null,
+        cursor?.[1] ?? null,
+        input.limit + 1,
+      ],
+    );
+    const healthResult = await this.query<{ state: string; count: string }>(
+      `SELECT state, count(*)::text AS count
+         FROM job
+        WHERE job_type IN ('data.import', 'recurrence.expand')
+          AND ($1::text IS NULL OR job_type = $1)
+          AND ($2::text IS NULL OR state = $2)
+        GROUP BY state`,
+      [input.type ?? null, input.state ?? null],
+    );
+    const health = {
+      pending: 0,
+      running: 0,
+      succeeded: 0,
+      failed: 0,
+      dead: 0,
+      cancelled: 0,
+    };
+    for (const row of healthResult.rows) {
+      if (row.state in health) health[row.state as keyof typeof health] = Number(row.count);
+    }
+    const hasMore = rows.rows.length > input.limit;
+    const visibleRows = rows.rows.slice(0, input.limit);
+    const items = visibleRows.map(toAdminJobSummary);
+    const last = visibleRows.at(-1);
+    return {
+      items,
+      page: {
+        hasMore,
+        nextCursor:
+          hasMore && last
+            ? encodeCursor(
+                { ordering: JOB_CURSOR_ORDERING, position: [last.created_at_cursor, last.id] },
+                ADMIN_CURSOR_SECRET,
+              )
+            : null,
+      },
+      health,
+    };
+  }
+
+  async retryJob(jobId: string): Promise<AdminJobSummary> {
+    const result = await this.query<JobRow>(
+      `UPDATE job
+          SET state = 'pending', lease_until = NULL, lease_token = NULL,
+              available_at = now(), last_error = NULL, updated_at = now()
+        WHERE id = $1
+          AND job_type IN ('data.import', 'recurrence.expand')
+          AND state IN ('failed', 'dead')
+      RETURNING id, job_type, job_version, workspace_id, actor_id, required_capability,
+                state, attempts, available_at, lease_until, correlation_id, last_error,
+                created_at, created_at::text AS created_at_cursor, updated_at`,
+      [jobId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new AdminJobNotReadyError();
+    return toAdminJobSummary(row);
+  }
+
+  async searchAudit(input: AdminAuditSearchQuery): Promise<AdminAuditList> {
+    const cursor = decodePosition(input.cursor, AUDIT_CURSOR_ORDERING);
+    const cutoff = new Date(Date.now() - 365 * 24 * 60 * 60 * 1_000);
+    const from = input.from ? new Date(input.from) : cutoff;
+    const lowerBound = from > cutoff ? from : cutoff;
+    const to = input.to ? new Date(input.to) : null;
+    const rows = await this.query<AuditRow>(
+      `SELECT id, actor_id, target_id, action, occurred_at, origin, correlation_id,
+              ip_address, endpoint, result, reason,
+              occurred_at::text AS occurred_at_cursor
+         FROM platform_audit_event
+        WHERE occurred_at >= $1
+          AND ($2::timestamptz IS NULL OR occurred_at <= $2)
+          AND ($3::text IS NULL OR actor_id = $3)
+          AND ($4::text IS NULL OR target_id = $4)
+          AND ($5::text IS NULL OR action = $5)
+          AND ($6::timestamptz IS NULL OR (occurred_at, id) < ($6, $7::uuid))
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT $8`,
+      [
+        lowerBound,
+        to,
+        input.actorId ?? null,
+        input.targetId ?? null,
+        input.action ?? null,
+        cursor?.[0] ?? null,
+        cursor?.[1] ?? null,
+        input.limit + 1,
+      ],
+    );
+    const hasMore = rows.rows.length > input.limit;
+    const visibleRows = rows.rows.slice(0, input.limit);
+    const items = visibleRows.map(toAdminAuditEvent);
+    const last = visibleRows.at(-1);
+    return {
+      items,
+      page: {
+        hasMore,
+        nextCursor:
+          hasMore && last
+            ? encodeCursor(
+                { ordering: AUDIT_CURSOR_ORDERING, position: [last.occurred_at_cursor, last.id] },
+                ADMIN_CURSOR_SECRET,
+              )
+            : null,
+      },
+    };
   }
 
   async recordAudit(input: {
@@ -691,6 +871,69 @@ export class PostgresAdminRateLimiter implements AdminRateLimiter {
       client.release();
     }
   }
+}
+
+function decodePosition(cursor: string | undefined, ordering: string): [string, string] | null {
+  if (!cursor) return null;
+  const decoded = decodeCursor(cursor, ADMIN_CURSOR_SECRET);
+  if (
+    decoded.ordering !== ordering ||
+    !Array.isArray(decoded.position) ||
+    decoded.position.length !== 2 ||
+    typeof decoded.position[0] !== "string" ||
+    typeof decoded.position[1] !== "string"
+  ) {
+    throw new InvalidCursorError();
+  }
+  return [decoded.position[0], decoded.position[1]];
+}
+
+function toAdminJobSummary(row: JobRow): AdminJobSummary {
+  const type =
+    row.job_type === "data.import" || row.job_type === "recurrence.expand"
+      ? row.job_type
+      : "data.import";
+  const state = row.state as AdminJobSummary["state"];
+  return {
+    id: row.id,
+    type,
+    version: row.job_version,
+    workspaceId: row.workspace_id,
+    actorId: row.actor_id,
+    requiredCapability: row.required_capability,
+    state,
+    attempts: row.attempts,
+    availableAt: row.available_at.toISOString(),
+    leaseUntil: row.lease_until?.toISOString() ?? null,
+    correlationId: row.correlation_id,
+    lastError: sanitizeJobError(row.last_error),
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+    retryable:
+      (state === "failed" || state === "dead") &&
+      (type === "data.import" || type === "recurrence.expand"),
+  };
+}
+
+function toAdminAuditEvent(row: AuditRow) {
+  return {
+    id: row.id,
+    actorId: row.actor_id,
+    targetId: row.target_id,
+    action: row.action,
+    occurredAt: row.occurred_at.toISOString(),
+    origin: row.origin,
+    correlationId: row.correlation_id,
+    ipAddress: row.ip_address,
+    endpoint: row.endpoint,
+    result: row.result === "failure" ? "failure" : "success",
+    reason: row.reason.slice(0, 500),
+  } as const;
+}
+
+function sanitizeJobError(value: string | null): string | null {
+  if (!value) return null;
+  return value.replace(/[\r\n\t]+/g, " ").slice(0, 500);
 }
 
 function hashStepUpToken(token: string): string {

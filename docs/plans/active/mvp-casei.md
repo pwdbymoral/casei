@@ -193,8 +193,8 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 
 - [ ] **ADMIN-001 Papéis de plataforma/bootstrap:** primeiro admin por procedimento único, promoção posterior no console, proteção do último admin.
 - [ ] **ADMIN-002 Console de contas:** busca e metadados mínimos, suspensão/reativação, sessões e reenvios.
-- [ ] **ADMIN-003 Operação de jobs:** saúde, dead-letter, retry idempotente e correlation IDs sem conteúdo sensível.
-- [ ] **ADMIN-004 Auditoria administrativa:** motivo obrigatório, filtros, retenção e step-up para ações críticas.
+- [x] **ADMIN-003 Operação de jobs:** saúde, dead-letter, retry idempotente e correlation IDs sem conteúdo sensível.
+- [x] **ADMIN-004 Auditoria administrativa:** motivo obrigatório, filtros, retenção e step-up para ações críticas.
 - [ ] **SEC-001 Threat model:** autenticação, isolamento, import, admin, PWA cache, logs e supply chain; resolver riscos altos.
 - [ ] **SEC-002 Privacidade/operação:** termos aprovados quando aplicável, operacionalizar a política de retenção já aprovada (30/35/365 dias), exportação/exclusão do titular, backup/restore testado e runbooks.
 - [ ] **QA-001 Matriz E2E:** jornadas críticas em mobile/desktop, dois usuários/dois espaços, calendário, falhas de rede e concorrência.

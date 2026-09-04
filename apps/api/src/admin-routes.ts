@@ -1,13 +1,23 @@
 import {
   adminAccountActionSchema,
   adminAccountSearchQuerySchema,
+  adminAuditSearchQuerySchema,
+  adminJobRetrySchema,
+  adminJobSearchQuerySchema,
   adminPlatformRoleUpdateSchema,
+  domainIdSchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
 import { z } from "zod";
 import type { AdminService } from "./admin-service.js";
 import type { ApiContext, ApiEnv, RequestActor } from "./http/index.js";
-import { ApiHttpError, parseJsonBody, parseQuery, rateLimitedError } from "./http/index.js";
+import {
+  ApiHttpError,
+  parseJsonBody,
+  parseQuery,
+  rateLimitedError,
+  validationError,
+} from "./http/index.js";
 
 const DEFAULT_ADMIN_RATE_LIMIT = 60;
 const DEFAULT_ADMIN_RATE_WINDOW_SECONDS = 60;
@@ -149,6 +159,32 @@ export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesO
       parseQuery(context, adminAccountSearchQuerySchema),
     );
     return context.json(result);
+  });
+
+  router.get("/admin/jobs", async (context) => {
+    return context.json(
+      await service.searchJobs(actorOf(context), parseQuery(context, adminJobSearchQuerySchema)),
+    );
+  });
+
+  router.post("/admin/jobs/:jobId/retry", async (context) => {
+    const parsedJobId = domainIdSchema.safeParse(context.req.param("jobId"));
+    if (!parsedJobId.success) throw validationError(parsedJobId.error);
+    const result = await service.retryJob(
+      actorOf(context),
+      parsedJobId.data,
+      await parseJsonBody(context, adminJobRetrySchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(result.result);
+  });
+
+  router.get("/admin/audit", async (context) => {
+    return context.json(
+      await service.searchAudit(actorOf(context), parseQuery(context, adminAuditSearchQuerySchema)),
+    );
   });
 
   router.get("/admin/accounts/:userId", async (context) => {

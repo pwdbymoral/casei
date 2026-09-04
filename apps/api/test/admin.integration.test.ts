@@ -10,6 +10,101 @@ const adminUrl = process.env.DATABASE_URL_TEST;
 const integrationIt = adminUrl ? it : it.skip;
 
 describe("ADMIN PostgreSQL boundary", () => {
+  integrationIt(
+    "lets platform operators inspect import/recurrence jobs without workspace context",
+    async () => {
+      if (!adminUrl) return;
+      const adminPool = getDatabasePool({ connectionString: adminUrl });
+      const suffix = randomUUID().replaceAll("-", "");
+      const databaseName = `casei_admin_jobs_${suffix}`;
+      const databaseUrl = new URL(adminUrl);
+      databaseUrl.pathname = `/${databaseName}`;
+      let pool: ReturnType<typeof getDatabasePool> | undefined;
+      try {
+        await ensureApplicationRole(adminPool);
+        await adminPool.query(`CREATE DATABASE "${databaseName}"`);
+        pool = getDatabasePool({ connectionString: databaseUrl.toString() });
+        pool.on("error", () => undefined);
+        await migrate(createDatabase(pool), {
+          migrationsFolder: fileURLToPath(
+            new URL("../../../packages/database/drizzle", import.meta.url),
+          ),
+        });
+        const adminId = `jobs-admin-${suffix}`;
+        const supportId = `jobs-support-${suffix}`;
+        await pool.query(
+          `INSERT INTO "user" (id, name, email, email_verified) VALUES
+          ($1, 'Jobs admin', $2, true), ($3, 'Jobs support', $4, true)`,
+          [adminId, `${adminId}@example.test`, supportId, `${supportId}@example.test`],
+        );
+        await pool.query(
+          `INSERT INTO platform_account (user_id, role, status, version) VALUES
+          ($1, 'platform_admin', 'active', 1), ($2, 'platform_support', 'active', 1)`,
+          [adminId, supportId],
+        );
+        const workspace = await pool.query<{ id: string }>(
+          `INSERT INTO workspace (name, status) VALUES ('Jobs workspace', 'active') RETURNING id`,
+        );
+        const workspaceId = workspace.rows[0]?.id;
+        expect(workspaceId).toBeTruthy();
+        const correlationId = "01J00000000000000000000010";
+        const jobs = await pool.query<{ id: string }>(
+          `INSERT INTO job
+          (job_type, job_version, workspace_id, actor_id, required_capability,
+           idempotency_key, payload, state, attempts, correlation_id, last_error)
+         VALUES
+          ('data.import', 1, $1, $2, 'import', $3, '{}'::jsonb, 'failed', 2, $4, $5),
+          ('recurrence.expand', 1, $1, NULL, 'system.recurrence', $6, '{}'::jsonb, 'dead', 4, $4, 'recurrence failed')
+         RETURNING id`,
+          [
+            workspaceId,
+            adminId,
+            `import:${suffix}`,
+            correlationId,
+            "sensitive\nerror",
+            `recurrence:${suffix}`,
+          ],
+        );
+        const importId = jobs.rows[0]?.id;
+        const recurrenceId = jobs.rows[1]?.id;
+        if (!workspaceId || !importId || !recurrenceId)
+          throw new Error("job fixtures were not created");
+
+        const store = new PostgresAdminAccountStore(pool);
+        const visible = await store.withActor(adminId, () => store.searchJobs({ limit: 10 }));
+        expect(visible.items.map((job) => job.type).sort()).toEqual([
+          "data.import",
+          "recurrence.expand",
+        ]);
+        expect(visible.items.find((job) => job.id === importId)?.lastError).toBe("sensitive error");
+        expect(visible.health.failed).toBe(1);
+        expect(visible.health.dead).toBe(1);
+
+        const supportVisible = await store.withActor(supportId, () =>
+          store.searchJobs({ limit: 10 }),
+        );
+        expect(supportVisible.items).toHaveLength(2);
+        await expect(
+          store.withActor(supportId, () => store.retryJob(importId)),
+        ).rejects.toMatchObject({
+          code: "job_not_ready",
+        });
+
+        const retried = await store.withActor(adminId, () => store.retryJob(importId));
+        expect(retried.state).toBe("pending");
+        const persisted = await pool.query<{ state: string; workspace_id: string }>(
+          `SELECT state, workspace_id FROM job WHERE id = $1`,
+          [importId],
+        );
+        expect(persisted.rows[0]).toEqual({ state: "pending", workspace_id: workspaceId });
+      } finally {
+        await pool?.end();
+        await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+        await adminPool.end();
+      }
+    },
+  );
+
   integrationIt("reads third-party workspace metadata through controlled functions", async () => {
     if (!adminUrl) return;
     const adminPool = getDatabasePool({ connectionString: adminUrl });

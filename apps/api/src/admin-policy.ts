@@ -6,6 +6,8 @@ export type PlatformAdminAction =
   | "account:reactivate"
   | "session:revoke"
   | "auth:resend"
+  | "job:read"
+  | "job:retry"
   | "platform-role:change";
 
 export type AdminPolicyCode =
@@ -30,6 +32,7 @@ const SUPPORT_ACTIONS = new Set<PlatformAdminAction>([
   "account:reactivate",
   "session:revoke",
   "auth:resend",
+  "job:read",
 ]);
 
 export function assertCanPerformPlatformAction(

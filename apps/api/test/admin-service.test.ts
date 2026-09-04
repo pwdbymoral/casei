@@ -1,4 +1,10 @@
-import type { AdminAccountDetail, AdminAccountList, PlatformRole } from "@casei/contracts";
+import type {
+  AdminAccountDetail,
+  AdminAccountList,
+  AdminJobList,
+  AdminJobSummary,
+  PlatformRole,
+} from "@casei/contracts";
 import { describe, expect, it } from "vitest";
 import {
   type AdminAccountStore,
@@ -54,6 +60,7 @@ class MemoryAdminStore implements AdminAccountStore {
   audits: Array<{ action: string; reason: string }> = [];
   auditResults: Array<"success" | "failure"> = [];
   private readonly results = new Map<string, unknown>();
+  jobs: AdminJobSummary[] = [];
 
   async searchAccounts(): Promise<AdminAccountList> {
     return { items: [this.current], page: { nextCursor: null, hasMore: false } };
@@ -103,6 +110,27 @@ class MemoryAdminStore implements AdminAccountStore {
     this.results.set(id, result);
     void request;
     return { replayed: false, result };
+  }
+
+  async searchJobs(): Promise<AdminJobList> {
+    return {
+      items: this.jobs,
+      page: { nextCursor: null, hasMore: false },
+      health: {
+        pending: 0,
+        running: 0,
+        succeeded: 0,
+        failed: 0,
+        dead: this.jobs.length,
+        cancelled: 0,
+      },
+    };
+  }
+
+  async retryJob(jobId: string): Promise<AdminJobSummary> {
+    const job = this.jobs.find((candidate) => candidate.id === jobId);
+    if (!job) throw Object.assign(new Error("not ready"), { code: "job_not_ready" });
+    return { ...job, state: "pending", retryable: false };
   }
 }
 
@@ -423,5 +451,54 @@ describe("ADMIN-001/002 service", () => {
       },
     ]);
     expect(store.auditResults).toEqual(["failure"]);
+  });
+});
+
+describe("ADMIN-003/004 service", () => {
+  const job: AdminJobSummary = {
+    id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+    type: "data.import",
+    version: 1,
+    workspaceId: null,
+    actorId: "target-user",
+    requiredCapability: "import",
+    state: "dead",
+    attempts: 3,
+    availableAt: "2026-08-25T12:00:00.000Z",
+    leaseUntil: null,
+    correlationId: "01J00000000000000000000000",
+    lastError: "timeout",
+    createdAt: "2026-08-25T12:00:00.000Z",
+    updatedAt: "2026-08-25T12:30:00.000Z",
+    retryable: true,
+  };
+
+  it("allows support to inspect jobs but only admin to retry", async () => {
+    const store = new MemoryAdminStore();
+    store.jobs = [job];
+    const service = new AdminService(store, new MemoryAuthPort());
+    await expect(
+      service.searchJobs(actor("platform_support"), { limit: 50 }),
+    ).resolves.toMatchObject({
+      items: [job],
+    });
+    await expect(
+      service.retryJob(
+        actor("platform_support"),
+        job.id,
+        { reason: "retry" },
+        "retry-key-0000001",
+        "01J00000000000000000000000",
+      ),
+    ).rejects.toMatchObject({ code: "permission_denied" });
+    await expect(
+      service.retryJob(
+        actor("platform_admin"),
+        job.id,
+        { reason: "retry" },
+        "retry-key-0000001",
+        "01J00000000000000000000000",
+      ),
+    ).resolves.toMatchObject({ result: { state: "pending" } });
   });
 });

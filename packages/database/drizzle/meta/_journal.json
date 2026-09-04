@@ -162,6 +162,13 @@
       "when": 1787594000000,
       "tag": "0022_platform_admin_and_step_up",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1787597600000,
+      "tag": "0023_platform_job_scope",
+      "breakpoints": true
     }
   ]
 }
