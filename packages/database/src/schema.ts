@@ -1393,11 +1393,106 @@ export const cardPayment = pgTable(
       .notNull()
       .references(() => financeTransaction.id, { onDelete: "restrict" }),
     amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    appliedMinor: bigint("applied_minor", { mode: "bigint" }).notNull(),
     createdAt: instant("created_at").defaultNow().notNull(),
   },
   (table) => [
     check("card_payment_amount_check", sql`${table.amountMinor} > 0`),
+    check(
+      "card_payment_applied_check",
+      sql`${table.appliedMinor} >= 0 and ${table.appliedMinor} <= ${table.amountMinor}`,
+    ),
+    uniqueIndex("card_payment_workspace_id_id_unique").on(table.workspaceId, table.id),
     uniqueIndex("card_payment_transaction_unique").on(table.transactionId),
+  ],
+);
+
+/** Excess invoice payments are explicit card credit, reversible by source payment. */
+export const cardCredit = pgTable(
+  "card_credit",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => creditCard.id, { onDelete: "restrict" }),
+    paymentId: uuid("payment_id")
+      .notNull()
+      .references(() => cardPayment.id, { onDelete: "restrict" }),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    remainingMinor: bigint("remaining_minor", { mode: "bigint" }).notNull(),
+    state: text("state").notNull().default("active"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    canceledAt: instant("canceled_at"),
+  },
+  (table) => [
+    check("card_credit_amount_check", sql`${table.amountMinor} > 0`),
+    check(
+      "card_credit_remaining_check",
+      sql`${table.remainingMinor} >= 0 and ${table.remainingMinor} <= ${table.amountMinor}`,
+    ),
+    check("card_credit_state_check", sql`${table.state} in ('active', 'consumed', 'canceled')`),
+    uniqueIndex("card_credit_payment_unique").on(table.paymentId),
+    foreignKey({
+      columns: [table.workspaceId, table.cardId],
+      foreignColumns: [creditCard.workspaceId, creditCard.id],
+      name: "card_credit_card_workspace_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.paymentId],
+      foreignColumns: [cardPayment.workspaceId, cardPayment.id],
+      name: "card_credit_payment_workspace_fk",
+    }).onDelete("restrict"),
+  ],
+);
+
+export const cardCreditApplication = pgTable(
+  "card_credit_application",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    creditId: uuid("credit_id")
+      .notNull()
+      .references(() => cardCredit.id, { onDelete: "restrict" }),
+    transactionId: uuid("transaction_id")
+      .notNull()
+      .references(() => financeTransaction.id, { onDelete: "restrict" }),
+    statementId: uuid("statement_id")
+      .notNull()
+      .references(() => creditStatement.id, { onDelete: "restrict" }),
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    remainingMinor: bigint("remaining_minor", { mode: "bigint" }).notNull(),
+    state: text("state").notNull().default("active"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    reversedAt: instant("reversed_at"),
+  },
+  (table) => [
+    check("card_credit_application_amount_check", sql`${table.amountMinor} > 0`),
+    check(
+      "card_credit_application_remaining_check",
+      sql`${table.remainingMinor} >= 0 and ${table.remainingMinor} <= ${table.amountMinor}`,
+    ),
+    check("card_credit_application_state_check", sql`${table.state} in ('active', 'reversed')`),
+    uniqueIndex("card_credit_application_workspace_id_id_unique").on(table.workspaceId, table.id),
+    foreignKey({
+      columns: [table.workspaceId, table.creditId],
+      foreignColumns: [cardCredit.workspaceId, cardCredit.id],
+      name: "card_credit_application_credit_workspace_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.statementId],
+      foreignColumns: [creditStatement.workspaceId, creditStatement.id],
+      name: "card_credit_application_statement_workspace_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.workspaceId, table.transactionId],
+      foreignColumns: [financeTransaction.workspaceId, financeTransaction.id],
+      name: "card_credit_application_transaction_workspace_fk",
+    }).onDelete("restrict"),
   ],
 );
 

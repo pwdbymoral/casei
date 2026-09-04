@@ -485,7 +485,10 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       input,
       requiredIdempotencyKey(context),
     );
-    return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+    return context.json(
+      result.response as unknown as Record<string, unknown>,
+      result.replayed ? 200 : 201,
+    );
   });
 
   router.patch("/workspaces/:workspaceId/categories/:categoryId", async (context) => {
@@ -586,8 +589,29 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       input,
       requiredIdempotencyKey(context),
     );
-    return context.json(result.response as Record<string, unknown>, result.replayed ? 200 : 201);
+    return context.json(
+      result.response as unknown as Record<string, unknown>,
+      result.replayed ? 200 : 201,
+    );
   });
+
+  router.post(
+    "/workspaces/:workspaceId/statements/:statementId/payments/:paymentId/cancel",
+    async (context) => {
+      const statementId = parseDomainId(context.req.param("statementId"));
+      const paymentId = parseDomainId(context.req.param("paymentId"));
+      await parseJsonBody(context, cancelTransactionSchema);
+      const result = await service.cancelStatementPayment(
+        scopeOf(context),
+        statementId,
+        paymentId,
+        requiredIdempotencyKey(context),
+        requireIfMatch(context),
+      );
+      setVersionHeaders(context, result.version);
+      return context.json(result);
+    },
+  );
 
   router.post("/workspaces/:workspaceId/statements/:statementId/adjustments", async (context) => {
     const statementId = parseDomainId(context.req.param("statementId"));

@@ -999,6 +999,74 @@ describe("finance HTTP composition", () => {
     await expect(reopened.json()).resolves.toMatchObject({ id: statementId, state: "open" });
   });
 
+  it("resolves a card payment id before cancelling its finance transaction", async () => {
+    const calls: unknown[][] = [];
+    const fakeService = {
+      cancelStatementPayment: async (...args: unknown[]) => {
+        calls.push(args);
+        return {
+          id: transactionId,
+          workspaceId,
+          kind: "transfer",
+          state: "canceled",
+          amount: { currency: "BRL", minor: "1000" },
+          settled: { currency: "BRL", minor: "1000" },
+          currency: "BRL",
+          occurredOn: "2026-08-24",
+          dueOn: null,
+          postedOn: "2026-08-24T00:00:00.000Z",
+          cashSettledOn: "2026-08-24T00:00:00.000Z",
+          description: "Pagamento de fatura",
+          categoryId: null,
+          cardId: null,
+          statementId,
+          recurrenceId: null,
+          installmentPlanId: null,
+          version: 1,
+        };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/statements/${statementId}/payments/${transactionId}/cancel`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "statement-payment-cancel-route-001",
+          "if-match": '"v1"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe('"v1"');
+    expect(calls).toEqual([
+      [
+        expect.objectContaining({ workspaceId }),
+        statementId,
+        transactionId,
+        "statement-payment-cancel-route-001",
+        1,
+      ],
+    ]);
+  });
+
   it("mounts loan creation and principal payment with version headers", async () => {
     let paymentCall: { id: string; key: string; version: number; input: unknown } | undefined;
     const fakeService = {

@@ -112,7 +112,7 @@ FIN-005b (histórico auditável detalhado) e a validação E2E do Gate 2.
 - [ ] **CARD-001 Cartão e ciclos:** cadastro, arquivamento, cálculo persistido de ciclos e limites de mês.
 - [ ] **CARD-002 Compra/cartão:** compra à vista/parcelada gera despesa/passivo e associação idempotente à fatura sugerida.
 - [x] **CARD-003 Fatura:** abrir, fechar, reabrir com confirmação, ajuste pós-fechamento, total e estados.
-- [ ] **CARD-004 Pagamento:** total, parcial, excedente/crédito e cancelamento como transferência ledger.
+- [x] **CARD-004 Pagamento:** total, parcial, excedente/crédito e cancelamento como transferência ledger.
 - [x] **CARD-005 Estorno/tarifas:** parcial/total e juros/tarifas manuais vinculados.
 - [ ] **CARD-006 UI cartões/fatura:** visão por ciclo, composição explicável, ações frequentes e correção de fatura.
 
@@ -125,6 +125,12 @@ versionada e restrita a faturas fechadas sem pagamentos. A fatia CARD-003/005 ag
 ajustes pós-fechamento, tarifas/juros e estornos parciais ou totais vinculados à compra original,
 preservando o lançamento original e emitindo reversão assinada no ledger. `CARD-006` permanece aberto
 somente para a validação final de browser da visão completa por ciclo.
+
+CARD-004 persiste cada pagamento com a parcela aplicada à fatura e, quando confirmado com
+`allowCredit`, o excedente em `card_credit`. Créditos são consumidos atomicamente, em ordem FIFO,
+por compras posteriores e ficam expostos na composição da fatura; a reversão de uma compra
+restaura o crédito aplicado, e a reversão do pagamento cancela sua fonte e todas as aplicações,
+reverte os lançamentos do ledger e registra auditoria; o saldo pago da fatura nunca inclui o excedente.
 
 **Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
 

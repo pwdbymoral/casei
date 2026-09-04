@@ -81,6 +81,6 @@ O cálculo é informativo e pode divergir do emissor por autorizações pendente
 - [ ] Pagamento afeta carteira e passivo, mas não despesa.
 - [ ] Regra de ciclo funciona em limites de mês e permite correção manual auditada.
 - [ ] Parcelas pertencem a faturas corretas e somam exatamente o total da compra.
-- [ ] Pagamentos parciais, excedentes, cancelamentos e estornos preservam os invariantes.
+- [x] Pagamentos parciais, excedentes, cancelamentos e estornos preservam os invariantes.
 - [ ] Editar configuração não reescreve ciclos históricos.
 - [ ] Cartão não pode desaparecer enquanto houver vínculos relevantes.
