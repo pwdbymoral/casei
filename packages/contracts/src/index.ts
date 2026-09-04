@@ -765,6 +765,48 @@ export const insightReportSchema = z.object({
 });
 export type InsightReportContract = z.infer<typeof insightReportSchema>;
 
+export const projectionQuerySchema = z.object({
+  asOf: civilDateSchema.optional(),
+  months: z.coerce.number().int().min(1).max(12).default(12),
+});
+export type ProjectionQuery = z.infer<typeof projectionQuerySchema>;
+
+const projectionSourceSchema = z.object({
+  type: z.enum(["transaction", "recurrence", "installment", "statement", "loan", "goal"]),
+  id: domainIdSchema,
+  label: z.string().min(1).max(200),
+});
+
+const projectionEventSchema = z.object({
+  id: domainIdSchema,
+  date: civilDateSchema,
+  direction: z.enum(["income", "outflow"]),
+  amount: moneySchema.nullable(),
+  source: projectionSourceSchema,
+});
+
+export const projectionSchema = z.object({
+  asOf: civilDateSchema,
+  to: civilDateSchema,
+  months: z.number().int().min(1).max(12),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  startingBalance: moneySchema,
+  points: z.array(
+    z.object({
+      date: civilDateSchema,
+      balance: moneySchema,
+      delta: moneySchema,
+      events: z.array(projectionEventSchema),
+      unknownEventCount: z.number().int().nonnegative(),
+    }),
+  ),
+  confidence: z.object({
+    level: z.enum(["high", "medium", "low"]),
+    reasons: z.array(z.string().min(1)),
+  }),
+});
+export type ProjectionContract = z.infer<typeof projectionSchema>;
+
 export const positiveMoneySchema = moneySchema.extend({
   minor: minorAmountSchema.refine((value) => BigInt(value) > 0n, "minor must be greater than zero"),
 });

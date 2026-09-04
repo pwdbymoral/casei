@@ -177,7 +177,7 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 ## Marco 8 — painel, projeção e relatórios
 
 - [ ] **INSIGHT-001 Read models:** agregados reconstruíveis de saldo, resultado, compromissos, faturas, reservas e estoque.
-- [ ] **INSIGHT-002 Projeção 12 meses:** timeline de caixa com decomposição por eventos e desconhecidos explícitos.
+- [ ] **INSIGHT-002 Projeção 12 meses:** API/adaptador com timeline mensal, decomposição por eventos e desconhecidos explícitos entregue em fatia própria; tela e E2E ainda pendentes.
 - [ ] **INSIGHT-003 Valor seguro:** fórmula de 30 dias, margem, déficit, cobertura de reservas e níveis de confiança.
 - [ ] **INSIGHT-004 Painel Hoje:** prioridade acionável, personalização, ocultar valores e deep links para origem.
   O incremento web atual já consome os read models de finanças/valor seguro, compromissos e fatura
