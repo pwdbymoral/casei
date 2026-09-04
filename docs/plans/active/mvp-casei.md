@@ -92,8 +92,8 @@ auditável, categorias, idempotência, isolamento por papel e moeda, além dos c
 necessários. A fatia FIN-004/FIN-005 acrescenta captura rápida e linha do tempo autenticadas, com
 filtros/cursor no contrato HTTP e desfazer por reversão. O FIN-002 materializa ajustes por saldo
 observado com prévia, idempotência, concorrência e auditoria; o FIN-003 acrescenta edição e
-cancelamento versionados, com bloqueios por origem e replay idempotente. Permanece pendente o
-FIN-005b (histórico auditável detalhado) e a validação E2E do Gate 2.
+cancelamento versionados, com bloqueios por origem e replay idempotente. Permanece pendente apenas
+a validação E2E do Gate 2.
 
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 
