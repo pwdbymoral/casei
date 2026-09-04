@@ -18,7 +18,7 @@ import {
   ExportFailure,
   ExportNotFoundError,
 } from "./export-service.js";
-import { ApiHttpError, errorResponse, validationError } from "./http/index.js";
+import { ApiHttpError, validationError } from "./http/index.js";
 import type { ApiContext, ApiEnv } from "./http/types.js";
 import { ImportAuthorizationError, ImportConflictError, ImportFailure } from "./import-service.js";
 
