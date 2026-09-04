@@ -253,11 +253,10 @@ export class ImportUploadService implements ImportUploadApplication {
     if (
       input.duplicatePolicy === "review" &&
       duplicateLines.length > 0 &&
-      ((input.acceptedDuplicateLines ?? []).length !== duplicateLines.length ||
-        (input.acceptedDuplicateLines ?? []).some((line) => !duplicateLines.includes(line)))
+      (input.acceptedDuplicateLines ?? []).some((line) => !duplicateLines.includes(line))
     ) {
       throw new ImportUploadError(
-        "Revise cada duplicata sugerida e selecione as linhas que devem ser importadas.",
+        "A seleção de duplicatas contém uma linha que não pertence à prévia.",
         "invalid_preview",
       );
     }

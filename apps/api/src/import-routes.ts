@@ -145,12 +145,17 @@ export function configureImportRoutes(router: Hono<ApiEnv>, options: ImportRoute
   router.post("/workspaces/:workspaceId/data/imports/:importId/cancel", async (context) => {
     const scope = scopeOf(context);
     if (scope.role === "viewer") throw new ApiHttpError(403, "permission_denied");
-    requiredIdempotencyKey(context);
-    const job = await options.application.cancel(context.req.param("importId"), scope.workspaceId, {
-      actorId: scope.actorId,
-      correlationId: scope.correlationId,
-      origin: "api",
-    });
+    const idempotencyKey = requiredIdempotencyKey(context);
+    const job = await options.application.cancel(
+      context.req.param("importId"),
+      scope.workspaceId,
+      {
+        actorId: scope.actorId,
+        correlationId: scope.correlationId,
+        origin: "api",
+      },
+      idempotencyKey,
+    );
     return context.json(toImportJobResponse(job), 202);
   });
 

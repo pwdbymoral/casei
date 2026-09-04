@@ -96,6 +96,7 @@ export type StartImportInput = {
   preview: ImportPreview;
   file: File;
   duplicatePolicy: DuplicatePolicy;
+  acceptedDuplicateLines?: readonly number[];
   applyMode: ImportApplyMode;
   mapping: Readonly<Record<string, string>>;
 };
@@ -581,6 +582,9 @@ const httpDataExchangeAdapter: DataExchangeAdapter = {
     form.set("previewId", input.preview.id);
     form.set("mapping", JSON.stringify(input.mapping));
     form.set("duplicatePolicy", input.duplicatePolicy);
+    if (input.acceptedDuplicateLines) {
+      form.set("acceptedDuplicateLines", JSON.stringify(input.acceptedDuplicateLines));
+    }
     form.set("applyMode", input.applyMode);
     return requestJson<ImportJob>(workspacePath(workspaceId, "/imports"), {
       method: "POST",
@@ -731,28 +735,24 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     if (input.applyMode === "all_or_nothing" && input.preview.counts.errors > 0)
       throw new DataExchangeError("Tudo ou nada exige uma prévia sem erros.");
     const duplicateRows = input.preview.rows.filter((row) => row.status === "duplicate");
-    if (input.duplicatePolicy === "review" && duplicateRows.length > 0) {
-      const reviewJob: ImportJob = {
-        id: id("import"),
-        workspaceId,
-        status: "failed",
-        progress: 0,
-        totalRows: input.preview.rows.length,
-        appliedRows: 0,
-        ignoredRows: 0,
-        rejectedRows: duplicateRows.length,
-        errors: duplicateRows.map((row) => ({
-          rowNumber: row.rowNumber,
-          message: "Duplicata provável aguardando revisão; nenhuma linha foi aplicada.",
-        })),
-        createdAt: formatDate(new Date().toISOString()),
-        expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
-        message: "A política de revisão exige uma decisão antes de aplicar duplicatas prováveis.",
-      };
-      fixtureImportKeys.set(replayKey, reviewJob);
-      fixtureImportFingerprints.set(replayKey, fingerprint);
-      return rememberImport(reviewJob);
+    const duplicateLineNumbers = new Set(duplicateRows.map((row) => row.rowNumber));
+    const acceptedDuplicateLines = input.acceptedDuplicateLines ?? [];
+    if (
+      input.duplicatePolicy === "review" &&
+      acceptedDuplicateLines.some((line) => !duplicateLineNumbers.has(line))
+    ) {
+      throw new DataExchangeError("A seleção de duplicatas contém uma linha inválida.", 422);
     }
+    const acceptedDuplicates =
+      input.duplicatePolicy === "import"
+        ? duplicateRows.length
+        : input.duplicatePolicy === "review"
+          ? acceptedDuplicateLines.length
+          : 0;
+    const skippedDuplicates =
+      input.duplicatePolicy === "ignore"
+        ? duplicateRows.length
+        : Math.max(0, duplicateRows.length - acceptedDuplicates);
     const job: ImportJob = {
       id: id("import"),
       workspaceId,
@@ -760,11 +760,21 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
       progress: 0,
       totalRows: input.preview.rows.length,
       appliedRows: 0,
-      ignoredRows: input.duplicatePolicy === "ignore" ? input.preview.counts.duplicates : 0,
+      ignoredRows: skippedDuplicates,
       rejectedRows: input.preview.counts.errors,
       errors: input.preview.rows
-        .filter((row) => row.status === "invalid")
-        .map((row) => ({ rowNumber: row.rowNumber, message: row.errors.join(" ") })),
+        .filter(
+          (row) =>
+            row.status === "invalid" ||
+            (row.status === "duplicate" && !acceptedDuplicateLines.includes(row.rowNumber)),
+        )
+        .map((row) => ({
+          rowNumber: row.rowNumber,
+          message:
+            row.status === "duplicate"
+              ? "Duplicata provável não confirmada."
+              : row.errors.join(" "),
+        })),
       createdAt: formatDate(new Date().toISOString()),
       expiresAt: formatDate(new Date(Date.now() + 86_400_000).toISOString()),
     };
@@ -798,6 +808,12 @@ const fixtureDataExchangeAdapter: DataExchangeAdapter = {
     if (!current) throw new DataExchangeError("Importação não encontrada.", 404);
     if (current.workspaceId !== workspaceId)
       throw fixturePermission("Esta importação pertence a outro espaço.");
+    if (current.status === "canceled") {
+      throw new DataExchangeError(
+        "Uma importação cancelada não está disponível para repetição.",
+        409,
+      );
+    }
     const replayKey = fixtureKey(workspaceId, idempotencyKey);
     const fingerprint = fixtureFingerprint({ jobId });
     const replay = fixtureRetryKeys.get(replayKey);

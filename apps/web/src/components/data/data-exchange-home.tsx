@@ -186,6 +186,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   const [previewStatus, setPreviewStatus] = useState<SurfaceStatus>("idle");
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [duplicatePolicy, setDuplicatePolicy] = useState<DuplicatePolicy>("ignore");
+  const [acceptedDuplicateLines, setAcceptedDuplicateLines] = useState<number[]>([]);
   const [applyMode, setApplyMode] = useState<ImportApplyMode>("valid_only");
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -290,6 +291,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setFile(next);
     setPreview(null);
     setSheetName("");
+    setAcceptedDuplicateLines([]);
     setMapping({});
     setMappingDirty(false);
     setPreviewStatus("idle");
@@ -315,6 +317,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       });
       setPreview(next);
       setMapping({ ...next.mapping });
+      setAcceptedDuplicateLines([]);
       setMappingDirty(false);
       importOperation.current.key = null;
       setPreviewStatus("success");
@@ -340,7 +343,14 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       (key) =>
         adapter.startImport(
           workspaceId,
-          { preview, file, mapping, duplicatePolicy, applyMode },
+          {
+            preview,
+            file,
+            mapping,
+            duplicatePolicy,
+            applyMode,
+            ...(duplicatePolicy === "review" ? { acceptedDuplicateLines } : {}),
+          },
           key,
         ),
     );
@@ -455,6 +465,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       !mappingDirty &&
       (applyMode === "valid_only" || preview.counts.errors === 0),
   );
+  const duplicateRows = preview?.rows.filter((row) => row.status === "duplicate") ?? [];
   const exportSurfaceStatus = exportHistorySurfaceStatus(
     exportStatus === "idle" ? "loading" : exportStatus,
     exportJobs.length > 0,
@@ -818,6 +829,65 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                     </select>
                   </Field>
                 </div>
+                {duplicatePolicy === "review" && duplicateRows.length > 0 ? (
+                  <FieldSet className="rounded-lg border p-4">
+                    <FieldLegend>Duplicatas sugeridas</FieldLegend>
+                    <FieldDescription>
+                      Marque somente as linhas que deseja importar. As demais serão mantidas como
+                      ignoradas no resultado.
+                    </FieldDescription>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="min-h-11"
+                        onClick={() => {
+                          setAcceptedDuplicateLines(duplicateRows.map((row) => row.rowNumber));
+                          importOperation.current.key = null;
+                        }}
+                      >
+                        Marcar todas
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="min-h-11"
+                        onClick={() => {
+                          setAcceptedDuplicateLines([]);
+                          importOperation.current.key = null;
+                        }}
+                      >
+                        Desmarcar todas
+                      </Button>
+                    </div>
+                    <div className="grid max-h-56 gap-2 overflow-y-auto rounded-md border p-3 sm:grid-cols-2">
+                      {duplicateRows.map((row) => (
+                        <label
+                          className="flex min-h-11 items-center gap-2 rounded-md px-2 text-sm hover:bg-muted/60"
+                          key={row.rowNumber}
+                        >
+                          <input
+                            type="checkbox"
+                            className="size-4 accent-primary"
+                            checked={acceptedDuplicateLines.includes(row.rowNumber)}
+                            onChange={(event) => {
+                              setAcceptedDuplicateLines((current) => {
+                                const next = new Set(current);
+                                if (event.target.checked) next.add(row.rowNumber);
+                                else next.delete(row.rowNumber);
+                                importOperation.current.key = null;
+                                return [...next].sort((left, right) => left - right);
+                              });
+                            }}
+                          />
+                          <span>Linha {row.rowNumber}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </FieldSet>
+                ) : null}
                 <div className="flex flex-wrap items-center gap-3">
                   <Button
                     type="button"
@@ -927,7 +997,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       {cancelPending ? "Cancelando…" : "Cancelar job"}
                     </Button>
                   ) : null}
-                  {importJob.status === "failed" || importJob.status === "canceled" ? (
+                  {importJob.status === "failed" ? (
                     <Button
                       type="button"
                       variant="outline"

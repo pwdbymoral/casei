@@ -425,14 +425,43 @@ describe("data exchange UI ports", () => {
         file: duplicateFile,
         mapping: duplicatePreview.mapping,
         duplicatePolicy: "review",
+        acceptedDuplicateLines: [],
         applyMode: "valid_only",
       },
       "review-key",
     );
-    expect(review.status).toBe("failed");
+    expect(review.status).toBe("processing");
+    expect(review.ignoredRows).toBe(1);
     expect(review.appliedRows).toBe(0);
-    const reviewRetry = await adapter.retryImport("workspace-review", review.id, "review-retry");
-    expect(reviewRetry.id).toBe(review.id);
+    const reviewCompleted = await adapter.getImportJob("workspace-review", review.id);
+    await adapter.getImportJob("workspace-review", review.id);
+    const reviewFinal = await adapter.getImportJob("workspace-review", review.id);
+    expect(reviewCompleted.status).toBe("processing");
+    expect(reviewFinal.status).toBe("completed");
+
+    const accepted = await adapter.startImport(
+      "workspace-review",
+      {
+        preview: duplicatePreview,
+        file: duplicateFile,
+        mapping: duplicatePreview.mapping,
+        duplicatePolicy: "review",
+        acceptedDuplicateLines: [3],
+        applyMode: "valid_only",
+      },
+      "review-accepted-key",
+    );
+    expect(accepted.status).toBe("processing");
+    expect(accepted.ignoredRows).toBe(0);
+    const canceled = await adapter.cancelImport(
+      "workspace-review",
+      accepted.id,
+      "cancel-review-key",
+    );
+    expect(canceled.status).toBe("canceled");
+    await expect(
+      adapter.retryImport("workspace-review", accepted.id, "retry-canceled-key"),
+    ).rejects.toThrow("cancelada");
 
     const secondImport = await adapter.startImport(
       "workspace-isolated",

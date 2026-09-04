@@ -308,7 +308,7 @@ describe("DATA-006 HTTP boundary", () => {
     });
   });
 
-  it("requires every duplicate suggestion to have an explicit review decision", async () => {
+  it("forwards the selected duplicate lines for individual review", async () => {
     const upload: ImportUploadApplication = {
       preview: async () => {
         throw new Error("not used");
@@ -335,6 +335,42 @@ describe("DATA-006 HTTP boundary", () => {
       },
     );
     expect(response.status).toBe(422);
+  });
+
+  it("passes the cancel idempotency key to the import application", async () => {
+    const calls: unknown[] = [];
+    const application = {
+      cancel: async (...args: unknown[]) => {
+        calls.push(args);
+        return {
+          id: "import-1",
+          workspaceId,
+          state: "cancel_requested",
+          cursor: 0,
+          totalRows: 1,
+          appliedRows: 0,
+          skippedRows: 0,
+          rejectedRows: 0,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        } as ImportJobRecord;
+      },
+    } as unknown as ImportApplication;
+    const response = await appWith({ importApplication: application }).request(
+      `http://localhost/v1/workspaces/${workspaceId}/data/imports/import-1/cancel`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "cancel-key-123456" },
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      "import-1",
+      workspaceId,
+      expect.objectContaining({ actorId: "requester-1", origin: "api" }),
+      "cancel-key-123456",
+    ]);
   });
 
   it("maps stale preview errors to a conflict instead of leaking an internal error", async () => {

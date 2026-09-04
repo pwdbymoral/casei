@@ -43,8 +43,8 @@ entrada de arquivo, exigir idempotência nas mutações e não vazar URLs bearer
 - [x] rotas de import/export usam o prefixo `/data` consumido pelo adapter web;
 - [x] multipart verifica limite anunciado antes do parser, limite agregado de
   arquivos/campos e limite de mapping;
-- [x] `review` transporta linhas aceitas e rejeita confirmação que não cubra o
-  manifesto de duplicatas;
+- [x] `review` transporta as linhas aceitas, permite aceitar apenas parte das
+  duplicatas sugeridas e registra as demais como ignoradas;
 - [x] status do job inclui erros de linhas; retry encaminha e persiste a chave,
   payload e resposta pelo mecanismo de idempotência; storage distingue
   ausente/expirado de indisponibilidade transitória;
@@ -57,4 +57,6 @@ entrada de arquivo, exigir idempotência nas mutações e não vazar URLs bearer
 - [x] erros acionáveis de validação de storage retornam `422`, enquanto
   indisponibilidade e falhas de cleanup continuam `503`;
 - [x] cancelamento e retry da UI enviam chaves de idempotência estáveis;
+- [x] cancelamento server-side persiste a chave e o payload para replay/conflito;
+- [x] jobs cancelados não exibem retry que o contrato do servidor rejeita;
 - [ ] aplicação persistente de export jobs e wiring de produção.
