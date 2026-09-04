@@ -548,7 +548,7 @@ function DashboardContent({
   );
 }
 
-export default function TodayPage() {
+function TodayPage() {
   const { workspaceId, fixtureMode, timeZone } = useAuthenticatedWorkspace();
   const [status, setStatus] = useState<DashboardStatus>("loading");
   const [statusWorkspaceId, setStatusWorkspaceId] = useState(workspaceId);
@@ -704,3 +704,7 @@ export default function TodayPage() {
     </AsyncState>
   );
 }
+
+// App Router pages cannot export additional named symbols. Attaching the seam
+// to the default component keeps production exports valid for component tests.
+export default Object.assign(TodayPage, { DashboardContent });
