@@ -245,6 +245,15 @@ export function mergeTransactionPage(
   return append ? [...current, ...page.items] : page.items;
 }
 
+/** Keeps only selections that are still present after a filter/page refresh. */
+export function retainVisibleTransactionSelection(
+  selectedIds: readonly string[],
+  visibleTransactions: readonly Pick<Transaction, "id">[],
+): string[] {
+  const visibleIds = new Set(visibleTransactions.map((transaction) => transaction.id));
+  return selectedIds.filter((id) => visibleIds.has(id));
+}
+
 export function commitmentRemainingMinor(
   transaction: Pick<Transaction, "amount" | "settledAmount">,
 ): string {

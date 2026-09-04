@@ -54,6 +54,7 @@ import {
   mergeTransactionPage,
   previewInstallmentDates,
   previewInstallmentMinor,
+  retainVisibleTransactionSelection,
   type SettlementInput,
   type Statement,
   type StatementItem,
@@ -420,6 +421,12 @@ function FinanceDashboard({
   const visibleTransactionAudit = workspaceDataReady ? transactionAudit : [];
   const visibleTransactionAuditError = workspaceDataReady ? transactionAuditError : null;
   const visibleSelectedAudit = workspaceDataReady ? selectedAudit : null;
+  useEffect(() => {
+    setSelectedTransactionIds((selected) => {
+      const retained = retainVisibleTransactionSelection(selected, visibleTransactions);
+      return retained.length === selected.length ? selected : retained;
+    });
+  }, [visibleTransactions]);
   const walletAdjustmentDifferenceMinor = walletAdjustmentPreview
     ? BigInt(walletAdjustmentPreview.difference.minor)
     : null;

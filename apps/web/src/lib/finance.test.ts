@@ -18,6 +18,7 @@ import {
   listAllTransactions,
   mergeTransactionPage,
   previewInstallmentMinor,
+  retainVisibleTransactionSelection,
   type Statement,
   shouldPreserveStatementAdjustmentCommandKey,
   shouldRetryIdempotentCommand,
@@ -39,6 +40,15 @@ afterEach(() => {
 });
 
 describe("finance adapter", () => {
+  it("drops selected transactions when a refreshed filter removes them", () => {
+    const transactions = [
+      { id: "transaction-a" } as Transaction,
+      { id: "transaction-b" } as Transaction,
+    ];
+    expect(
+      retainVisibleTransactionSelection(["transaction-a", "transaction-b"], transactions.slice(1)),
+    ).toEqual(["transaction-b"]);
+  });
   it("uses fixtures only when explicitly enabled and otherwise denies without an API origin", async () => {
     vi.stubEnv("CASEI_UI_FIXTURES", "");
     vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "");
