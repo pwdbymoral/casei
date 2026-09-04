@@ -66,6 +66,7 @@ import {
   type ImportJob,
   type ImportLocale,
   type ImportPreview,
+  importJobCanRetry,
   importStatusLabel,
   MAX_IMPORT_ROWS,
   serializeImportErrorReport,
@@ -997,7 +998,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       {cancelPending ? "Cancelando…" : "Cancelar job"}
                     </Button>
                   ) : null}
-                  {importJob.status === "failed" ? (
+                  {importJobCanRetry(importJob) ? (
                     <Button
                       type="button"
                       variant="outline"

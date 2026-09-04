@@ -424,6 +424,7 @@ export const importJobResponseSchema = z.object({
   appliedRows: z.number().int().nonnegative(),
   ignoredRows: z.number().int().nonnegative(),
   rejectedRows: z.number().int().nonnegative(),
+  retryable: z.boolean(),
   errors: z.array(
     z.object({ rowNumber: z.number().int().min(0), message: z.string().min(1).max(500) }),
   ),

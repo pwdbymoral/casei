@@ -246,6 +246,7 @@ export function toImportJobResponse(
     appliedRows: job.appliedRows,
     ignoredRows: job.skippedRows,
     rejectedRows: job.rejectedRows,
+    retryable: job.state === "failed",
     errors: [
       ...lineResults
         .filter((line) => line.status === "rejected" || line.status === "skipped")

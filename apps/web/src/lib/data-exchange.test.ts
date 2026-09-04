@@ -9,6 +9,7 @@ import {
   detectPreviewDelimiter,
   exportHistorySurfaceStatus,
   formatDataFileSize,
+  importJobCanRetry,
   inferMapping,
   MAX_IMPORT_ROWS,
   parseLocalCsvPreview,
@@ -16,6 +17,12 @@ import {
 } from "./data-exchange";
 
 describe("data exchange UI ports", () => {
+  it("expõe retry para falha parcial, mas não para parcial concluído", () => {
+    expect(importJobCanRetry({ retryable: true })).toBe(true);
+    expect(importJobCanRetry({ retryable: false })).toBe(false);
+    expect(importJobCanRetry({})).toBe(false);
+  });
+
   it("infere o separador pt-BR e preserva campos desconhecidos como aviso", () => {
     const preview = parseLocalCsvPreview(
       "Tipo;Valor;Data;Observação\ndespesa;10,00;2026-08-25;mercado",

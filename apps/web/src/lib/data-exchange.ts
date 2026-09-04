@@ -64,6 +64,7 @@ export type ImportJob = {
   appliedRows: number;
   ignoredRows: number;
   rejectedRows: number;
+  retryable?: boolean;
   errors: readonly { rowNumber: number; message: string }[];
   createdAt: string;
   expiresAt: string | null;
@@ -134,6 +135,10 @@ export type DataExchangeOperationState = {
   pending: boolean;
   key: string | null;
 };
+
+export function importJobCanRetry(job: Pick<ImportJob, "retryable">): boolean {
+  return job.retryable === true;
+}
 
 export type DataExchangeOperationStart<T> =
   | { started: false; key: string | null; promise: null }

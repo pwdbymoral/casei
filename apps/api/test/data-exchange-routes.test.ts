@@ -70,6 +70,7 @@ describe("DATA-006 HTTP boundary", () => {
       appliedRows: 7,
       ignoredRows: 1,
       rejectedRows: 0,
+      retryable: false,
       errors: [],
       createdAt: "2026-08-25T12:00:00.000Z",
       expiresAt: "2026-08-26T12:00:00.000Z",
@@ -102,6 +103,35 @@ describe("DATA-006 HTTP boundary", () => {
         { rowNumber: 4, message: "Categoria inválida." },
       ],
     });
+  });
+
+  it("marks a partially failed job as retryable without marking completed partial jobs", () => {
+    expect(
+      toImportJobResponse({
+        id: "job-failed-partial",
+        workspaceId,
+        state: "failed",
+        cursor: 3,
+        totalRows: 8,
+        appliedRows: 2,
+        skippedRows: 1,
+        rejectedRows: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toMatchObject({ status: "partial", retryable: true });
+    expect(
+      toImportJobResponse({
+        id: "job-succeeded-partial",
+        workspaceId,
+        state: "succeeded",
+        cursor: 8,
+        totalRows: 8,
+        appliedRows: 7,
+        skippedRows: 0,
+        rejectedRows: 1,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toMatchObject({ status: "partial", retryable: false });
   });
 
   it("passes multipart preview through actor and workspace scope", async () => {
