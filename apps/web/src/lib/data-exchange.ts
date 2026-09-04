@@ -1089,6 +1089,24 @@ export function importLineStatusLabel(status: ImportLineResult["status"]): strin
   }[status];
 }
 
+/**
+ * Verifies the cursor contract before appending a page to the result table.
+ * A malformed or stale cursor must surface as an actionable error instead of
+ * duplicating rows or making a report loop forever.
+ */
+export function importResultsPageIsValid(
+  page: ImportLineResultsPage,
+  afterLine: number | null = null,
+): boolean {
+  let previousLine = afterLine ?? 0;
+  for (const item of page.items) {
+    if (!Number.isSafeInteger(item.lineNumber) || item.lineNumber <= previousLine) return false;
+    previousLine = item.lineNumber;
+  }
+  if (page.nextAfterLine === null) return true;
+  return page.items.length > 0 && page.nextAfterLine === previousLine;
+}
+
 export type ExportHistorySurfaceStatus =
   | "loading"
   | "success"
@@ -1103,6 +1121,61 @@ export function exportHistorySurfaceStatus(
 ): ExportHistorySurfaceStatus {
   if (status === "success") return hasJobs ? "success" : "empty";
   return status;
+}
+
+export function exportJobIsActive(job: Pick<ExportJob, "status">): boolean {
+  return job.status === "queued" || job.status === "processing";
+}
+
+export function exportJobBelongsToWorkspace(
+  job: Pick<ExportJob, "workspaceId"> | null,
+  workspaceId: string,
+): boolean {
+  return job?.workspaceId === workspaceId;
+}
+
+export function exportJobToPoll<
+  T extends Pick<ExportJob, "status">,
+  U extends Pick<ExportJob, "status">,
+>(jobs: readonly T[], current: U | null): T | U | null {
+  if (current && exportJobIsActive(current)) return current;
+  return jobs.find(exportJobIsActive) ?? null;
+}
+
+export function exportExpirationLabel(expiresAt: string | null): string {
+  if (!expiresAt || !Number.isFinite(Date.parse(expiresAt))) return "Expiração não informada";
+  const date = new Date(expiresAt);
+  const formatted = new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+  return `Expira em ${formatted}`;
+}
+
+export function normalizeExportJobState(job: ExportJob, now = Date.now()): ExportJob {
+  if (job.status !== "completed" || !job.expiresAt) return job;
+  const expiresAt = Date.parse(job.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt > now) return job;
+  return {
+    ...job,
+    status: "expired",
+    message: job.message ?? "O arquivo expirou. Gere uma nova exportação para baixar os dados.",
+  };
+}
+
+export function exportDateRangeError(from: string, to: string): string | null {
+  const validCivilDate = (value: string): boolean => {
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+    const [year, month, day] = value.split("-").map(Number);
+    if (!year || !month || !day || month < 1 || month > 12 || day < 1) return false;
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return day <= (daysInMonth[month - 1] ?? 0);
+  };
+  if (from && !validCivilDate(from)) return "Informe uma data inicial válida.";
+  if (to && !validCivilDate(to)) return "Informe uma data final válida.";
+  if (!from || !to || from <= to) return null;
+  return "A data final deve ser igual ou posterior à data inicial.";
 }
 
 export function exportStatusLabel(status: ExportJobStatus): string {

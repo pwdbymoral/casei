@@ -57,13 +57,23 @@ caracteres de fórmula para não transformar mensagens retornadas pelo job em
 fórmulas de planilha; a proteção canônica de exportações continua em DATA-005.
 As chamadas autenticadas usam a fronteira `/v1/workspaces/:workspaceId/data`
 para importações e exportações, incluindo paginação de resultados por linha.
-Enquanto o contrato não possui um comando de decisão individual por duplicata,
-a política “Parar para revisar” fica explicitamente bloqueada na UI e o usuário
-precisa escolher ignorar ou importar; a aplicação nunca finge que uma revisão
-individual foi concluída.
+A política “Parar para revisar” transporta as linhas aceitas explicitamente pelo
+contrato; a interface nunca transforma uma sugestão de duplicata em mutação
+silenciosa e mantém as linhas não aceitas como ignoradas no resultado.
 No adapter de fixtures, chaves de idempotência são isoladas por espaço,
 reproduzem o mesmo resultado e rejeitam uma segunda requisição com payload
 divergente; a aplicação server-side permanece responsabilidade do DATA-004.
+
+## Validação da jornada web
+
+- `apps/web`: 19 arquivos de teste, 179 testes passando; o typecheck e o
+  build Next com webpack também passaram.
+- A validação manual com fixtures percorreu prévia, confirmação, resultado por
+  linha, geração e download de exportação no navegador. O layout foi
+  inspecionado em 320 px e 1.280 px sem overflow horizontal geral.
+- A aplicação autenticada sem storage/upload configurados continua exibindo o
+  erro operacional retornado pela API; o modo fixture é o único que confirma
+  uma prévia local sem backend.
 O parser local mantém campos CSV RFC 4180 com aspas, separadores e quebras de
 linha; retries e exportações têm estado pending e uma chave estável enquanto a
 operação está em andamento.
