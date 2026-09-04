@@ -171,6 +171,16 @@ ajustada e `walletVersion` registra separadamente a versão da carteira antes/de
 - Cancelamento de transação com dependentes exige tratar os dependentes na mesma operação ou bloqueia com orientação.
 - Alterações relevantes geram evento de auditoria com antes/depois sanitizado, autor e origem.
 
+Uma transação simples planejada da carteira pode ser cancelada por
+`POST /v1/workspaces/:workspaceId/transactions/:id/cancel`, com
+`Idempotency-Key`, `If-Match: "v<version>"` e `{ confirm: true }`. O comando
+marca a transação como `canceled` sem publicar lançamento no livro razão,
+incrementa a versão e registra `transaction.canceled`; retries idempotentes
+reproduzem a resposta. Ocorrências de recorrência, parcelas e compras no
+cartão devem ser canceladas pelos comandos de sua origem. Uma transação já
+liquidada não aceita cancelamento direto: usa o comando de reversão, que
+estorna os eventos publicados atomicamente e registra `transaction.reversed`.
+
 ## Cálculos canônicos
 
 - **Saldo atual da carteira** = saldo inicial + eventos publicados de entrada na carteira − eventos publicados de saída da carteira.

@@ -1,6 +1,6 @@
 # FIN-003 — edição versionada de transações simples
 
-- Status: em implementação
+- Status: implementado; aguardando merge da branch de consolidação
 - Spec associada: [finanças](../../specs/financas.md)
 - Plano macro: [MVP Casei](mvp-casei.md)
 
@@ -35,9 +35,14 @@ compatível com o tipo da transação.
   arquivada que já está vinculada a ele.
 - Auditoria registra `transaction.updated` com snapshots redigidos e escopo
   do workspace.
+- `POST /v1/workspaces/:workspaceId/transactions/:id/cancel` cancela uma
+  transação planejada simples com confirmação explícita, `If-Match`,
+  idempotência e auditoria `transaction.canceled`; transações realizadas
+  seguem o comando de reversão auditável.
 
 ## Validação
 
 Os contratos, composição HTTP e serviço possuem testes focados para sucesso,
-conflito de versão, bloqueio pós-publicação e idempotência. A integração
-PostgreSQL existente deve confirmar as constraints e RLS no check completo.
+conflito de versão, cancelamento, bloqueio pós-publicação e idempotência. A
+integração PostgreSQL existente deve confirmar as constraints e RLS no check
+completo.

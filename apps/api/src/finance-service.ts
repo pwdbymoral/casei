@@ -1056,6 +1056,85 @@ export class FinanceService {
     };
   }
 
+  /** Cancels a planned wallet transaction without creating a ledger event. */
+  async cancelTransaction(
+    scope: FinanceScope,
+    id: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<{ replayed: boolean; transaction: TransactionView }> {
+    assertFinanceCapability(scope, "finance.write");
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/transactions/${id}/cancel`,
+        key: idempotencyKey,
+        request: { id, expectedVersion, confirm: true },
+        execute: async () => {
+          const currentResult = await client.query<TransactionRow>(
+            `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                    occurred_on, due_on, posted_on, description, category_id, card_id, statement_id,
+                    recurrence_id, installment_plan_id, version
+               FROM finance_transaction
+              WHERE workspace_id = $1 AND id = $2
+              FOR UPDATE`,
+            [scope.workspaceId, id],
+          );
+          const current = currentResult.rows[0];
+          if (!current) throw new FinanceNotFoundError();
+          if (current.version !== expectedVersion) throw new VersionConflictError(current.version);
+          if (current.state === "canceled") {
+            throw new FinanceConflictError("A transação já está cancelada.");
+          }
+          if (current.state !== "planned") {
+            throw new FinanceConflictError(
+              "Somente uma transação planejada pode ser cancelada; use a reversão para desfazer um lançamento realizado.",
+            );
+          }
+          if (current.recurrence_id) {
+            throw new FinanceConflictError(
+              "Cancele a ocorrência pela série de recorrência, não pela transação diretamente.",
+            );
+          }
+          if (current.installment_plan_id) {
+            throw new FinanceConflictError(
+              "Cancele o restante pelo comando do parcelamento, não pela parcela individual.",
+            );
+          }
+          if (current.card_id || current.statement_id) {
+            throw new FinanceConflictError(
+              "Compras de cartão devem ser canceladas pela fatura; o cancelamento direto não é permitido.",
+            );
+          }
+
+          const updated = await client.query<TransactionRow>(
+            `UPDATE finance_transaction
+                SET state = 'canceled', version = version + 1, updated_at = now()
+              WHERE workspace_id = $1 AND id = $2 AND version = $3
+              RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                        occurred_on, due_on, posted_on, description, category_id, card_id, statement_id,
+                        recurrence_id, installment_plan_id, version`,
+            [scope.workspaceId, id, expectedVersion],
+          );
+          const row = updated.rows[0];
+          if (!row) throw new VersionConflictError(current.version);
+          await this.recordTransactionAudit(
+            client,
+            scope,
+            id,
+            "transaction.canceled",
+            transactionAuditSnapshot(current),
+            transactionAuditSnapshot(row),
+          );
+          return { statusCode: 200, response: toTransactionView(row) as unknown as JsonValue };
+        },
+      }),
+    );
+    return {
+      replayed: result.replayed,
+      transaction: result.response as unknown as TransactionView,
+    };
+  }
+
   async listTransactions(
     scope: FinanceScope,
     options: Partial<TransactionListQuery> = {},

@@ -1,4 +1,5 @@
 import {
+  cancelTransactionSchema,
   createLoanSchema,
   createRecurrenceSchema,
   createStatementAdjustmentSchema,
@@ -27,6 +28,11 @@ import {
 import { describe, expect, it } from "vitest";
 
 describe("finance contracts", () => {
+  it("requires explicit confirmation to cancel a transaction", () => {
+    expect(cancelTransactionSchema.parse({ confirm: true })).toEqual({ confirm: true });
+    expect(() => cancelTransactionSchema.parse({ confirm: false })).toThrow();
+  });
+
   it("requires at least one editable field and accepts nullable due dates", () => {
     expect(() => updateTransactionSchema.parse({})).toThrow("ao menos um campo");
     expect(

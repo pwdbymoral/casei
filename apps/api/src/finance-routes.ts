@@ -1,4 +1,5 @@
 import {
+  cancelTransactionSchema,
   categoryTransitionSchema,
   closeStatementSchema,
   createCategorySchema,
@@ -344,6 +345,20 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       scopeOf(context),
       id,
       input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    setVersionHeaders(context, result.transaction.version);
+    return context.json(result.transaction);
+  });
+
+  router.post("/workspaces/:workspaceId/transactions/:id/cancel", async (context) => {
+    const id = parseDomainId(context.req.param("id"));
+    await parseJsonBody(context, cancelTransactionSchema);
+    const result = await service.cancelTransaction(
+      scopeOf(context),
+      id,
       requiredIdempotencyKey(context),
       requireIfMatch(context),
     );

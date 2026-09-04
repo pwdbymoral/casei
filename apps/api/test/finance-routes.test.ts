@@ -434,6 +434,65 @@ describe("finance HTTP composition", () => {
     expect(response.headers.get("ETag")).toBe('"v1"');
   });
 
+  it("routes explicit transaction cancellation with If-Match and idempotency", async () => {
+    let received: unknown[] | undefined;
+    const fakeService = {
+      cancelTransaction: async (...args: unknown[]) => {
+        received = args;
+        return {
+          replayed: false,
+          transaction: {
+            id: transactionId,
+            workspaceId,
+            kind: "expense",
+            state: "canceled",
+            amount: { currency: "BRL", minor: "250" },
+            settledAmount: { currency: "BRL", minor: "0" },
+            occurredOn: "2028-02-29",
+            dueOn: null,
+            postedOn: null,
+            description: "Feira",
+            categoryId: null,
+            cardId: null,
+            statementId: null,
+            version: 1,
+          },
+        };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions/${transactionId}/cancel`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "finance-cancel-route-001",
+          "if-match": '"v0"',
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(received?.slice(1)).toEqual([transactionId, "finance-cancel-route-001", 0]);
+    expect(response.headers.get("ETag")).toBe('"v1"');
+    expect(response.headers.get("X-Idempotent-Replay")).toBe("false");
+  });
+
   it("passes effective settlement input and If-Match to the transaction command", async () => {
     let received: { input: unknown; expectedVersion: number | undefined } | undefined;
     const fakeService = {
