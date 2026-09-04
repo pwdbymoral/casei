@@ -226,4 +226,22 @@ describe("ADMIN-003/004 HTTP boundary", () => {
     );
     expect(response.status).toBe(422);
   });
+
+  it("rejects a malformed job id before reaching the retry service", async () => {
+    const response = await createAdminApp().request(
+      "http://localhost/v1/admin/jobs/not-a-uuid/retry",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "admin-job-retry-invalid-id",
+        },
+        body: JSON.stringify({ reason: "retry" }),
+      },
+    );
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "validation_failed" },
+    });
+  });
 });

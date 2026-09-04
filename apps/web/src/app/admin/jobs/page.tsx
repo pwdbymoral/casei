@@ -68,6 +68,7 @@ export default function AdminJobsPage() {
   });
   const [selected, setSelected] = useState<AdminJob | null>(null);
   const [reason, setReason] = useState("");
+  const [stepUpMethod, setStepUpMethod] = useState<"totp" | "backup_code">("totp");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -104,7 +105,7 @@ export default function AdminJobsPage() {
     setBusy(true);
     setFeedback(null);
     try {
-      const stepUp = await authenticatedAdminAdapter.completeStepUp("totp", code.trim());
+      const stepUp = await authenticatedAdminAdapter.completeStepUp(stepUpMethod, code.trim());
       await authenticatedAdminAdapter.retryJob(
         selected.id,
         reason.trim(),
@@ -114,6 +115,7 @@ export default function AdminJobsPage() {
       setSelected(null);
       setReason("");
       setCode("");
+      setStepUpMethod("totp");
       setFeedback("Retry solicitado. O job voltou para a fila.");
       await load();
     } catch (caught) {
@@ -314,11 +316,25 @@ export default function AdminJobsPage() {
               <FieldDescription>Obrigatório para auditoria.</FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="job-code">Código do autenticador</FieldLabel>
+              <FieldLabel htmlFor="job-step-up-method">Segundo fator</FieldLabel>
+              <select
+                id="job-step-up-method"
+                value={stepUpMethod}
+                onChange={(e) => setStepUpMethod(e.target.value as "totp" | "backup_code")}
+                className="h-9 w-full rounded-lg border bg-background px-2"
+              >
+                <option value="totp">Código do autenticador (TOTP)</option>
+                <option value="backup_code">Código de recuperação</option>
+              </select>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="job-code">
+                {stepUpMethod === "totp" ? "Código do autenticador" : "Código de recuperação"}
+              </FieldLabel>
               <Input
                 id="job-code"
-                inputMode="numeric"
-                autoComplete="one-time-code"
+                inputMode={stepUpMethod === "totp" ? "numeric" : "text"}
+                autoComplete={stepUpMethod === "totp" ? "one-time-code" : "off"}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
               />

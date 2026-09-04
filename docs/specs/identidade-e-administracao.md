@@ -91,6 +91,10 @@ correlation ID e erro sanitizado. O campo `retryable` só é verdadeiro para job
 Somente jobs `failed`/`dead` de `data.import` ou `recurrence.expand` podem ser
 reexecutados. O retry limpa lease/erro, devolve o job para `pending` e preserva a
 chave de idempotência do job; estados não elegíveis retornam `job_not_ready`.
+O step-up pode usar TOTP ou código de recuperação. A consulta administrativa não
+depende de `app.workspace_id`: RLS libera a leitura dos dois tipos a
+`platform_admin`/`platform_support`, enquanto a transição de retry é permitida
+somente a `platform_admin`.
 
 `GET /v1/admin/audit` consulta `platform_audit_event` por `actorId`, `targetId`,
 `action`, `from` e `to` (instantes UTC), com limite/cursor opaco e ordenação

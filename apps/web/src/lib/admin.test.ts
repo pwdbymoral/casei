@@ -135,4 +135,19 @@ describe("admin API adapter", () => {
     expect(headers.get("X-Admin-Step-Up")).toBe("step-up");
     expect(init.body).toBe(JSON.stringify({ reason: "reprocessar" }));
   });
+
+  it.each([
+    ["totp", "123456"],
+    ["backup_code", "RECOVERY-123"],
+  ] as const)("submits %s as the selected step-up method", async (method, code) => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ token: "step-up", expiresInSeconds: 300 }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await authenticatedAdminAdapter.completeStepUp(method, code);
+    const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+    const init = (calls[0]?.[1] ?? {}) as unknown as RequestInit;
+    expect(init.body).toBe(JSON.stringify({ method, code }));
+  });
 });

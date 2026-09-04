@@ -5,12 +5,19 @@ import {
   adminJobRetrySchema,
   adminJobSearchQuerySchema,
   adminPlatformRoleUpdateSchema,
+  domainIdSchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
 import { z } from "zod";
 import type { AdminService } from "./admin-service.js";
 import type { ApiContext, ApiEnv, RequestActor } from "./http/index.js";
-import { ApiHttpError, parseJsonBody, parseQuery, rateLimitedError } from "./http/index.js";
+import {
+  ApiHttpError,
+  parseJsonBody,
+  parseQuery,
+  rateLimitedError,
+  validationError,
+} from "./http/index.js";
 
 const DEFAULT_ADMIN_RATE_LIMIT = 60;
 const DEFAULT_ADMIN_RATE_WINDOW_SECONDS = 60;
@@ -161,9 +168,11 @@ export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesO
   });
 
   router.post("/admin/jobs/:jobId/retry", async (context) => {
+    const parsedJobId = domainIdSchema.safeParse(context.req.param("jobId"));
+    if (!parsedJobId.success) throw validationError(parsedJobId.error);
     const result = await service.retryJob(
       actorOf(context),
-      context.req.param("jobId"),
+      parsedJobId.data,
       await parseJsonBody(context, adminJobRetrySchema),
       requiredIdempotencyKey(context),
       context.get("correlationId"),
