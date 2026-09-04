@@ -2249,6 +2249,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.recurrences.get(recurrence.id)?.value;
       if (!current) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
+      if (input.scope !== "this_and_future") {
+        throw new FinanceAdapterError(
+          "Este escopo exige ocorrências materializadas e só está disponível no servidor.",
+          422,
+        );
+      }
       const fingerprint = JSON.stringify({ recurrenceId: recurrence.id, input });
       if (commandKey) {
         const previous = state.recurrenceEditCommands.get(commandKey);
@@ -2362,7 +2368,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
-      const fingerprint = JSON.stringify({ planId: plan.id, input });
+      const fingerprint = JSON.stringify({ planId: plan.id, expectedVersion: plan.version, input });
       if (_commandKey) {
         const previous = state.installmentEditCommands.get(_commandKey);
         if (previous) {
@@ -2427,7 +2433,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       state.installmentPlans.set(plan.id, { input: current, value: next });
       if (_commandKey)
         state.installmentEditCommands.set(_commandKey, {
-          fingerprint: JSON.stringify({ planId: plan.id, input }),
+          fingerprint,
           value: next,
         });
       return next;
@@ -2436,13 +2442,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
-      if (current.version !== plan.version)
-        throw new FinanceAdapterError(
-          "O parcelamento foi alterado por outra pessoa.",
-          412,
-          current.version,
-        );
-      const fingerprint = JSON.stringify({ planId: plan.id, installmentId: installment.id, input });
+      const fingerprint = JSON.stringify({
+        planId: plan.id,
+        installmentId: installment.id,
+        expectedVersion: plan.version,
+        input,
+      });
       if (commandKey) {
         const previous = state.installmentEditCommands.get(commandKey);
         if (previous) {
@@ -2451,6 +2456,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           return previous.value;
         }
       }
+      if (current.version !== plan.version)
+        throw new FinanceAdapterError(
+          "O parcelamento foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
       const target = current.installments.find((item) => item.id === installment.id);
       if (target?.state !== "planned")
         throw new FinanceAdapterError("Somente parcelas futuras podem ser alteradas.", 409);
@@ -2473,6 +2484,15 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const companion = next.installments.find(
         (item) => item.id !== target.id && item.state === "planned",
       );
+      if (
+        oldMinor !== newMinor &&
+        (!companion || BigInt(companion.amount.minor) + oldMinor - newMinor <= BigInt(0))
+      ) {
+        throw new FinanceAdapterError(
+          "É preciso conservar um valor positivo em outra parcela futura.",
+          409,
+        );
+      }
       if (oldMinor !== newMinor && companion) {
         companion.amount = {
           ...companion.amount,
@@ -2487,12 +2507,6 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
-      if (current.version !== plan.version)
-        throw new FinanceAdapterError(
-          "O parcelamento foi alterado por outra pessoa.",
-          412,
-          current.version,
-        );
       const fingerprint = JSON.stringify({ planId: plan.id, confirm: true });
       if (commandKey) {
         const previous = state.installmentCancelCommands.get(commandKey);
@@ -2502,6 +2516,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           return previous.value;
         }
       }
+      if (current.version !== plan.version)
+        throw new FinanceAdapterError(
+          "O parcelamento foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
       const next = {
         ...current,
         version: current.version + 1,

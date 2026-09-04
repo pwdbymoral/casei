@@ -1688,6 +1688,14 @@ describe("finance adapter", () => {
       "rec-edit",
     );
     expect(edited.recurrence.amount.minor).toBe("1200");
+    await expect(
+      adapter.updateRecurrence(
+        "plans",
+        edited.recurrence,
+        { scope: "this", effectiveOn: "2026-08-01", amount: { currency: "BRL", minor: "900" } },
+        "rec-exception",
+      ),
+    ).rejects.toMatchObject({ status: 422 });
     const planCreated = await adapter.createInstallmentPlan(
       "plans",
       { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
@@ -1727,5 +1735,41 @@ describe("finance adapter", () => {
     expect(
       updated.installments.reduce((sum, item) => sum + BigInt(item.amount.minor), BigInt(0)),
     ).toBe(BigInt(1300));
+  });
+
+  it("replays installment item commands before the stale-version check and rejects broken conservation", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createInstallmentPlan(
+      "item-invariants",
+      { total: { currency: "BRL", minor: "1000" }, count: 2, firstDueOn: "2026-08-01" },
+      "item-plan-create",
+    );
+    const plan = await adapter.getInstallmentPlan("item-invariants", created.id);
+    const item = plan.installments[0];
+    const updated = await adapter.updateInstallment(
+      "item-invariants",
+      plan,
+      item,
+      { amount: { currency: "BRL", minor: "600" } },
+      "item-edit",
+    );
+    await expect(
+      adapter.updateInstallment(
+        "item-invariants",
+        plan,
+        item,
+        { amount: { currency: "BRL", minor: "600" } },
+        "item-edit",
+      ),
+    ).resolves.toEqual(updated);
+    await expect(
+      adapter.updateInstallment(
+        "item-invariants",
+        updated,
+        updated.installments[0],
+        { amount: { currency: "BRL", minor: "1000" } },
+        "item-invalid",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });
