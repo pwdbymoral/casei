@@ -1108,6 +1108,7 @@ export const statementSchema = z.object({
   total: moneySchema,
   paid: moneySchema,
   openAmount: moneySchema,
+  creditApplied: moneySchema.optional(),
   version: versionSchema,
 });
 

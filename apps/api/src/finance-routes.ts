@@ -571,12 +571,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
       const statementId = parseDomainId(context.req.param("statementId"));
       const paymentId = parseDomainId(context.req.param("paymentId"));
       await parseJsonBody(context, cancelTransactionSchema);
-      const result = await service.reverseTransaction(
+      const result = await service.cancelStatementPayment(
         scopeOf(context),
+        statementId,
         paymentId,
         requiredIdempotencyKey(context),
         requireIfMatch(context),
-        statementId,
       );
       setVersionHeaders(context, result.version);
       return context.json(result);

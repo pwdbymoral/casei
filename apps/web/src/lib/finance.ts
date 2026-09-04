@@ -65,6 +65,7 @@ export type Statement = {
   total: Money;
   paid: Money;
   openAmount: Money;
+  creditApplied?: Money;
   version: number;
 };
 

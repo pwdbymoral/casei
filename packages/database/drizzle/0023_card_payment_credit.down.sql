@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS "card_credit_application" CASCADE;
 DROP TABLE IF EXISTS "card_credit" CASCADE;
 DROP INDEX IF EXISTS "card_payment_workspace_id_id_unique";
 ALTER TABLE "card_payment"

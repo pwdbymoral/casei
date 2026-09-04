@@ -469,29 +469,113 @@ describe("CARD-004 statement payment PostgreSQL", () => {
       const afterPayment = await finance.getStatement(scope, statement.id);
       expect(afterPayment?.paid.minor).toBe("1000");
       expect(afterPayment?.openAmount.minor).toBe("0");
-      const credit = await fixture.pool.query<{ amount_minor: string; state: string }>(
-        `SELECT amount_minor, state FROM card_credit WHERE workspace_id = $1`,
-        [scope.workspaceId],
+      const credit = await fixture.pool.query<{
+        amount_minor: string;
+        remaining_minor: string;
+        state: string;
+      }>(`SELECT amount_minor, remaining_minor, state FROM card_credit WHERE workspace_id = $1`, [
+        scope.workspaceId,
+      ]);
+      expect(credit.rows).toEqual([
+        { amount_minor: "500", remaining_minor: "500", state: "active" },
+      ]);
+
+      const futurePurchase = await finance.createCardPurchase(
+        scope,
+        {
+          amount: { currency: "BRL", minor: "600" },
+          occurredOn: "2030-01-11",
+          description: "Compra futura",
+          cardId,
+        },
+        "card-payment-future-purchase-001",
       );
-      expect(credit.rows).toEqual([{ amount_minor: "500", state: "active" }]);
+      const futureStatement = (await finance.listStatements(scope, cardId)).find(
+        (candidate) => candidate.id !== statement.id,
+      );
+      if (!futureStatement) throw new Error("expected future statement");
+      expect(futureStatement).toMatchObject({
+        total: { minor: "100" },
+        paid: { minor: "0" },
+        openAmount: { minor: "100" },
+        creditApplied: { minor: "500" },
+      });
+      await expect(
+        fixture.pool.query(
+          `SELECT remaining_minor, state FROM card_credit WHERE workspace_id = $1`,
+          [scope.workspaceId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [{ remaining_minor: "0", state: "consumed" }],
+      });
+
+      const futurePayment = await finance.payStatement(
+        scope,
+        futureStatement.id,
+        { amount: { currency: "BRL", minor: "100" }, occurredOn: "2030-01-12" },
+        "card-payment-future-pay-001",
+      );
+      const futurePaymentTransaction = await finance.getTransaction(
+        scope,
+        futurePayment.response.transactionId,
+      );
+      if (!futurePaymentTransaction) throw new Error("expected future payment transaction");
+      await finance.reverseTransaction(
+        scope,
+        futurePayment.response.transactionId,
+        "card-payment-future-cancel-001",
+        futurePaymentTransaction.version,
+        futureStatement.id,
+      );
+      await expect(finance.getStatement(scope, futureStatement.id)).resolves.toMatchObject({
+        total: { minor: "100" },
+        paid: { minor: "0" },
+        openAmount: { minor: "100" },
+        creditApplied: { minor: "500" },
+        state: "open",
+      });
 
       const transaction = await finance.getTransaction(scope, payment.response.transactionId);
       if (!transaction) throw new Error("expected payment transaction");
-      await finance.reverseTransaction(
+      const cardPayment = await fixture.pool.query<{ id: string }>(
+        `SELECT id FROM card_payment WHERE workspace_id = $1 AND transaction_id = $2`,
+        [scope.workspaceId, payment.response.transactionId],
+      );
+      const cardPaymentId = cardPayment.rows[0]?.id;
+      if (!cardPaymentId) throw new Error("expected card payment");
+      await finance.cancelStatementPayment(
         scope,
-        payment.response.transactionId,
+        statement.id,
+        cardPaymentId,
         "card-payment-cancel-001",
         transaction.version,
-        statement.id,
       );
       const afterCancel = await finance.getStatement(scope, statement.id);
       expect(afterCancel?.paid.minor).toBe("0");
       expect(afterCancel?.openAmount.minor).toBe("1000");
-      const canceledCredit = await fixture.pool.query<{ state: string }>(
-        `SELECT state FROM card_credit WHERE workspace_id = $1`,
+      const restoredFuture = await finance.getStatement(scope, futureStatement.id);
+      expect(restoredFuture).toMatchObject({
+        total: { minor: "600" },
+        paid: { minor: "0" },
+        openAmount: { minor: "600" },
+        creditApplied: { minor: "0" },
+        state: "open",
+      });
+      const canceledCredit = await fixture.pool.query<{
+        amount_minor: string;
+        remaining_minor: string;
+        state: string;
+      }>(`SELECT amount_minor, remaining_minor, state FROM card_credit WHERE workspace_id = $1`, [
+        scope.workspaceId,
+      ]);
+      expect(canceledCredit.rows).toEqual([
+        { amount_minor: "500", remaining_minor: "500", state: "canceled" },
+      ]);
+      const applications = await fixture.pool.query<{ state: string; amount_minor: string }>(
+        `SELECT state, amount_minor FROM card_credit_application WHERE workspace_id = $1`,
         [scope.workspaceId],
       );
-      expect(canceledCredit.rows).toEqual([{ state: "canceled" }]);
+      expect(applications.rows).toEqual([{ state: "reversed", amount_minor: "500" }]);
       const audit = await fixture.pool.query<{ action: string }>(
         `SELECT action FROM audit_event WHERE workspace_id = $1 AND target_id = $2 ORDER BY occurred_at`,
         [scope.workspaceId, payment.response.transactionId],
@@ -503,6 +587,7 @@ describe("CARD-004 statement payment PostgreSQL", () => {
       );
       expect(statementAudit.rows.map((row) => row.action)).toContain("statement.payment_reversed");
       expect(purchase.transaction.cardId).toBe(cardId);
+      expect(futurePurchase.transaction.cardId).toBe(cardId);
     } finally {
       await fixture.close();
     }

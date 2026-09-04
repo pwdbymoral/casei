@@ -172,6 +172,7 @@ export interface StatementView {
   total: { currency: string; minor: string };
   paid: { currency: string; minor: string };
   openAmount: { currency: string; minor: string };
+  creditApplied?: { currency: string; minor: string };
   version: number;
 }
 
@@ -1381,10 +1382,13 @@ export class FinanceService {
     return this.withScopedClient(scope, async (client) => {
       const result = await client.query(
         `SELECT id, workspace_id, card_id, period_start, closing_on, due_on, state,
-                total_minor, paid_minor, currency_code, version
+                total_minor, paid_minor, currency_code, version, credit_applied_minor
            FROM (
-             SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
-                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+           SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
+                    s.state, s.total_minor, s.paid_minor, c.currency_code, s.version,
+                    COALESCE((SELECT sum(ca.amount_minor) FROM card_credit_application ca
+                               WHERE ca.workspace_id = s.workspace_id AND ca.statement_id = s.id
+                                 AND ca.state = 'active'), 0) AS credit_applied_minor
                FROM credit_statement s
                JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
               WHERE s.workspace_id = $1
@@ -1411,10 +1415,14 @@ export class FinanceService {
         total_minor: string | bigint;
         paid_minor: string | bigint;
         currency_code: string;
+        credit_applied_minor: string | bigint;
         version: number;
       }>(
         `SELECT s.id, s.workspace_id, s.card_id, s.period_start, s.closing_on, s.due_on,
-                s.state, s.total_minor, s.paid_minor, c.currency_code, s.version
+                s.state, s.total_minor, s.paid_minor, c.currency_code, s.version,
+                COALESCE((SELECT sum(ca.amount_minor) FROM card_credit_application ca
+                           WHERE ca.workspace_id = s.workspace_id AND ca.statement_id = s.id
+                             AND ca.state = 'active'), 0) AS credit_applied_minor
            FROM credit_statement s
            JOIN credit_card c ON c.workspace_id = s.workspace_id AND c.id = s.card_id
           WHERE s.workspace_id = $1 AND s.id = $2`,
@@ -2086,10 +2094,78 @@ export class FinanceService {
           const paid = BigInt(statementRow.paid_minor) - paymentAmount;
           if (paid < 0n)
             throw new FinanceConflictError("O pagamento já não está refletido na fatura.");
+          const applications = await client.query<{
+            id: string;
+            credit_id: string;
+            statement_id: string;
+            amount_minor: string;
+          }>(
+            `SELECT application.id, application.credit_id, application.statement_id, application.amount_minor
+               FROM card_credit_application application
+               JOIN card_credit credit
+                 ON credit.workspace_id = application.workspace_id AND credit.id = application.credit_id
+              WHERE application.workspace_id = $1
+                AND application.state = 'active'
+                AND credit.payment_id = (SELECT id FROM card_payment WHERE workspace_id = $1 AND transaction_id = $2)
+              ORDER BY application.created_at ASC, application.id ASC
+              FOR UPDATE OF application, credit`,
+            [scope.workspaceId, id],
+          );
+          const restoredByStatement = new Map<string, bigint>();
+          for (const application of applications.rows) {
+            const restored = BigInt(application.amount_minor);
+            restoredByStatement.set(
+              application.statement_id,
+              (restoredByStatement.get(application.statement_id) ?? 0n) + restored,
+            );
+            await client.query(
+              `UPDATE card_credit
+                  SET remaining_minor = remaining_minor + $1, state = 'active'
+                WHERE workspace_id = $2 AND id = $3 AND state <> 'canceled'`,
+              [restored, scope.workspaceId, application.credit_id],
+            );
+            await client.query(
+              `UPDATE card_credit_application
+                  SET state = 'reversed', reversed_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND state = 'active'`,
+              [scope.workspaceId, application.id],
+            );
+          }
+          for (const [applicationStatementId, restored] of restoredByStatement) {
+            const applicationStatement = await client.query<{
+              total_minor: string;
+              paid_minor: string;
+            }>(
+              `SELECT total_minor, paid_minor
+                 FROM credit_statement
+                WHERE workspace_id = $1 AND id = $2
+                FOR UPDATE`,
+              [scope.workspaceId, applicationStatementId],
+            );
+            const applicationStatementRow = applicationStatement.rows[0];
+            if (!applicationStatementRow) throw new FinanceNotFoundError();
+            const restoredTotal = BigInt(applicationStatementRow.total_minor) + restored;
+            const applicationPaid = BigInt(applicationStatementRow.paid_minor);
+            await client.query(
+              `UPDATE credit_statement
+                  SET total_minor = $1,
+                      state = CASE
+                        WHEN $2::bigint = 0 AND $1::bigint > 0 THEN 'open'
+                        WHEN $2::bigint >= $1::bigint THEN 'paid'
+                        WHEN $2::bigint > 0 THEN 'partially_paid'
+                        ELSE 'open'
+                      END,
+                      version = version + 1,
+                      updated_at = now()
+                WHERE workspace_id = $3 AND id = $4`,
+              [restoredTotal, applicationPaid, scope.workspaceId, applicationStatementId],
+            );
+          }
           await client.query(
             `UPDATE credit_statement
                 SET paid_minor = $1::bigint,
                     state = CASE
+                      WHEN $1::bigint = 0 AND total_minor > 0 THEN 'open'
                       WHEN $1::bigint = 0 THEN 'closed'
                       WHEN $1::bigint >= total_minor THEN 'paid'
                       ELSE 'partially_paid'
@@ -2696,8 +2772,8 @@ export class FinanceService {
           if (!paymentId) throw new Error("card payment insert failed");
           if (allocation.creditMinor > 0n) {
             await client.query(
-              `INSERT INTO card_credit (workspace_id, card_id, payment_id, amount_minor)
-               VALUES ($1, $2, $3, $4)`,
+              `INSERT INTO card_credit (workspace_id, card_id, payment_id, amount_minor, remaining_minor)
+               VALUES ($1, $2, $3, $4, $4)`,
               [scope.workspaceId, row.card_id, paymentId, allocation.creditMinor],
             );
           }
@@ -2731,6 +2807,34 @@ export class FinanceService {
       ...result,
       response: result.response as unknown as StatementPaymentResponseView,
     };
+  }
+
+  /** Resolves the public card-payment identifier before applying transaction reversal. */
+  async cancelStatementPayment(
+    scope: FinanceScope,
+    statementId: string,
+    paymentId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<TransactionView> {
+    assertFinanceCapability(scope, "finance.write");
+    const payment = await this.withScopedClient(scope, async (client) => {
+      const result = await client.query<{ transaction_id: string }>(
+        `SELECT transaction_id
+           FROM card_payment
+          WHERE workspace_id = $1 AND statement_id = $2 AND id = $3`,
+        [scope.workspaceId, statementId, paymentId],
+      );
+      return result.rows[0];
+    });
+    if (!payment) throw new FinanceNotFoundError();
+    return this.reverseTransaction(
+      scope,
+      payment.transaction_id,
+      idempotencyKey,
+      expectedVersion,
+      statementId,
+    );
   }
 
   async previewInstallmentPlan(
@@ -4175,10 +4279,54 @@ export class FinanceService {
         WHERE workspace_id = $2 AND id = $3 AND state = 'open'`,
       [amount, workspaceId, statementRow.id],
     );
+    await this.applyCardCredits(client, workspaceId, cardId, statementRow.id, amount);
     await client.query(
       `UPDATE finance_transaction SET statement_id = $1 WHERE workspace_id = $2 AND id = $3`,
       [statementRow.id, workspaceId, transactionId],
     );
+  }
+
+  private async applyCardCredits(
+    client: PgPoolClient,
+    workspaceId: string,
+    cardId: string,
+    statementId: string,
+    purchaseAmount: bigint,
+  ): Promise<void> {
+    let remainingPurchase = purchaseAmount;
+    const credits = await client.query<{ id: string; remaining_minor: string | bigint }>(
+      `SELECT id, remaining_minor
+         FROM card_credit
+        WHERE workspace_id = $1 AND card_id = $2
+          AND state = 'active' AND remaining_minor > 0
+        ORDER BY created_at ASC, id ASC
+        FOR UPDATE`,
+      [workspaceId, cardId],
+    );
+    for (const credit of credits.rows) {
+      if (remainingPurchase <= 0n) break;
+      const creditRemaining = BigInt(credit.remaining_minor);
+      const applied = creditRemaining < remainingPurchase ? creditRemaining : remainingPurchase;
+      await client.query(
+        `INSERT INTO card_credit_application (workspace_id, credit_id, statement_id, amount_minor)
+         VALUES ($1, $2, $3, $4)`,
+        [workspaceId, credit.id, statementId, applied],
+      );
+      await client.query(
+        `UPDATE card_credit
+            SET remaining_minor = remaining_minor - $1,
+                state = CASE WHEN remaining_minor - $1 = 0 THEN 'consumed' ELSE 'active' END
+          WHERE workspace_id = $2 AND id = $3 AND state = 'active'`,
+        [applied, workspaceId, credit.id],
+      );
+      await client.query(
+        `UPDATE credit_statement
+            SET total_minor = total_minor - $1, version = version + 1, updated_at = now()
+          WHERE workspace_id = $2 AND id = $3 AND state = 'open'`,
+        [applied, workspaceId, statementId],
+      );
+      remainingPurchase -= applied;
+    }
   }
 
   private async ensureAccount(
@@ -5134,6 +5282,7 @@ function toStatementView(row: {
   total_minor: string | bigint;
   paid_minor: string | bigint;
   currency_code: string;
+  credit_applied_minor?: string | bigint;
   version: number;
 }): StatementView {
   const total = BigInt(row.total_minor);
@@ -5149,6 +5298,10 @@ function toStatementView(row: {
     total: { currency: row.currency_code, minor: total.toString() },
     paid: { currency: row.currency_code, minor: paid.toString() },
     openAmount: { currency: row.currency_code, minor: (total - paid).toString() },
+    creditApplied: {
+      currency: row.currency_code,
+      minor: (row.credit_applied_minor ?? 0n).toString(),
+    },
     version: row.version,
   };
 }

@@ -125,7 +125,9 @@ preservando o lançamento original e emitindo reversão assinada no ledger. `CAR
 somente para a validação final de browser da visão completa por ciclo.
 
 CARD-004 persiste cada pagamento com a parcela aplicada à fatura e, quando confirmado com
-`allowCredit`, o excedente em `card_credit`. A reversão cancela o pagamento e o crédito derivado,
+`allowCredit`, o excedente em `card_credit`. Créditos são consumidos atomicamente, em ordem FIFO,
+por compras posteriores e ficam expostos na composição da fatura; a reversão de uma compra
+restaura o crédito aplicado, e a reversão do pagamento cancela sua fonte e todas as aplicações,
 reverte os lançamentos do ledger e registra auditoria; o saldo pago da fatura nunca inclui o excedente.
 
 **Gate 4:** cenários compra → fechamento → pagamento reconciliam carteira, resultado e passivo sem dupla contagem; bordas de calendário, concorrência e estorno têm testes.
