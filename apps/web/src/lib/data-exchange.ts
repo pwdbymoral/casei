@@ -1167,12 +1167,10 @@ export function exportDateRangeError(from: string, to: string): string | null {
   const validCivilDate = (value: string): boolean => {
     if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
     const [year, month, day] = value.split("-").map(Number);
-    const date = new Date(Date.UTC(year ?? 0, (month ?? 0) - 1, day ?? 0));
-    return (
-      date.getUTCFullYear() === year &&
-      date.getUTCMonth() === (month ?? 0) - 1 &&
-      date.getUTCDate() === day
-    );
+    if (!year || !month || !day || month < 1 || month > 12 || day < 1) return false;
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return day <= (daysInMonth[month - 1] ?? 0);
   };
   if (from && !validCivilDate(from)) return "Informe uma data inicial válida.";
   if (to && !validCivilDate(to)) return "Informe uma data final válida.";

@@ -170,6 +170,8 @@ describe("data exchange UI ports", () => {
     expect(exportDateRangeError("2026-09-04", "2026-09-04")).toBeNull();
     expect(exportDateRangeError("", "2026-09-04")).toBeNull();
     expect(exportDateRangeError("2026-02-31", "2026-03-01")).toContain("data inicial válida");
+    expect(exportDateRangeError("0001-01-01", "0001-01-02")).toBeNull();
+    expect(exportDateRangeError("0099-02-28", "0099-03-01")).toBeNull();
   });
 
   it("não reutiliza exportação de outro espaço e marca arquivo expirado", () => {
