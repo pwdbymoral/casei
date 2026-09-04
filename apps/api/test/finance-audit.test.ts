@@ -248,8 +248,68 @@ describe("finance transaction audit history", () => {
     expect(page.nextCursor).toBeTruthy();
     const { decodeCursor } = await import("../src/http/cursor.js");
     expect(decodeCursor(page.nextCursor as string, cursorSecret).position).toEqual([
+      workspaceId,
+      transactionId,
       "2026-08-23T12:00:00.123456+00:00",
       auditId,
     ]);
+  });
+
+  it("does not accept an audit cursor for a different transaction", async () => {
+    const fake = fakePool([
+      {
+        id: auditId,
+        transaction_id: transactionId,
+        category: "finance",
+        action: "transaction.created",
+        actor_id: "user-1",
+        occurred_at: "2026-08-23 12:00:00.123456+00",
+        origin: "api",
+        correlation_id: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        result: "success",
+        reason: null,
+        before_redacted: null,
+        after_redacted: { state: "posted" },
+      },
+      {
+        id: "0190f3c8-2a10-7abc-8def-1234567890ae",
+        transaction_id: transactionId,
+        category: "finance",
+        action: "transaction.posted",
+        actor_id: "user-1",
+        occurred_at: "2026-08-23 12:00:00.123100+00",
+        origin: "api",
+        correlation_id: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        result: "success",
+        reason: null,
+        before_redacted: null,
+        after_redacted: { state: "posted" },
+      },
+    ]);
+    const cursorSecret = "test-secret-that-is-long-enough";
+    const service = new FinanceService(fake.pool as never, { cursorSecret });
+    const first = await service.listTransactionAudit(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+        role: "member",
+      },
+      transactionId,
+      { limit: 1 },
+    );
+
+    await expect(
+      service.listTransactionAudit(
+        {
+          workspaceId,
+          actorId: "user-1",
+          correlationId: "01J5Q5M3GJ6R3S6T4Q1W8Z2K9A",
+          role: "member",
+        },
+        "0190f3c8-2a10-7abc-8def-1234567890af",
+        { cursor: first.nextCursor ?? undefined, limit: 1 },
+      ),
+    ).rejects.toThrow("Invalid cursor");
   });
 });

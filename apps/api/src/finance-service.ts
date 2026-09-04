@@ -401,8 +401,13 @@ type StatementItemsCursorPosition = [occurredOn: string, createdAt: string, id: 
 const statementItemsCursorOrdering = "occurred_on,created_at,id";
 type TransactionCursorPosition = [occurredOn: string, createdAt: string, id: string];
 const transactionCursorOrdering = "occurred_on,created_at,id:desc";
-type FinanceAuditCursorPosition = [occurredAt: string, id: string];
-const financeAuditCursorOrdering = "occurred_at,id:desc";
+type FinanceAuditCursorPosition = [
+  workspaceId: string,
+  transactionId: string,
+  occurredAt: string,
+  id: string,
+];
+const financeAuditCursorOrdering = "workspace_id,transaction_id,occurred_at,id:desc";
 type LoanPaymentCursorPosition = [occurredOn: string, id: string];
 const loanPaymentCursorOrdering = "occurred_on,id:desc";
 
@@ -1361,7 +1366,12 @@ export class FinanceService {
 
       const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
       const cursor = options.cursor
-        ? decodeFinanceAuditCursor(options.cursor, this.cursorSecret)
+        ? decodeFinanceAuditCursor(
+            options.cursor,
+            this.cursorSecret,
+            scope.workspaceId,
+            transactionId,
+          )
         : null;
       const values: unknown[] = [scope.workspaceId, transactionId];
       const conditions = [
@@ -1370,7 +1380,7 @@ export class FinanceService {
         "target_id = $2",
       ];
       if (cursor) {
-        values.push(cursor[0], cursor[1]);
+        values.push(cursor[2], cursor[3]);
         conditions.push(
           `(occurred_at < $${values.length - 1}::timestamptz OR (occurred_at = $${values.length - 1}::timestamptz AND id < $${values.length}::uuid))`,
         );
@@ -1396,7 +1406,12 @@ export class FinanceService {
             ? encodeCursor(
                 {
                   ordering: financeAuditCursorOrdering,
-                  position: [normalizePostgresTimestamp(last.occurred_at), last.id],
+                  position: [
+                    scope.workspaceId,
+                    transactionId,
+                    normalizePostgresTimestamp(last.occurred_at),
+                    last.id,
+                  ],
                 },
                 this.cursorSecret,
               )
@@ -5226,22 +5241,31 @@ function decodeTransactionCursor(cursor: string, secret: string): TransactionCur
   return [occurredOn, createdAt, id];
 }
 
-function decodeFinanceAuditCursor(cursor: string, secret: string): FinanceAuditCursorPosition {
+function decodeFinanceAuditCursor(
+  cursor: string,
+  secret: string,
+  workspaceId: string,
+  transactionId: string,
+): FinanceAuditCursorPosition {
   const payload = decodeCursor(cursor, secret);
   const position = payload.position;
   if (
     payload.ordering !== financeAuditCursorOrdering ||
     !Array.isArray(position) ||
-    position.length !== 2 ||
+    position.length !== 4 ||
     position.some((value) => typeof value !== "string")
   ) {
     throw new InvalidCursorError();
   }
-  const [occurredAt, id] = position as [string, string];
+  const [cursorWorkspaceId, cursorTransactionId, occurredAt, id] =
+    position as FinanceAuditCursorPosition;
   if (Number.isNaN(Date.parse(occurredAt)) || !domainIdSchema.safeParse(id).success) {
     throw new InvalidCursorError();
   }
-  return [occurredAt, id];
+  if (cursorWorkspaceId !== workspaceId || cursorTransactionId !== transactionId) {
+    throw new InvalidCursorError();
+  }
+  return [cursorWorkspaceId, cursorTransactionId, occurredAt, id];
 }
 
 function decodeLoanPaymentCursor(

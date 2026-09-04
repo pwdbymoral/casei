@@ -17,13 +17,13 @@
 - [x] PLAN-001 backend: liquidação parcial com valor/data efetivos opcionais, `If-Match`, idempotência, transições de estado, delta por evento e reversão de todos os deltas.
 - [x] Incremento de fatura: composição ordenada de compras e pagamentos com cursor/limite estável e `hasMore`, reabertura explícita somente para fatura fechada sem pagamentos, conflito otimista com versão atual e recarregar/revisar na interface, além de confirmação acessível.
 - [x] FIN-004/FIN-005 base: captura rápida autenticada com defaults, moeda do espaço, feedback e desfazer por reversão; linha do tempo com busca, período, estado/tipo, filtros persistidos na URL, cursor assinado, carregamento incremental, estados e detalhe básico.
-- [ ] FIN-005b: histórico auditável detalhado, com eventos, origem, antes/depois sanitizado e consequências relacionadas.
+- [x] FIN-005b: histórico auditável detalhado, com eventos, origem, antes/depois sanitizado e consequências relacionadas; cursores assinados vinculados ao espaço e à transação.
 
 ## Limitações rastreáveis
 
 Esta PR entrega o núcleo para destravar os gates financeiros, mas não declara FIN/PLAN/CARD completos. Permanecem tarefas posteriores sem decisão de negócio nova:
 
-- `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública, histórico auditável detalhado e defaults de categorias.
+- `FIN`: conferência/ajuste de saldo com motivo, edição de metadado/categoria, cancelamento com auditoria pública e defaults de categorias.
 - `PLAN`: janela móvel materializada por job, pausa/retomada, comandos de edição por escopo e UI de compromissos permanecem; PLAN-001 backend já liquida parcialmente, enquanto a criação já materializa uma janela inicial idempotente e o domínio cobre datas/parcelas.
 - `CARD`: movimentação entre faturas abertas permanece; ajuste pós-fechamento, estorno/tarifas e
   crédito excedente já possuem comandos auditáveis, enquanto listagem, fechamento, composição e
