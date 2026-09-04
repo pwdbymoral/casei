@@ -78,6 +78,26 @@ Papel de plataforma é independente do papel em espaços e nunca concede acesso 
 - visualizar saúde de jobs de import/recorrência e reexecutar apenas operações idempotentes falhas;
 - consultar auditoria administrativa por ator, alvo, ação e período.
 
+#### Contrato operacional do console (ADMIN-003/004)
+
+`GET /v1/admin/jobs` lista somente jobs de `data.import` e `recurrence.expand`, sem
+payload, e aceita os filtros opcionais `type` e `state`, além de `limit` (1–100) e
+cursor opaco. A resposta usa `items/page` e inclui contagens agregadas por estado;
+cada item expõe apenas estado operacional, tentativas, instantes, IDs de escopo,
+correlation ID e erro sanitizado. O campo `retryable` só é verdadeiro para jobs
+`failed`/`dead` desses dois tipos.
+
+`POST /v1/admin/jobs/:jobId/retry` exige `reason`, `Idempotency-Key` e step-up.
+Somente jobs `failed`/`dead` de `data.import` ou `recurrence.expand` podem ser
+reexecutados. O retry limpa lease/erro, devolve o job para `pending` e preserva a
+chave de idempotência do job; estados não elegíveis retornam `job_not_ready`.
+
+`GET /v1/admin/audit` consulta `platform_audit_event` por `actorId`, `targetId`,
+`action`, `from` e `to` (instantes UTC), com limite/cursor opaco e ordenação
+determinística por `occurredAt,id`. A resposta não contém snapshots domésticos;
+motivo e demais campos são os metadados administrativos já sanitizados pelo
+servidor. Consultas aplicam a retenção vigente de 365 dias.
+
 Não inclui editar transações do usuário, revelar senha/token, assumir identidade, entrar silenciosamente em espaço, ler descrições/valores/produtos ou excluir fisicamente dados.
 
 ### Bootstrap e segurança

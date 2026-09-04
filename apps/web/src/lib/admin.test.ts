@@ -97,4 +97,42 @@ describe("admin API adapter", () => {
       code: "offline",
     });
   });
+
+  it("keeps operational filters in the jobs and audit requests", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            page: { nextCursor: null, hasMore: false },
+            health: { pending: 0, running: 0, succeeded: 0, failed: 0, dead: 0, cancelled: 0 },
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+    await authenticatedAdminAdapter.searchJobs({ type: "data.import", state: "dead", limit: 25 });
+    expect(calls[0]?.[0]).toBe(
+      "http://localhost:3001/v1/admin/jobs?type=data.import&state=dead&limit=25",
+    );
+    await authenticatedAdminAdapter.searchAudit({ actorId: "admin", action: "job:retry" });
+    expect(calls[1]?.[0]).toBe(
+      "http://localhost:3001/v1/admin/audit?actorId=admin&action=job%3Aretry",
+    );
+  });
+
+  it("sends reason, idempotency and step-up for job retry", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ state: "pending" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await authenticatedAdminAdapter.retryJob("job-1", "reprocessar", "retry-fixed-key", "step-up");
+    const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+    const init = (calls[0]?.[1] ?? {}) as unknown as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(headers.get("Idempotency-Key")).toBe("retry-fixed-key");
+    expect(headers.get("X-Admin-Step-Up")).toBe("step-up");
+    expect(init.body).toBe(JSON.stringify({ reason: "reprocessar" }));
+  });
 });

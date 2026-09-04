@@ -1,6 +1,9 @@
 import {
   adminAccountActionSchema,
   adminAccountSearchQuerySchema,
+  adminAuditSearchQuerySchema,
+  adminJobRetrySchema,
+  adminJobSearchQuerySchema,
   adminPlatformRoleUpdateSchema,
 } from "@casei/contracts";
 import type { Hono, MiddlewareHandler } from "hono";
@@ -149,6 +152,30 @@ export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesO
       parseQuery(context, adminAccountSearchQuerySchema),
     );
     return context.json(result);
+  });
+
+  router.get("/admin/jobs", async (context) => {
+    return context.json(
+      await service.searchJobs(actorOf(context), parseQuery(context, adminJobSearchQuerySchema)),
+    );
+  });
+
+  router.post("/admin/jobs/:jobId/retry", async (context) => {
+    const result = await service.retryJob(
+      actorOf(context),
+      context.req.param("jobId"),
+      await parseJsonBody(context, adminJobRetrySchema),
+      requiredIdempotencyKey(context),
+      context.get("correlationId"),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(result.result);
+  });
+
+  router.get("/admin/audit", async (context) => {
+    return context.json(
+      await service.searchAudit(actorOf(context), parseQuery(context, adminAuditSearchQuerySchema)),
+    );
   });
 
   router.get("/admin/accounts/:userId", async (context) => {
