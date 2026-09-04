@@ -62,6 +62,7 @@ type JobRow = QueryResultRow & {
   correlation_id: string;
   last_error: string | null;
   created_at: Date;
+  created_at_cursor: string;
   updated_at: Date;
 };
 
@@ -71,6 +72,7 @@ type AuditRow = QueryResultRow & {
   target_id: string | null;
   action: string;
   occurred_at: Date;
+  occurred_at_cursor: string;
   origin: string;
   correlation_id: string;
   ip_address: string | null;
@@ -280,7 +282,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     const rows = await this.query<JobRow>(
       `SELECT id, job_type, job_version, workspace_id, actor_id, required_capability,
               state, attempts, available_at, lease_until, correlation_id, last_error,
-              created_at, updated_at
+              created_at, created_at::text AS created_at_cursor, updated_at
          FROM job
         WHERE job_type IN ('data.import', 'recurrence.expand')
           AND ($1::text IS NULL OR job_type = $1)
@@ -317,8 +319,9 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
       if (row.state in health) health[row.state as keyof typeof health] = Number(row.count);
     }
     const hasMore = rows.rows.length > input.limit;
-    const items = rows.rows.slice(0, input.limit).map(toAdminJobSummary);
-    const last = items.at(-1);
+    const visibleRows = rows.rows.slice(0, input.limit);
+    const items = visibleRows.map(toAdminJobSummary);
+    const last = visibleRows.at(-1);
     return {
       items,
       page: {
@@ -326,7 +329,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
         nextCursor:
           hasMore && last
             ? encodeCursor(
-                { ordering: JOB_CURSOR_ORDERING, position: [last.createdAt, last.id] },
+                { ordering: JOB_CURSOR_ORDERING, position: [last.created_at_cursor, last.id] },
                 ADMIN_CURSOR_SECRET,
               )
             : null,
@@ -345,7 +348,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
           AND state IN ('failed', 'dead')
       RETURNING id, job_type, job_version, workspace_id, actor_id, required_capability,
                 state, attempts, available_at, lease_until, correlation_id, last_error,
-                created_at, updated_at`,
+                created_at, created_at::text AS created_at_cursor, updated_at`,
       [jobId],
     );
     const row = result.rows[0];
@@ -361,7 +364,8 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
     const to = input.to ? new Date(input.to) : null;
     const rows = await this.query<AuditRow>(
       `SELECT id, actor_id, target_id, action, occurred_at, origin, correlation_id,
-              ip_address, endpoint, result, reason
+              ip_address, endpoint, result, reason,
+              occurred_at::text AS occurred_at_cursor
          FROM platform_audit_event
         WHERE occurred_at >= $1
           AND ($2::timestamptz IS NULL OR occurred_at <= $2)
@@ -383,8 +387,9 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
       ],
     );
     const hasMore = rows.rows.length > input.limit;
-    const items = rows.rows.slice(0, input.limit).map(toAdminAuditEvent);
-    const last = items.at(-1);
+    const visibleRows = rows.rows.slice(0, input.limit);
+    const items = visibleRows.map(toAdminAuditEvent);
+    const last = visibleRows.at(-1);
     return {
       items,
       page: {
@@ -392,7 +397,7 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
         nextCursor:
           hasMore && last
             ? encodeCursor(
-                { ordering: AUDIT_CURSOR_ORDERING, position: [last.occurredAt, last.id] },
+                { ordering: AUDIT_CURSOR_ORDERING, position: [last.occurred_at_cursor, last.id] },
                 ADMIN_CURSOR_SECRET,
               )
             : null,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PostgresAdminAccountStore } from "../src/admin-store.js";
+import { decodeCursor } from "../src/http/cursor.js";
 
 describe("ADMIN PostgreSQL adapter", () => {
   it("resolves platform role and suspension from the server-side table", async () => {
@@ -218,5 +219,103 @@ describe("ADMIN PostgreSQL adapter", () => {
       }),
     );
     expect(auditValues?.[4]).toBe("2001:db8:0:0::/64");
+  });
+
+  it("preserves PostgreSQL timestamp precision in paginated admin cursors", async () => {
+    let jobQuery = "";
+    let auditQuery = "";
+    const jobRows = [
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        job_type: "data.import",
+        job_version: 1,
+        workspace_id: null,
+        actor_id: null,
+        required_capability: "import",
+        state: "failed",
+        attempts: 1,
+        available_at: new Date("2026-08-25T12:00:00.123Z"),
+        lease_until: null,
+        correlation_id: "01J00000000000000000000001",
+        last_error: null,
+        created_at: new Date("2026-08-25T12:00:00.123Z"),
+        created_at_cursor: "2026-08-25 12:00:00.123456+00",
+        updated_at: new Date("2026-08-25T12:00:00.123Z"),
+      },
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        job_type: "data.import",
+        job_version: 1,
+        workspace_id: null,
+        actor_id: null,
+        required_capability: "import",
+        state: "failed",
+        attempts: 1,
+        available_at: new Date("2026-08-25T12:00:00.123Z"),
+        lease_until: null,
+        correlation_id: "01J00000000000000000000002",
+        last_error: null,
+        created_at: new Date("2026-08-25T12:00:00.123Z"),
+        created_at_cursor: "2026-08-25 12:00:00.123457+00",
+        updated_at: new Date("2026-08-25T12:00:00.123Z"),
+      },
+    ];
+    const auditRows = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        actor_id: "admin",
+        target_id: "target",
+        action: "job:retry",
+        occurred_at: new Date("2026-08-25T12:00:00.123Z"),
+        occurred_at_cursor: "2026-08-25 12:00:00.123456+00",
+        origin: "admin_console",
+        correlation_id: "01J00000000000000000000003",
+        ip_address: null,
+        endpoint: null,
+        result: "success",
+        reason: "ok",
+      },
+      {
+        id: "44444444-4444-4444-8444-444444444444",
+        actor_id: "admin",
+        target_id: "target",
+        action: "job:retry",
+        occurred_at: new Date("2026-08-25T12:00:00.123Z"),
+        occurred_at_cursor: "2026-08-25 12:00:00.123457+00",
+        origin: "admin_console",
+        correlation_id: "01J00000000000000000000004",
+        ip_address: null,
+        endpoint: null,
+        result: "success",
+        reason: "ok",
+      },
+    ];
+    const client = {
+      query: async (text: string) => {
+        if (text.includes("FROM job") && !text.includes("GROUP BY")) {
+          jobQuery = text;
+          return { rows: jobRows, rowCount: 2 };
+        }
+        if (text.includes("FROM platform_audit_event")) {
+          auditQuery = text;
+          return { rows: auditRows, rowCount: 2 };
+        }
+        return { rows: [], rowCount: 1 };
+      },
+      release: () => undefined,
+    };
+    const store = new PostgresAdminAccountStore({ connect: async () => client } as never);
+
+    const jobs = await store.withActor("admin", () => store.searchJobs({ limit: 1 }));
+    const audit = await store.withActor("admin", () => store.searchAudit({ limit: 1 }));
+
+    expect(jobQuery).toContain("created_at::text AS created_at_cursor");
+    expect(auditQuery).toContain("occurred_at::text AS occurred_at_cursor");
+    expect(
+      decodeCursor(jobs.page.nextCursor ?? "", "casei-admin-cursor-mvp-2026").position,
+    ).toEqual(["2026-08-25 12:00:00.123456+00", "11111111-1111-4111-8111-111111111111"]);
+    expect(
+      decodeCursor(audit.page.nextCursor ?? "", "casei-admin-cursor-mvp-2026").position,
+    ).toEqual(["2026-08-25 12:00:00.123456+00", "33333333-3333-4333-8333-333333333333"]);
   });
 });
