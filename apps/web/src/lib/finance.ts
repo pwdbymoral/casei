@@ -245,6 +245,15 @@ export function mergeTransactionPage(
   return append ? [...current, ...page.items] : page.items;
 }
 
+/** Keeps only selections that are still present after a filter/page refresh. */
+export function retainVisibleTransactionSelection(
+  selectedIds: readonly string[],
+  visibleTransactions: readonly Pick<Transaction, "id">[],
+): string[] {
+  const visibleIds = new Set(visibleTransactions.map((transaction) => transaction.id));
+  return selectedIds.filter((id) => visibleIds.has(id));
+}
+
 export function commitmentRemainingMinor(
   transaction: Pick<Transaction, "amount" | "settledAmount">,
 ): string {
@@ -364,6 +373,27 @@ export type Category = {
   version: number;
 };
 
+export type TransactionReclassificationSelection = { id: string; version: number };
+export type TransactionReclassificationInput = {
+  categoryId: string;
+  transactions: TransactionReclassificationSelection[];
+};
+export type TransactionReclassificationPreviewRow = {
+  transactionId: string;
+  currentCategoryId: string | null;
+  categoryId: string;
+  version: number;
+  status: "ready" | "invalid";
+  errors: string[];
+};
+export type TransactionReclassificationPreview = {
+  categoryId: string;
+  categoryVersion: number;
+  previewHash: string;
+  rows: TransactionReclassificationPreviewRow[];
+  canConfirm: boolean;
+};
+
 export type CreateTransactionInput = {
   kind: "income" | "expense";
   amount: Money;
@@ -434,6 +464,20 @@ export type FinanceAdapter = {
   ): Promise<Category>;
   archiveCategory(workspaceId: string, category: Category): Promise<Category>;
   restoreCategory(workspaceId: string, category: Category): Promise<Category>;
+  previewTransactionReclassification(
+    workspaceId: string,
+    input: TransactionReclassificationInput,
+  ): Promise<TransactionReclassificationPreview>;
+  reclassifyTransactions(
+    workspaceId: string,
+    input: TransactionReclassificationInput,
+    preview: TransactionReclassificationPreview,
+    commandKey?: string,
+  ): Promise<{
+    committed: boolean;
+    preview: TransactionReclassificationPreview;
+    transactions: Transaction[];
+  }>;
   listCards(workspaceId: string): Promise<CreditCard[]>;
   createCard(
     workspaceId: string,
@@ -581,6 +625,8 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   updateCategory: unavailableFinanceOperation,
   archiveCategory: unavailableFinanceOperation,
   restoreCategory: unavailableFinanceOperation,
+  previewTransactionReclassification: unavailableFinanceOperation,
+  reclassifyTransactions: unavailableFinanceOperation,
   listCards: unavailableFinanceOperation,
   createCard: unavailableFinanceOperation,
   updateCard: unavailableFinanceOperation,
@@ -760,6 +806,24 @@ export function createHttpFinanceAdapter(
         },
         body: JSON.stringify({ confirm: true }),
       }),
+    previewTransactionReclassification: (workspaceId, input) =>
+      call<TransactionReclassificationPreview>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/transactions/reclassify/preview`,
+        { method: "POST", body: JSON.stringify(input) },
+      ),
+    reclassifyTransactions: (workspaceId, input, preview, commandKey) =>
+      call<{
+        committed: boolean;
+        preview: TransactionReclassificationPreview;
+        transactions: Transaction[];
+      }>(`/workspaces/${encodeURIComponent(workspaceId)}/transactions/reclassify`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": commandKey ?? idempotencyKey(),
+          "If-Match": `"v${preview.categoryVersion}"`,
+        },
+        body: JSON.stringify({ ...input, previewHash: preview.previewHash }),
+      }),
     listCards: (workspaceId) => list<CreditCard>(`/workspaces/${workspaceId}/cards`),
     createCard: (workspaceId, input) =>
       call<CreditCard>(`/workspaces/${workspaceId}/cards`, {
@@ -883,6 +947,15 @@ function fixtureId(seed: number): string {
   return `019b5d9e-3c12-7a${String(seed).padStart(2, "0")}-8d47-7b5b5dd7a2${String(seed).padStart(2, "2")}`;
 }
 
+function fixtureHash(value: unknown): string {
+  let hash = 2166136261;
+  for (const character of JSON.stringify(value)) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(16).padStart(8, "0")}`.repeat(8);
+}
+
 /** Local-only data makes the shell usable before AUTH-002 supplies a session API. */
 export function createFixtureFinanceAdapter(): FinanceAdapter {
   type FixtureWorkspaceState = {
@@ -896,6 +969,17 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
     statements: Statement[];
     transactionAudit: Map<string, FinanceAuditEvent[]>;
     transactionCommands: Map<string, { fingerprint: string; transaction: Transaction }>;
+    reclassificationCommands: Map<
+      string,
+      {
+        fingerprint: string;
+        result: {
+          committed: boolean;
+          preview: TransactionReclassificationPreview;
+          transactions: Transaction[];
+        };
+      }
+    >;
     settlementCommands: Map<
       string,
       { transactionId: string; fingerprint: string; transaction: Transaction }
@@ -1012,6 +1096,7 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       statements,
       transactionAudit: new Map(),
       transactionCommands: new Map(),
+      reclassificationCommands: new Map(),
       settlementCommands: new Map(),
       statementPaymentCommands: new Map(),
       statementAdjustmentCommands: new Map(),
@@ -1456,6 +1541,133 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const index = state.categories.findIndex((value) => value.id === category.id);
       if (index >= 0) state.categories[index] = next;
       return next;
+    },
+    previewTransactionReclassification: async (workspaceId, input) => {
+      const state = stateFor(workspaceId);
+      const category = state.categories.find((value) => value.id === input.categoryId);
+      if (!category) throw new FinanceAdapterError("Categoria não encontrada.", 404);
+      const rows = input.transactions.map((selection) => {
+        const transaction = state.transactions.find((value) => value.id === selection.id);
+        const errors: string[] = [];
+        if (!transaction) errors.push("A transação não foi encontrada neste espaço.");
+        else {
+          if (transaction.version !== selection.version)
+            errors.push("A transação foi alterada desde a prévia.");
+          if (category.archived) errors.push("A categoria está arquivada.");
+          if (transaction.kind !== category.kind && category.kind !== "both")
+            errors.push("A categoria não é compatível com o tipo da transação.");
+          if (
+            transaction.state === "canceled" ||
+            transaction.kind === "transfer" ||
+            transaction.kind === "adjustment"
+          )
+            errors.push("A transação não pode ser reclassificada.");
+          if (transaction.cardId || transaction.statementId)
+            errors.push("Compras de cartão devem ser editadas pela fatura.");
+          if (transaction.categoryId === category.id)
+            errors.push("A transação já usa esta categoria.");
+        }
+        return {
+          transactionId: selection.id,
+          currentCategoryId: transaction?.categoryId ?? null,
+          categoryId: input.categoryId,
+          version: transaction?.version ?? selection.version,
+          status: errors.length ? ("invalid" as const) : ("ready" as const),
+          errors,
+        };
+      });
+      return {
+        categoryId: category.id,
+        categoryVersion: category.version,
+        previewHash: fixtureHash({
+          categoryId: category.id,
+          categoryVersion: category.version,
+          rows,
+        }),
+        rows,
+        canConfirm: rows.every((row) => row.status === "ready"),
+      };
+    },
+    reclassifyTransactions: async (workspaceId, input, preview, commandKey) => {
+      const state = stateFor(workspaceId);
+      const fingerprint = JSON.stringify({ input, preview });
+      if (commandKey) {
+        const previous = state.reclassificationCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra reclassificação.", 409);
+          return previous.result;
+        }
+      }
+      const freshRows = input.transactions.map((selection) =>
+        state.transactions.find((value) => value.id === selection.id),
+      );
+      if (!preview.canConfirm || freshRows.some((transaction) => !transaction)) {
+        throw new FinanceAdapterError(
+          "A prévia contém transações que não podem ser reclassificadas.",
+          422,
+        );
+      }
+      const completeRows = freshRows.filter(
+        (transaction): transaction is Transaction => !!transaction,
+      );
+      for (const selection of input.transactions) {
+        const current = state.transactions.find((transaction) => transaction.id === selection.id);
+        if (!current || current.version !== selection.version) {
+          throw new FinanceAdapterError(
+            "A transação foi alterada. Gere uma nova prévia.",
+            412,
+            current?.version,
+          );
+        }
+      }
+      const category = state.categories.find((value) => value.id === input.categoryId);
+      if (!category || category.version !== preview.categoryVersion)
+        throw new FinanceAdapterError(
+          "A categoria foi alterada. Gere uma nova prévia.",
+          412,
+          category?.version,
+        );
+      const updated = completeRows.map((transaction) => ({
+        ...transaction,
+        categoryId: input.categoryId,
+        version: transaction.version + 1,
+      }));
+      for (const transaction of updated) {
+        const index = state.transactions.findIndex((value) => value.id === transaction.id);
+        state.transactions[index] = transaction;
+        const audit = state.transactionAudit.get(transaction.id) ?? [];
+        audit.unshift({
+          id: fixtureId(800 + audit.length),
+          transactionId: transaction.id,
+          category: "finance",
+          action: "transaction.reclassified",
+          actorId: "fixture-user",
+          occurredAt: new Date().toISOString(),
+          origin: "api",
+          correlationId: "fixture-correlation",
+          result: "success",
+          reason: null,
+          before: {
+            kind: transaction.kind,
+            state: transaction.state,
+            categoryId:
+              preview.rows.find((row) => row.transactionId === transaction.id)?.currentCategoryId ??
+              null,
+            version: transaction.version - 1,
+          },
+          after: {
+            kind: transaction.kind,
+            state: transaction.state,
+            categoryId: transaction.categoryId,
+            version: transaction.version,
+          },
+        });
+        state.transactionAudit.set(transaction.id, audit);
+      }
+      const result = { committed: true, preview, transactions: updated };
+      if (commandKey) state.reclassificationCommands.set(commandKey, { fingerprint, result });
+      return result;
     },
     listCards: async (workspaceId) => [...stateFor(workspaceId).cards],
     createCard: async (workspaceId, input) => {

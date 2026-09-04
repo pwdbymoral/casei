@@ -32,6 +32,7 @@ import {
   settleTransactionSchema,
   statementListQuerySchema,
   transactionListQuerySchema,
+  transactionReclassificationSchema,
   updateCategorySchema,
   updateCreditCardSchema,
   updateGoalSchema,
@@ -358,6 +359,28 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
     setVersionHeaders(context, result.transaction.version);
     return context.json(result.transaction);
+  });
+
+  router.post("/workspaces/:workspaceId/transactions/reclassify/preview", async (context) => {
+    const input = await parseJsonBody(context, transactionReclassificationSchema);
+    const preview = await service.previewTransactionReclassification(scopeOf(context), input);
+    setVersionHeaders(context, preview.categoryVersion);
+    return context.json(preview);
+  });
+
+  router.post("/workspaces/:workspaceId/transactions/reclassify", async (context) => {
+    const input = await parseJsonBody(context, transactionReclassificationSchema);
+    const result = await service.reclassifyTransactions(
+      scopeOf(context),
+      input,
+      requiredIdempotencyKey(context),
+      requireIfMatch(context),
+    );
+    context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
+    return context.json(
+      { committed: result.committed, preview: result.preview, transactions: result.transactions },
+      result.statusCode,
+    );
   });
 
   router.post("/workspaces/:workspaceId/transactions/:id/cancel", async (context) => {
