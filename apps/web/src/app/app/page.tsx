@@ -51,6 +51,7 @@ import {
 import {
   buildTodayCommitments,
   goalsRequiringAttention,
+  safeToSpendCardState,
   type TodayCommitment,
 } from "@/lib/today-dashboard";
 import { cn } from "@/lib/utils";
@@ -224,6 +225,8 @@ function DashboardContent({
   const attentionGoals = goalsRequiringAttention(goals, financial.asOf);
   const overdueCommitments = commitments.filter((item) => item.bucket === "overdue");
   const hasPartialData = Object.keys(sectionErrors).length > 0 || Boolean(loadError);
+  const safeToSpendState = safeToSpendCardState(safeToSpend);
+  const hasProjectedDeficit = safeToSpendState.kind === "deficit";
 
   return (
     <div className="flex flex-col gap-6">
@@ -311,11 +314,28 @@ function DashboardContent({
               href="/app/finances#safe-to-spend"
               className="font-medium text-foreground underline-offset-4 hover:underline"
             >
-              {safeToSpend.available ? "Entender o cálculo" : "Revisar dados necessários"}
+              {safeToSpendState.ctaLabel}
             </Link>
           </CardContent>
         </Card>
       </section>
+
+      {hasProjectedDeficit ? (
+        <Alert>
+          <CircleAlertIcon aria-hidden="true" />
+          <AlertTitle>Déficit previsto</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center gap-1">
+            O cenário dos próximos {safeToSpend.horizonDays} dias fica negativo em{" "}
+            <SensitiveMoney
+              minor={safeToSpend.gross?.minor ?? "0"}
+              currency={safeToSpend.currency}
+              hidden={hidden}
+              className="font-medium"
+            />
+            . Revise os compromissos antes de assumir um novo gasto.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {safeToSpend.confidence.level !== "high" ? (
         <Alert>
@@ -528,7 +548,7 @@ function DashboardContent({
   );
 }
 
-export default function TodayPage() {
+function TodayPage() {
   const { workspaceId, fixtureMode, timeZone } = useAuthenticatedWorkspace();
   const [status, setStatus] = useState<DashboardStatus>("loading");
   const [statusWorkspaceId, setStatusWorkspaceId] = useState(workspaceId);
@@ -684,3 +704,7 @@ export default function TodayPage() {
     </AsyncState>
   );
 }
+
+// App Router pages cannot export additional named symbols. Attaching the seam
+// to the default component keeps production exports valid for component tests.
+export default Object.assign(TodayPage, { DashboardContent });

@@ -188,8 +188,10 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 - [ ] **INSIGHT-004 Painel Hoje:** prioridade acionável, personalização, ocultar valores e deep links para origem.
   O incremento web atual já consome os read models de finanças/valor seguro, compromissos e fatura
   da janela de sete dias, metas e lista de compras; possui estados loading/error/offline/permission,
-  ocultação visual de valores por sessão e links para a origem. Permanecem a persistência da
-  personalização de cards e a composição de projeção/relatórios, que não fazem parte desta fatia.
+  ocultação visual de valores por sessão, tratamento explícito de déficit previsto e links para a
+  origem. Permanecem a persistência da personalização de cards e a composição de projeção/relatórios,
+  que não fazem parte desta fatia. A cobertura de componente está registrada em
+  `docs/plans/active/insight-004-today-dashboard.md`.
 - [ ] **INSIGHT-005 Relatórios:** mensal/categorias com tabela equivalente, filtros compartilhados e reconciliação com export.
 - [ ] **INSIGHT-006 Simulações:** mudanças temporárias isoladas e aplicação explícita como planejamento.
 
