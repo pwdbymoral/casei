@@ -4,6 +4,7 @@ import {
   ArchiveIcon,
   CheckIcon,
   ChevronDownIcon,
+  ClipboardPasteIcon,
   HistoryIcon,
   MinusIcon,
   PackagePlusIcon,
@@ -18,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AsyncState, StatusBadge } from "@/components/primitives";
 import { useAuthenticatedWorkspace } from "@/components/shell/app-shell";
+import { StockBulkDialog } from "@/components/stock/stock-bulk-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -70,6 +72,7 @@ export function StockHome() {
   const [busy, setBusy] = useState<string | null>(null);
   const [amount, setAmount] = useState("1");
   const [newProductOpen, setNewProductOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newUnit, setNewUnit] = useState<StockUnit>("unit");
   const [newUnitLabel, setNewUnitLabel] = useState("");
@@ -300,10 +303,16 @@ export function StockHome() {
           </p>
         </div>
         {writable ? (
-          <Button type="button" onClick={() => setNewProductOpen((value) => !value)}>
-            <PackagePlusIcon aria-hidden="true" />
-            Adicionar produto
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" onClick={() => setNewProductOpen((value) => !value)}>
+              <PackagePlusIcon aria-hidden="true" />
+              Adicionar produto
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setBulkOpen(true)}>
+              <ClipboardPasteIcon aria-hidden="true" />
+              Adicionar em lote
+            </Button>
+          </div>
         ) : null}
       </header>
 
@@ -656,6 +665,13 @@ export function StockHome() {
           ))}
         </div>
       ) : null}
+      <StockBulkDialog
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        adapter={adapter}
+        workspaceId={workspaceId}
+        onApplied={() => void load()}
+      />
       <Dialog open={checkoutOpen} onOpenChange={setCheckoutOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>

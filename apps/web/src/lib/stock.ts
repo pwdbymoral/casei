@@ -76,6 +76,46 @@ export type UpdateStockProductInput = {
   note?: string | null;
 };
 
+export type StockBulkRowStatus = "new" | "update" | "duplicate" | "invalid";
+export type StockBulkChange = {
+  field: string;
+  before: string | boolean | null;
+  after: string | boolean | null;
+};
+export type StockBulkPreviewRow = {
+  lineNumber: number;
+  status: StockBulkRowStatus;
+  name: string;
+  existingProductId?: string;
+  values?: Record<string, unknown>;
+  changes: StockBulkChange[];
+  errors: string[];
+};
+export type StockBulkPreview = {
+  contentHash: string;
+  headers: string[];
+  fatalErrors: string[];
+  rows: StockBulkPreviewRow[];
+  counts: { new: number; update: number; duplicate: number; invalid: number };
+  canApplyValidOnly: boolean;
+  canApplyAllOrNothing: boolean;
+};
+export type StockBulkApplyResult = {
+  committed: boolean;
+  preview: StockBulkPreview;
+  applied: { lineNumber: number; action: "new" | "update"; productId: string }[];
+};
+
+function bulkContentHash(content: string): string {
+  // The API computes SHA-256. The fixture only needs a stable preview token.
+  let hash = 2166136261;
+  for (const byte of new TextEncoder().encode(content)) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(16).padStart(8, "0")}`.repeat(8);
+}
+
 export interface StockAdapter {
   listProducts(
     workspaceId: string,
@@ -140,6 +180,12 @@ export interface StockAdapter {
     product: StockProduct | null;
     movement: StockMovement | null;
   }>;
+  previewBulkProducts(workspaceId: string, content: string): Promise<StockBulkPreview>;
+  applyBulkProducts(
+    workspaceId: string,
+    input: { content: string; mode: "valid_only" | "all_or_nothing"; previewHash: string },
+    idempotencyKey?: string,
+  ): Promise<StockBulkApplyResult>;
 }
 
 export type StockAdapterErrorCode = "request_failed" | "offline_required";
@@ -175,6 +221,8 @@ export const unauthenticatedStockAdapter: StockAdapter = {
   listShoppingItems: unavailable,
   createShoppingItem: unavailable,
   purchaseShoppingItem: unavailable,
+  previewBulkProducts: unavailable,
+  applyBulkProducts: unavailable,
 };
 
 type JsonPage<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
@@ -415,6 +463,17 @@ export function createHttpStockAdapter(
       }>(shoppingPath(workspaceId, `/${item.id}/purchased`), {
         method: "POST",
         headers: { "Idempotency-Key": key(), "If-Match": `"v${item.version}"` },
+        body: JSON.stringify(input),
+      }),
+    previewBulkProducts: (workspaceId, content) =>
+      call<StockBulkPreview>(path(workspaceId, "/bulk/preview"), {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      }),
+    applyBulkProducts: (workspaceId, input, commandKey) =>
+      call<StockBulkApplyResult>(path(workspaceId, "/bulk"), {
+        method: "POST",
+        headers: { "Idempotency-Key": commandKey ?? key() },
         body: JSON.stringify(input),
       }),
     async listMovements(workspaceId, productId) {
@@ -743,6 +802,83 @@ export function createFixtureStockAdapter(): StockAdapter {
       current.lastChangedBy = "user_fixture_marina";
       current.version += 1;
       return { item: { ...current }, product: product ? { ...product } : null, movement };
+    },
+    async previewBulkProducts(workspaceId, content) {
+      const lines = content
+        .replace(/^\uFEFF/u, "")
+        .replace(/\r\n?/gu, "\n")
+        .split("\n");
+      if (lines.at(-1) === "") lines.pop();
+      const tabular = lines[0]?.includes("\t") ?? false;
+      const start = tabular && /(?:^|\t)nome(?:\t|$)/iu.test(lines[0] ?? "") ? 1 : 0;
+      const active = getProducts(workspaceId).filter((product) => !product.archived);
+      const seen = new Set<string>();
+      const rows: StockBulkPreviewRow[] = lines.slice(start).map((line, offset) => {
+        const lineNumber = offset + start + 1;
+        const cells = tabular ? line.split("\t") : [line];
+        const name = (cells[tabular ? 0 : 0] ?? "").trim();
+        const key = name.toLocaleLowerCase("pt-BR").replace(/\s+/gu, " ");
+        const current = active.find((product) => product.name.toLocaleLowerCase("pt-BR") === key);
+        const errors = name ? [] : ["O nome do produto é obrigatório."];
+        if (errors.length === 0 && seen.has(key))
+          errors.push("A linha é duplicada dentro deste lote.");
+        if (errors.length > 0)
+          return {
+            lineNumber,
+            status: seen.has(key) ? "duplicate" : "invalid",
+            name,
+            values: { name },
+            changes: [],
+            errors,
+          };
+        seen.add(key);
+        if (current)
+          return {
+            lineNumber,
+            status: "duplicate",
+            name,
+            existingProductId: current.id,
+            values: { name },
+            changes: [],
+            errors: ["A linha duplicada não altera o produto existente."],
+          };
+        return {
+          lineNumber,
+          status: "new",
+          name,
+          values: { name },
+          changes: [{ field: "name", before: null, after: name }],
+          errors: [],
+        };
+      });
+      const counts = {
+        new: rows.filter((row) => row.status === "new").length,
+        update: rows.filter((row) => row.status === "update").length,
+        duplicate: rows.filter((row) => row.status === "duplicate").length,
+        invalid: rows.filter((row) => row.status === "invalid").length,
+      };
+      return {
+        contentHash: bulkContentHash(content),
+        headers: tabular ? (lines[0] ?? "").split("\t") : [],
+        fatalErrors: [],
+        rows,
+        counts,
+        canApplyValidOnly: counts.new > 0,
+        canApplyAllOrNothing: counts.new > 0 && counts.invalid === 0 && counts.duplicate === 0,
+      };
+    },
+    async applyBulkProducts(workspaceId, input) {
+      const preview = await this.previewBulkProducts(workspaceId, input.content);
+      if (input.previewHash !== preview.contentHash)
+        throw new StockAdapterError("A prévia expirou. Gere uma nova prévia.", 409);
+      if (input.mode === "all_or_nothing" && !preview.canApplyAllOrNothing)
+        return { committed: false, preview, applied: [] };
+      const applied: StockBulkApplyResult["applied"] = [];
+      for (const row of preview.rows.filter((item) => item.status === "new")) {
+        const product = await this.createProduct(workspaceId, { name: row.name });
+        applied.push({ lineNumber: row.lineNumber, action: "new", productId: product.id });
+      }
+      return { committed: applied.length > 0, preview, applied };
     },
   };
 }

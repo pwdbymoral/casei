@@ -90,6 +90,58 @@ describe("stock adapter", () => {
     expect(requests[0]?.headers.get("If-Match")).toBe('"v3"');
     expect(requests[0]?.headers.get("Idempotency-Key")).toMatch(/^stock-/);
   });
+
+  it("previews and applies bulk products with the preview hash and operation key", async () => {
+    const requests: Request[] = [];
+    const adapter = createHttpStockAdapter({
+      baseUrl: "https://casei.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (request.url.endsWith("/bulk/preview")) {
+          return Response.json({
+            contentHash: "a".repeat(64),
+            headers: ["Nome"],
+            fatalErrors: [],
+            rows: [],
+            counts: { new: 0, update: 0, duplicate: 0, invalid: 0 },
+            canApplyValidOnly: false,
+            canApplyAllOrNothing: false,
+          });
+        }
+        return Response.json({ committed: true, preview: {}, applied: [] });
+      },
+    });
+    await adapter.previewBulkProducts(workspaceA, "Arroz");
+    await adapter.applyBulkProducts(
+      workspaceA,
+      { content: "Arroz", mode: "valid_only", previewHash: "a".repeat(64) },
+      "stock-bulk-ui-0001",
+    );
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://casei.test/v1/workspaces/${workspaceA}/stock/products/bulk/preview`,
+      `https://casei.test/v1/workspaces/${workspaceA}/stock/products/bulk`,
+    ]);
+    expect(requests[1]?.headers.get("Idempotency-Key")).toBe("stock-bulk-ui-0001");
+    await expect(requests[1]?.json()).resolves.toMatchObject({ mode: "valid_only" });
+  });
+
+  it("keeps fixture bulk confirmation explicit and skips invalid rows", async () => {
+    const adapter = createFixtureStockAdapter();
+    const content = "Arroz novo\n\nArroz novo";
+    const preview = await adapter.previewBulkProducts(workspaceA, content);
+    expect(preview.counts).toMatchObject({ new: 1, invalid: 1, duplicate: 1 });
+    const applied = await adapter.applyBulkProducts(workspaceA, {
+      content,
+      mode: "valid_only",
+      previewHash: preview.contentHash,
+    });
+    expect(applied.committed).toBe(true);
+    expect(applied.applied).toHaveLength(1);
+    expect(
+      (await adapter.listProducts(workspaceA)).some((item) => item.name === "Arroz novo"),
+    ).toBe(true);
+  });
   it("reuses one operation-scoped idempotency key after a network retry", async () => {
     let attempts = 0;
     const keys: string[] = [];
