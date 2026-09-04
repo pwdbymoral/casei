@@ -361,6 +361,8 @@ function FinanceDashboard({
     setReclassificationCategoryId("");
     setReclassificationPreview(null);
     setReclassificationOpen(false);
+    setPreviewingReclassification(false);
+    setSavingReclassification(false);
     setStatements([]);
     setStatus("loading");
     setError(null);
@@ -386,6 +388,7 @@ function FinanceDashboard({
     statementPaymentCommandKey.current = null;
     recurrenceCommandKey.current = null;
     installmentCommandKey.current = null;
+    reclassificationCommandKey.current = null;
     setSaving(false);
     setUndoing(false);
     setSavingCard(false);
@@ -1845,6 +1848,7 @@ function FinanceDashboard({
         setReclassificationPreview(null);
         setReclassificationOpen(false);
         await load(false);
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
         setError("Uma categoria ou transação mudou enquanto você revisava. Gere uma nova prévia.");
       } else {
         if (!shouldRetryIdempotentCommand(cause)) reclassificationCommandKey.current = null;
