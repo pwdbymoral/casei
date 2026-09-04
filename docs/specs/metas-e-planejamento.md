@@ -34,6 +34,9 @@ Quando há prazo, o sistema calcula contribuição periódica necessária usando
 - Horizonte padrão e máximo do MVP: 12 meses.
 - Ponto inicial: saldo atual da carteira.
 - Entradas: compromissos planejados, ocorrências recorrentes, parcelas, faturas, pagamentos de empréstimo e contribuições de meta planejadas.
+- No MVP, uma contribuição de meta só é considerada planejada quando há uma
+  transação futura explícita; reservar valor continua sendo movimento virtual
+  e não altera a projeção de caixa.
 - Compra no cartão aparece como despesa na análise e sua fatura como saída de caixa; a projeção de saldo usa apenas a saída da fatura para não duplicar.
 - Recorrência variável sem estimativa aparece como evento de valor desconhecido e reduz confiança, sem assumir zero silenciosamente.
 - Cada ponto permite abrir os eventos que explicam o total.

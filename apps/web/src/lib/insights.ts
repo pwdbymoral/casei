@@ -63,12 +63,44 @@ export type SafeToSpendView = {
   };
 };
 
+export type CashFlowProjectionEvent = {
+  id: string;
+  date: string;
+  direction: "income" | "outflow";
+  amount: InsightMoney | null;
+  source: {
+    type: "transaction" | "recurrence" | "installment" | "statement" | "loan" | "goal";
+    id: string;
+    label: string;
+  };
+};
+
+export type CashFlowProjection = {
+  asOf: string;
+  to: string;
+  months: number;
+  currency: string;
+  startingBalance: InsightMoney;
+  points: Array<{
+    date: string;
+    balance: InsightMoney;
+    delta: InsightMoney;
+    events: CashFlowProjectionEvent[];
+    unknownEventCount: number;
+  }>;
+  confidence: InsightConfidence;
+};
+
 export type InsightAdapter = {
   getFinancial(workspaceId: string, input?: { asOf?: string }): Promise<FinancialReadModel>;
   getSafeToSpend(
     workspaceId: string,
     input?: { asOf?: string; horizonDays?: number },
   ): Promise<SafeToSpendView>;
+  getProjection(
+    workspaceId: string,
+    input?: { asOf?: string; months?: number },
+  ): Promise<CashFlowProjection>;
 };
 
 export class InsightAdapterError extends Error {
@@ -91,6 +123,7 @@ const unavailable = async (..._args: never[]): Promise<never> => {
 export const unauthenticatedInsightAdapter: InsightAdapter = {
   getFinancial: unavailable,
   getSafeToSpend: unavailable,
+  getProjection: unavailable,
 };
 
 export function createHttpInsightAdapter(
@@ -138,6 +171,15 @@ export function createHttpInsightAdapter(
       const query = params.toString() ? `?${params.toString()}` : "";
       return call<SafeToSpendView>(
         `/workspaces/${encodeURIComponent(workspaceId)}/insights/safe-to-spend${query}`,
+      );
+    },
+    getProjection(workspaceId, input = {}) {
+      const params = new URLSearchParams();
+      if (input.asOf) params.set("asOf", input.asOf);
+      if (input.months !== undefined) params.set("months", String(input.months));
+      const query = params.toString() ? `?${params.toString()}` : "";
+      return call<CashFlowProjection>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/insights/projection${query}`,
       );
     },
   };
@@ -205,6 +247,17 @@ export function createFixtureInsightAdapter(): InsightAdapter {
           uncoveredReservations: fixtureMoney("0"),
           safetyMargin: fixtureMoney("0"),
         },
+      };
+    },
+    async getProjection() {
+      return {
+        asOf: financial.asOf,
+        to: "2027-08-24",
+        months: 12,
+        currency: "BRL",
+        startingBalance: financial.balance,
+        points: [],
+        confidence: financial.confidence,
       };
     },
   };
