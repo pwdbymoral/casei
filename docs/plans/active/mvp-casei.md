@@ -88,8 +88,10 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
 auditável, categorias, idempotência, isolamento por papel e moeda, além dos contratos e guards
 necessários. A fatia FIN-004/FIN-005 acrescenta captura rápida e linha do tempo autenticadas, com
-filtros/cursor no contrato HTTP e desfazer por reversão. Edição completa, ajustes com saldo observado,
-auditoria detalhada e concorrência de produção continuam pendentes para o Gate 2.
+filtros/cursor no contrato HTTP e desfazer por reversão. O FIN-002 materializa ajustes por saldo
+observado com prévia, idempotência, concorrência e auditoria; o FIN-003 acrescenta edição e
+cancelamento versionados, com bloqueios por origem e replay idempotente. Permanece pendente o
+FIN-005b (histórico auditável detalhado) e a validação E2E do Gate 2.
 
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 
