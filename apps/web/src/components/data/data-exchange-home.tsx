@@ -60,7 +60,11 @@ import {
   type DuplicatePolicy,
   dataExchangeAdapterForEnvironment,
   type ExportJob,
+  exportDateRangeError,
+  exportExpirationLabel,
   exportHistorySurfaceStatus,
+  exportJobIsActive,
+  exportJobToPoll,
   exportStatusLabel,
   formatDataFileSize,
   type ImportApplyMode,
@@ -71,6 +75,7 @@ import {
   importErrorEntriesForReport,
   importJobCanRetry,
   importLineStatusLabel,
+  importResultsPageIsValid,
   importStatusLabel,
   MAX_IMPORT_ROWS,
   serializeImportErrorReport,
@@ -103,7 +108,7 @@ function terminalImport(job: ImportJob | null): boolean {
 }
 
 function terminalExport(job: ExportJob | null): boolean {
-  return Boolean(job && ["completed", "failed", "expired"].includes(job.status));
+  return Boolean(job && !exportJobIsActive(job));
 }
 
 function downloadBlob(blob: Blob, fileName: string) {
@@ -250,7 +255,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setExportStatus("loading");
     setExportError(null);
     try {
-      setExportJobs(await adapter.listExportJobs(workspaceId));
+      const jobs = await adapter.listExportJobs(workspaceId);
+      setExportJobs(jobs);
+      setActiveExport((current) => exportJobToPoll(jobs, current));
       setExportStatus("success");
     } catch (error) {
       setExportStatus(errorStatus(error));
@@ -518,6 +525,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
         importJob.id,
         importResultsNextAfterLine,
       );
+      if (!importResultsPageIsValid(page, importResultsNextAfterLine)) {
+        throw new DataExchangeError("Os resultados retornaram um cursor inválido.");
+      }
       setImportResults((current) => [...current, ...page.items]);
       setImportResultsNextAfterLine(page.nextAfterLine);
     } catch (error) {
@@ -532,10 +542,21 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     setErrorReportPending(true);
     setErrorReportError(null);
     try {
-      const allResults = [...importResults];
-      let afterLine = importResultsNextAfterLine;
+      const allResults = importResultsStatus === "success" ? [...importResults] : [];
+      let afterLine = importResultsStatus === "success" ? importResultsNextAfterLine : null;
+      if (importResultsStatus !== "success") {
+        const firstPage = await adapter.listImportResults(workspaceId, job.id);
+        if (!importResultsPageIsValid(firstPage)) {
+          throw new DataExchangeError("Os resultados retornaram um cursor inválido.");
+        }
+        allResults.push(...firstPage.items);
+        afterLine = firstPage.nextAfterLine;
+      }
       while (afterLine !== null) {
         const page = await adapter.listImportResults(workspaceId, job.id, afterLine);
+        if (!importResultsPageIsValid(page, afterLine)) {
+          throw new DataExchangeError("Os resultados retornaram um cursor inválido.");
+        }
         allResults.push(...page.items);
         if (page.nextAfterLine !== null && page.nextAfterLine <= afterLine) {
           throw new DataExchangeError("O relatório retornou uma página sem continuidade.");
@@ -551,7 +572,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
   }
 
   async function createExport() {
-    if (!exportAllowed || (exportDomain === "complete" && !completeExportAllowed) || !online)
+    if (
+      !exportAllowed ||
+      (exportDomain === "complete" && !completeExportAllowed) ||
+      !online ||
+      exportDateError
+    )
       return;
     const operation = beginDataExchangeOperation(
       exportOperation.current,
@@ -578,6 +604,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
       const next = await operation.promise;
       setActiveExport(next);
       setExportJobs((current) => [next, ...current.filter((job) => job.id !== next.id)]);
+      setExportStatus("success");
     } catch (error) {
       setExportStatus(errorStatus(error));
       setExportError(errorMessage(error));
@@ -613,6 +640,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
     exportStatus === "idle" ? "loading" : exportStatus,
     exportJobs.length > 0,
   );
+  const exportDateError = exportDateRangeError(exportFrom, exportTo);
   const importStepIndex = !file
     ? 0
     : !preview
@@ -855,9 +883,11 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   <p className="text-sm text-muted-foreground">
                     {preview.serverBacked
                       ? "Validação do servidor concluída."
-                      : !online
-                        ? "Prévia local para revisar o formato; a validação canônica acontece no servidor."
-                        : "Esta prévia local precisa ser atualizada com o servidor antes de confirmar."}
+                      : fixtureMode
+                        ? "Prévia local do ambiente de desenvolvimento; nenhuma alteração real é feita."
+                        : !online
+                          ? "Prévia local para revisar o formato; a validação canônica acontece no servidor."
+                          : "Esta prévia local precisa ser atualizada com o servidor antes de confirmar."}
                   </p>
                 </div>
                 {preview.message ? (
@@ -1328,7 +1358,9 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                           {importResultsMorePending ? "Carregando…" : "Carregar mais linhas"}
                         </Button>
                         {importResultsMoreError ? (
-                          <span className="text-sm text-destructive">{importResultsMoreError}</span>
+                          <span className="text-sm text-destructive" role="alert">
+                            {importResultsMoreError}
+                          </span>
                         ) : null}
                       </div>
                     ) : null}
@@ -1419,6 +1451,12 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                   />
                 </Field>
               </div>
+              {exportDateError ? (
+                <Alert variant="destructive">
+                  <AlertCircleIcon aria-hidden="true" />
+                  <AlertDescription>{exportDateError}</AlertDescription>
+                </Alert>
+              ) : null}
               {searchParams.has("from") ||
               searchParams.has("to") ||
               searchParams.has("kind") ||
@@ -1442,6 +1480,7 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                 (exportDomain === "complete" && !completeExportAllowed) ||
                 !online ||
                 exportPending ||
+                Boolean(exportDateError) ||
                 Boolean(activeExport && !terminalExport(activeExport))
               }
               onClick={() => void createExport()}
@@ -1458,17 +1497,42 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
               {exportPending ? "Gerando exportação…" : "Gerar exportação"}
             </Button>
             {activeExport && !terminalExport(activeExport) ? (
-              <ProgressBar value={activeExport.progress} label="Gerando arquivo" />
+              <div aria-live="polite">
+                <ProgressBar value={activeExport.progress} label="Gerando arquivo" />
+              </div>
             ) : null}
             {activeExport?.status === "completed" ? (
-              <Alert>
+              <Alert aria-live="polite">
                 <CheckCircle2Icon aria-hidden="true" />
                 <AlertTitle>Exportação pronta</AlertTitle>
                 <AlertDescription className="flex flex-wrap items-center gap-3">
-                  <span>{activeExport.fileName} · expira em 24 horas.</span>
-                  <Button type="button" size="sm" onClick={() => void downloadExport(activeExport)}>
+                  <span>
+                    {activeExport.fileName} · {exportExpirationLabel(activeExport.expiresAt)}.
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!online}
+                    aria-label={`Baixar ${activeExport.fileName ?? "exportação"}`}
+                    onClick={() => void downloadExport(activeExport)}
+                  >
                     <DownloadIcon data-icon="inline-start" aria-hidden="true" /> Baixar arquivo
                   </Button>
+                </AlertDescription>
+              </Alert>
+            ) : null}
+            {activeExport &&
+            (activeExport.status === "failed" || activeExport.status === "expired") ? (
+              <Alert variant="destructive" aria-live="polite">
+                <AlertCircleIcon aria-hidden="true" />
+                <AlertTitle>
+                  Exportação {exportStatusLabel(activeExport.status).toLowerCase()}
+                </AlertTitle>
+                <AlertDescription>
+                  {activeExport.message ??
+                    (activeExport.status === "expired"
+                      ? "O arquivo expirou. Gere uma nova exportação para baixar os dados."
+                      : "Não foi possível gerar o arquivo. Tente novamente.")}
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -1537,6 +1601,16 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       <p className="text-xs text-muted-foreground">
                         {domainLabels[job.domain]} · {exportStatusLabel(job.status)}
                       </p>
+                      <p className="text-xs text-muted-foreground">
+                        {job.status === "queued" || job.status === "processing"
+                          ? `${job.progress}% concluída`
+                          : exportExpirationLabel(job.expiresAt)}
+                      </p>
+                      {job.message ? (
+                        <p className="text-xs text-destructive" role="alert">
+                          {job.message}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                   {job.status === "completed" ? (
@@ -1544,12 +1618,22 @@ export function DataExchangeHome({ adapter: providedAdapter }: { adapter?: DataE
                       type="button"
                       variant="outline"
                       size="sm"
+                      disabled={!online}
+                      aria-label={`Baixar ${job.fileName ?? domainLabels[job.domain]}`}
                       onClick={() => void downloadExport(job)}
                     >
                       <DownloadIcon data-icon="inline-start" aria-hidden="true" /> Baixar
                     </Button>
                   ) : (
-                    <Badge variant="outline">{job.progress}%</Badge>
+                    <Badge
+                      variant={
+                        job.status === "failed" || job.status === "expired"
+                          ? "destructive"
+                          : "outline"
+                      }
+                    >
+                      {exportStatusLabel(job.status)}
+                    </Badge>
                   )}
                 </div>
               ))}

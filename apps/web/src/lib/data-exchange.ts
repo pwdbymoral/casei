@@ -1089,6 +1089,24 @@ export function importLineStatusLabel(status: ImportLineResult["status"]): strin
   }[status];
 }
 
+/**
+ * Verifies the cursor contract before appending a page to the result table.
+ * A malformed or stale cursor must surface as an actionable error instead of
+ * duplicating rows or making a report loop forever.
+ */
+export function importResultsPageIsValid(
+  page: ImportLineResultsPage,
+  afterLine: number | null = null,
+): boolean {
+  let previousLine = afterLine ?? 0;
+  for (const item of page.items) {
+    if (!Number.isSafeInteger(item.lineNumber) || item.lineNumber <= previousLine) return false;
+    previousLine = item.lineNumber;
+  }
+  if (page.nextAfterLine === null) return true;
+  return page.items.length > 0 && page.nextAfterLine === previousLine;
+}
+
 export type ExportHistorySurfaceStatus =
   | "loading"
   | "success"
@@ -1103,6 +1121,33 @@ export function exportHistorySurfaceStatus(
 ): ExportHistorySurfaceStatus {
   if (status === "success") return hasJobs ? "success" : "empty";
   return status;
+}
+
+export function exportJobIsActive(job: Pick<ExportJob, "status">): boolean {
+  return job.status === "queued" || job.status === "processing";
+}
+
+export function exportJobToPoll<
+  T extends Pick<ExportJob, "status">,
+  U extends Pick<ExportJob, "status">,
+>(jobs: readonly T[], current: U | null): T | U | null {
+  if (current && exportJobIsActive(current)) return current;
+  return jobs.find(exportJobIsActive) ?? null;
+}
+
+export function exportExpirationLabel(expiresAt: string | null): string {
+  if (!expiresAt || !Number.isFinite(Date.parse(expiresAt))) return "Expiração não informada";
+  const date = new Date(expiresAt);
+  const formatted = new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+  return `Expira em ${formatted}`;
+}
+
+export function exportDateRangeError(from: string, to: string): string | null {
+  if (!from || !to || from <= to) return null;
+  return "A data final deve ser igual ou posterior à data inicial.";
 }
 
 export function exportStatusLabel(status: ExportJobStatus): string {

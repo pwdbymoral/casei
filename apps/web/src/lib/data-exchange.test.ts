@@ -8,11 +8,15 @@ import {
   dataExchangeAdapterForEnvironment,
   dataFieldsForDomain,
   detectPreviewDelimiter,
+  exportDateRangeError,
+  exportExpirationLabel,
   exportHistorySurfaceStatus,
+  exportJobToPoll,
   formatDataFileSize,
   importErrorEntriesForReport,
   importJobCanRetry,
   importLineStatusLabel,
+  importResultsPageIsValid,
   inferMapping,
   MAX_IMPORT_ROWS,
   parseLocalCsvPreview,
@@ -140,6 +144,29 @@ describe("data exchange UI ports", () => {
   it("preserva o estado de permissão no histórico de exportações", () => {
     expect(exportHistorySurfaceStatus("permission", false)).toBe("permission");
     expect(exportHistorySurfaceStatus("success", false)).toBe("empty");
+  });
+
+  it("retoma o polling de exportações pendentes depois de recarregar a página", () => {
+    const processing = {
+      id: "export-processing",
+      status: "processing" as const,
+    };
+    const queued = { id: "export-queued", status: "queued" as const };
+    const completed = { id: "export-completed", status: "completed" as const };
+
+    expect(exportJobToPoll([processing], null)).toBe(processing);
+    expect(exportJobToPoll([completed], null)).toBeNull();
+    expect(exportJobToPoll([queued], completed)).toBe(queued);
+    expect(exportJobToPoll([queued], processing)).toBe(processing);
+  });
+
+  it("exibe a expiração efetiva e valida o intervalo antes de criar a exportação", () => {
+    expect(exportExpirationLabel("2026-09-04T15:30:00.000Z")).toContain("Expira em");
+    expect(exportExpirationLabel(null)).toBe("Expiração não informada");
+    expect(exportExpirationLabel("invalid-date")).toBe("Expiração não informada");
+    expect(exportDateRangeError("2026-09-05", "2026-09-04")).toContain("igual ou posterior");
+    expect(exportDateRangeError("2026-09-04", "2026-09-04")).toBeNull();
+    expect(exportDateRangeError("", "2026-09-04")).toBeNull();
   });
 
   it("ignora duplo clique de retry e export enquanto o adapter deferred está pendente", async () => {
@@ -440,6 +467,36 @@ describe("data exchange UI ports", () => {
     );
     expect(secondPage.items.map((item) => item.lineNumber)).toEqual([4]);
     expect(secondPage.nextAfterLine).toBeNull();
+  });
+
+  it("rejeita páginas de resultados com cursor repetido ou linhas fora da continuidade", () => {
+    expect(
+      importResultsPageIsValid(
+        {
+          items: [{ lineNumber: 4, status: "applied" }],
+          nextAfterLine: 4,
+        },
+        3,
+      ),
+    ).toBe(true);
+    expect(
+      importResultsPageIsValid(
+        {
+          items: [{ lineNumber: 4, status: "applied" }],
+          nextAfterLine: 4,
+        },
+        4,
+      ),
+    ).toBe(false);
+    expect(
+      importResultsPageIsValid(
+        {
+          items: [],
+          nextAfterLine: 4,
+        },
+        3,
+      ),
+    ).toBe(false);
   });
 
   it("isola jobs de fixtures por espaço e reproduz chaves idempotentes", async () => {
