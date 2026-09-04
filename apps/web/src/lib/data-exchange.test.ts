@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   beginDataExchangeOperation,
+  canDiscardImportDraft,
   canExportData,
   canImportData,
   dataExchangeAdapterForEnvironment,
@@ -9,7 +10,9 @@ import {
   detectPreviewDelimiter,
   exportHistorySurfaceStatus,
   formatDataFileSize,
+  importErrorEntriesForReport,
   importJobCanRetry,
+  importLineStatusLabel,
   inferMapping,
   MAX_IMPORT_ROWS,
   parseLocalCsvPreview,
@@ -21,6 +24,17 @@ describe("data exchange UI ports", () => {
     expect(importJobCanRetry({ retryable: true })).toBe(true);
     expect(importJobCanRetry({ retryable: false })).toBe(false);
     expect(importJobCanRetry({})).toBe(false);
+  });
+
+  it("não permite descartar um rascunho enquanto o job de importação está ativo", () => {
+    expect(canDiscardImportDraft(null)).toBe(true);
+    expect(canDiscardImportDraft(null, true)).toBe(false);
+    expect(canDiscardImportDraft({ status: "queued" })).toBe(false);
+    expect(canDiscardImportDraft({ status: "processing" })).toBe(false);
+    expect(canDiscardImportDraft({ status: "completed" })).toBe(true);
+    expect(canDiscardImportDraft({ status: "partial" })).toBe(true);
+    expect(canDiscardImportDraft({ status: "failed" })).toBe(true);
+    expect(canDiscardImportDraft({ status: "canceled" })).toBe(true);
   });
 
   it("infere o separador pt-BR e preserva campos desconhecidos como aviso", () => {
@@ -258,6 +272,61 @@ describe("data exchange UI ports", () => {
     }
   });
 
+  it("usa os contratos HTTP de importação para cancelamento e resultados", async () => {
+    vi.stubEnv("NEXT_PUBLIC_CASEI_API_ORIGIN", "https://api.example.test");
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/lines?")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              items: [{ lineNumber: 2, status: "applied" }],
+              page: { nextAfterLine: null },
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "import-1" }), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const adapter = dataExchangeAdapterForEnvironment({ fixtures: false });
+      await adapter.cancelImport("workspace-1", "import-1", "cancel-key-123456");
+      const page = await adapter.listImportResults("workspace-1", "import-1", 1, 50);
+      expect(page.items).toEqual([{ lineNumber: 2, status: "applied" }]);
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        1,
+        "https://api.example.test/v1/workspaces/workspace-1/data/imports/import-1/cancel",
+        expect.objectContaining({
+          headers: expect.objectContaining({ "Idempotency-Key": "cancel-key-123456" }),
+        }),
+      );
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        2,
+        "https://api.example.test/v1/workspaces/workspace-1/data/imports/import-1/lines?limit=50&afterLine=1",
+        expect.objectContaining({ credentials: "include" }),
+      );
+
+      await adapter.listExportJobs("workspace-1");
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        3,
+        "https://api.example.test/v1/workspaces/workspace-1/data/exports",
+        expect.objectContaining({ credentials: "include" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("exercita o port de fixture sem prometer persistência no servidor", async () => {
     const adapter = dataExchangeAdapterForEnvironment({ fixtures: true });
     const file = new File(["Tipo;Valor;Data\ndespesa;10,00;2026-08-25"], "movimentos.csv", {
@@ -287,6 +356,9 @@ describe("data exchange UI ports", () => {
     }
     expect(job.status).toBe("completed");
     expect(job.appliedRows).toBe(1);
+    const results = await adapter.listImportResults("workspace-1", job.id);
+    expect(results.items).toEqual([{ lineNumber: 2, status: "applied" }]);
+    expect(importLineStatusLabel("applied")).toBe("Aplicada");
   });
 
   it("permite lote misto em valid_only, mas exige zero erros em all_or_nothing", async () => {
@@ -329,6 +401,45 @@ describe("data exchange UI ports", () => {
         "mixed-all-or-nothing",
       ),
     ).rejects.toThrow("Tudo ou nada");
+  });
+
+  it("pagina os resultados por linha sem perder continuidade", async () => {
+    const adapter = dataExchangeAdapterForEnvironment({ fixtures: true });
+    const file = new File(
+      ["Tipo;Valor;Data\ndespesa;10,00;2026-08-25\ndespesa;20,00;\ndespesa;30,00;2026-08-26"],
+      "resultados.csv",
+      { type: "text/csv" },
+    );
+    const preview = await adapter.previewImport("workspace-results", {
+      file,
+      domain: "transactions",
+      locale: "pt-BR",
+    });
+    let job = await adapter.startImport(
+      "workspace-results",
+      {
+        preview,
+        file,
+        mapping: preview.mapping,
+        duplicatePolicy: "ignore",
+        applyMode: "valid_only",
+      },
+      "results-key",
+    );
+    for (let index = 0; index < 3 && job.status === "processing"; index += 1) {
+      job = await adapter.getImportJob("workspace-results", job.id);
+    }
+    const firstPage = await adapter.listImportResults("workspace-results", job.id, undefined, 2);
+    expect(firstPage.items.map((item) => item.lineNumber)).toEqual([2, 3]);
+    expect(firstPage.nextAfterLine).toBe(3);
+    const secondPage = await adapter.listImportResults(
+      "workspace-results",
+      job.id,
+      firstPage.nextAfterLine ?? undefined,
+      2,
+    );
+    expect(secondPage.items.map((item) => item.lineNumber)).toEqual([4]);
+    expect(secondPage.nextAfterLine).toBeNull();
   });
 
   it("isola jobs de fixtures por espaço e reproduz chaves idempotentes", async () => {
@@ -491,5 +602,21 @@ describe("data exchange UI ports", () => {
     expect(serializeImportErrorReport([{ rowNumber: 2, message: '=HYPERLINK("x")' }])).toBe(
       'linha,mensagem\n2,"\'=HYPERLINK(""x"")"',
     );
+  });
+
+  it("inclui rejeições paginadas sem mensagem e remove duplicatas do relatório", () => {
+    expect(
+      importErrorEntriesForReport(
+        [{ rowNumber: 2, message: "Valor é obrigatório." }],
+        [
+          { lineNumber: 2, status: "rejected", errorMessage: "Valor é obrigatório." },
+          { lineNumber: 3, status: "rejected" },
+          { lineNumber: 4, status: "skipped" },
+        ],
+      ),
+    ).toEqual([
+      { rowNumber: 2, message: "Valor é obrigatório." },
+      { rowNumber: 3, message: "A linha foi rejeitada." },
+    ]);
   });
 });
