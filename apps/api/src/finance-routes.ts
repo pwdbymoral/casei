@@ -25,6 +25,7 @@ import {
   loanPaymentSchema,
   paginationQuerySchema,
   payStatementSchema,
+  projectionQuerySchema,
   recurrenceTransitionSchema,
   reopenStatementSchema,
   safeToSpendQuerySchema,
@@ -110,6 +111,12 @@ export function configureFinanceRoutes(router: Hono<ApiEnv>, options: FinanceRou
     router.get("/workspaces/:workspaceId/insights/safe-to-spend", async (context) => {
       const query = parseQuery(context, safeToSpendQuerySchema);
       const model = await insightService.getSafeToSpend(scopeOf(context), query);
+      return context.json(model);
+    });
+
+    router.get("/workspaces/:workspaceId/insights/projection", async (context) => {
+      const query = parseQuery(context, projectionQuerySchema);
+      const model = await insightService.getProjection(scopeOf(context), query);
       return context.json(model);
     });
   }

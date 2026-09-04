@@ -15,6 +15,8 @@ import {
   loanPaymentSchema,
   loanPaymentViewSchema,
   payStatementSchema,
+  projectionQuerySchema,
+  projectionSchema,
   recurrenceTransitionSchema,
   safeToSpendQuerySchema,
   settleTransactionSchema,
@@ -243,6 +245,16 @@ describe("finance contracts", () => {
     expect(() =>
       insightWindowQuerySchema.parse({ asOf: "2026-09-01", to: "2026-08-31" }),
     ).toThrow();
+  });
+
+  it("bounds the projection horizon to the twelve-month MVP window", () => {
+    expect(projectionQuerySchema.parse({ asOf: "2026-08-24", months: "12" })).toEqual({
+      asOf: "2026-08-24",
+      months: 12,
+    });
+    expect(() => projectionQuerySchema.parse({ months: 13 })).toThrow();
+    expect(() => projectionQuerySchema.parse({ asOf: "2026-02-29" })).toThrow();
+    expect(() => projectionSchema.parse({})).toThrow();
   });
 
   it("parses report filters and exposes the canonical response contract", () => {

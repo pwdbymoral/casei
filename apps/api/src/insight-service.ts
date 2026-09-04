@@ -1,11 +1,17 @@
 import {
   insightReportQuerySchema,
   insightWindowQuerySchema,
+  projectionQuerySchema,
   safeToSpendQuerySchema,
 } from "@casei/contracts";
 import type { Pool, PoolClient } from "@casei/database";
 import { withUnitOfWork } from "@casei/database";
-import { addLocalDateDays, calculateSafeToSpend, parseLocalDate } from "@casei/domain";
+import {
+  addLocalDateDays,
+  addLocalDateMonths,
+  calculateSafeToSpend,
+  parseLocalDate,
+} from "@casei/domain";
 import type { FinanceScope } from "./finance-service.js";
 import { FinanceConflictError } from "./finance-service.js";
 
@@ -130,12 +136,128 @@ export interface InsightReportView {
   };
 }
 
+export type FinancialProjection = CashFlowProjection;
+
 export interface SafeToSpendCalculationInput {
   balance: bigint;
   plannedIncome: bigint;
   plannedOutflow: bigint;
   coveredReservations: bigint;
   safetyMargin: bigint;
+}
+
+export type CashFlowProjectionEvent = {
+  id: string;
+  date: string;
+  direction: "income" | "outflow";
+  amount: bigint | null;
+  source: {
+    type: "transaction" | "recurrence" | "installment" | "statement" | "loan" | "goal";
+    id: string;
+    label: string;
+  };
+};
+
+export type CashFlowProjectionPoint = {
+  date: string;
+  balance: InsightMoney;
+  delta: InsightMoney;
+  events: Array<{
+    id: string;
+    date: string;
+    direction: "income" | "outflow";
+    amount: InsightMoney | null;
+    source: CashFlowProjectionEvent["source"];
+  }>;
+  unknownEventCount: number;
+};
+
+export type CashFlowProjection = {
+  asOf: string;
+  to: string;
+  months: number;
+  currency: string;
+  startingBalance: InsightMoney;
+  points: CashFlowProjectionPoint[];
+  confidence: InsightConfidence;
+};
+
+/**
+ * Projects known cash events without mutating the caller's event list. Each
+ * point is a deterministic one-month boundary and carries the events that
+ * explain its delta. Unknown variable events remain visible but do not get
+ * silently treated as zero-valued income or outflow.
+ */
+export function projectCashFlow(input: {
+  asOf: string;
+  months: number;
+  currency: string;
+  startingBalance: bigint;
+  events: readonly CashFlowProjectionEvent[];
+}): CashFlowProjection {
+  const parsedAsOf = parseLocalDate(input.asOf);
+  if (!parsedAsOf.ok) throw new FinanceConflictError("A data de referência é inválida.");
+  if (!Number.isInteger(input.months) || input.months < 1 || input.months > 12) {
+    throw new FinanceConflictError("O horizonte da projeção deve estar entre 1 e 12 meses.");
+  }
+  const sorted = [...input.events]
+    .filter((event) => parseLocalDate(event.date).ok)
+    .sort((left, right) => left.date.localeCompare(right.date) || left.id.localeCompare(right.id));
+  let balance = input.startingBalance;
+  let cursor = 0;
+  let previous = input.asOf;
+  const points: CashFlowProjectionPoint[] = [];
+  let unknownEventCount = 0;
+  for (let month = 1; month <= input.months; month += 1) {
+    const date = addLocalDateMonths(parsedAsOf.value, month);
+    const events: CashFlowProjectionPoint["events"] = [];
+    let delta = 0n;
+    while (cursor < sorted.length) {
+      const event = sorted[cursor];
+      if (!event) break;
+      const belongsToPoint = event.date <= date && (month === 1 || event.date > previous);
+      if (!belongsToPoint) {
+        if (event.date > date) break;
+        cursor += 1;
+        continue;
+      }
+      cursor += 1;
+      const signedAmount =
+        event.amount === null ? null : event.direction === "income" ? event.amount : -event.amount;
+      if (signedAmount === null) unknownEventCount += 1;
+      else {
+        delta += signedAmount;
+        balance += signedAmount;
+      }
+      events.push({
+        id: event.id,
+        date: event.date,
+        direction: event.direction,
+        amount: event.amount === null ? null : money(input.currency, event.amount),
+        source: event.source,
+      });
+    }
+    points.push({
+      date,
+      balance: money(input.currency, balance),
+      delta: money(input.currency, delta),
+      events,
+      unknownEventCount: events.filter((event) => event.amount === null).length,
+    });
+    previous = date;
+  }
+  return {
+    asOf: input.asOf,
+    to: previous,
+    months: input.months,
+    currency: input.currency,
+    startingBalance: money(input.currency, input.startingBalance),
+    points,
+    confidence:
+      unknownEventCount > 0
+        ? { level: "medium", reasons: ["evento_variavel_sem_estimativa"] }
+        : { level: "high", reasons: ["eventos_projetados_com_valor_conhecido"] },
+  };
 }
 
 export function calculateSafeToSpendAmounts(input: SafeToSpendCalculationInput): {
@@ -238,6 +360,16 @@ interface InsightReportRow {
   transaction_count?: string | bigint | null;
 }
 
+interface ProjectionRow {
+  id?: string | null;
+  event_date?: string | null;
+  direction?: "income" | "outflow" | string | null;
+  amount_minor?: string | bigint | null;
+  source_type?: string | null;
+  source_id?: string | null;
+  label?: string | null;
+}
+
 /**
  * Rebuilds insight values from canonical ledger and domain tables on each
  * request. There is intentionally no persisted snapshot to invalidate.
@@ -283,6 +415,116 @@ export class InsightService {
         to,
       });
       return toSafeToSpendView(snapshot, parsed.horizonDays);
+    });
+  }
+
+  async getProjection(scope: FinanceScope, input: unknown = {}): Promise<FinancialProjection> {
+    const parsed = projectionQuerySchema.parse(input);
+    return this.withScopedClient(scope, async (client) => {
+      const config = await this.workspaceConfig(client, scope.workspaceId);
+      const asOf = parsed.asOf ?? this.today(config.timezone);
+      const parsedAsOf = parseLocalDate(asOf);
+      if (!parsedAsOf.ok) throw new FinanceConflictError("A data de referência é inválida.");
+      const to = addLocalDateMonths(parsedAsOf.value, parsed.months);
+      const snapshot = await this.loadSnapshot(client, scope.workspaceId, config, {
+        asOf,
+        from: asOf,
+        to,
+      });
+      const rows = await client.query<ProjectionRow>(
+        `SELECT projected.id,
+                projected.event_date,
+                projected.direction,
+                projected.amount_minor,
+                projected.source_type,
+                projected.source_id,
+                projected.label
+           FROM (
+             SELECT ft.id,
+                    COALESCE(ft.due_on, ft.occurred_on)::text AS event_date,
+                    CASE WHEN ft.kind = 'income' THEN 'income' ELSE 'outflow' END AS direction,
+                    CASE
+                      WHEN rr.variable = true AND rr.estimated_minor IS NULL THEN NULL
+                      WHEN rr.variable = true THEN COALESCE(rr.estimated_minor, ft.amount_minor - ft.settled_minor)
+                      ELSE ft.amount_minor - ft.settled_minor
+                    END AS amount_minor,
+                    CASE
+                      WHEN ft.recurrence_id IS NOT NULL THEN 'recurrence'
+                      WHEN ft.installment_plan_id IS NOT NULL THEN 'installment'
+                      ELSE 'transaction'
+                    END AS source_type,
+                    COALESCE(ft.recurrence_id, ft.installment_plan_id, ft.id)::text AS source_id,
+                    NULLIF(trim(ft.description), '') AS label
+               FROM finance_transaction ft
+               LEFT JOIN recurrence_rule rr
+                 ON rr.workspace_id = ft.workspace_id AND rr.id = ft.recurrence_id
+              WHERE ft.workspace_id = $1
+                AND ft.currency_code = $2
+                AND ft.instrument = 'wallet'
+                AND ft.state IN ('planned', 'partially_settled')
+                AND COALESCE(ft.due_on, ft.occurred_on) <= $4::date
+                AND ft.amount_minor > ft.settled_minor
+             UNION ALL
+             SELECT cs.id,
+                    cs.due_on::text,
+                    'outflow',
+                    GREATEST(cs.total_minor - cs.paid_minor, 0),
+                    'statement',
+                    cs.id::text,
+                    'Fatura do cartão'
+               FROM credit_statement cs
+              WHERE cs.workspace_id = $1
+                AND cs.state NOT IN ('paid', 'canceled')
+                AND cs.due_on <= $4::date
+                AND cs.total_minor > cs.paid_minor
+             UNION ALL
+             SELECT lc.id,
+                    lc.due_on::text,
+                    CASE WHEN lc.direction = 'lent' THEN 'income' ELSE 'outflow' END,
+                    GREATEST(
+                      lc.principal_minor - COALESCE((
+                        SELECT SUM(lp.amount_minor)
+                          FROM loan_payment lp
+                         WHERE lp.workspace_id = lc.workspace_id
+                           AND lp.loan_id = lc.id
+                           AND lp.currency_code = lc.currency_code
+                           AND lp.occurred_on <= $3::date
+                      ), 0),
+                      0
+                    ),
+                    'loan',
+                    lc.id::text,
+                    CASE WHEN lc.direction = 'lent' THEN 'Empréstimo concedido' ELSE 'Empréstimo recebido' END
+               FROM loan_contract lc
+              WHERE lc.workspace_id = $1
+                AND lc.currency_code = $2
+                AND lc.status = 'open'
+                AND lc.due_on <= $4::date
+           ) projected
+          WHERE projected.amount_minor IS NULL OR projected.amount_minor > 0
+          ORDER BY projected.event_date, projected.id`,
+        [scope.workspaceId, config.currency, asOf, to],
+      );
+      return projectCashFlow({
+        asOf,
+        months: parsed.months,
+        currency: config.currency,
+        startingBalance: snapshot.balance,
+        events: rows.rows.map((row) => ({
+          id: row.id ?? "",
+          date: row.event_date ?? asOf,
+          direction: row.direction === "income" ? "income" : "outflow",
+          amount:
+            row.amount_minor === null || row.amount_minor === undefined
+              ? null
+              : toBigInt(row.amount_minor),
+          source: {
+            type: isProjectionSourceType(row.source_type) ? row.source_type : "transaction",
+            id: row.source_id ?? row.id ?? "",
+            label: row.label ?? "Compromisso sem descrição",
+          },
+        })),
+      });
     });
   }
 
@@ -745,4 +987,17 @@ function money(currency: string, minor: bigint): InsightMoney {
 function toBigInt(value: string | bigint | number | null | undefined): bigint {
   if (value === null || value === undefined) return 0n;
   return BigInt(value);
+}
+
+function isProjectionSourceType(
+  value: string | null | undefined,
+): value is CashFlowProjectionEvent["source"]["type"] {
+  return (
+    value === "transaction" ||
+    value === "recurrence" ||
+    value === "installment" ||
+    value === "statement" ||
+    value === "loan" ||
+    value === "goal"
+  );
 }

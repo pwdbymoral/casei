@@ -71,6 +71,50 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
   });
 
   integrationIt(
+    "projects dated commitments with source decomposition and overdue items",
+    async () => {
+      const fixture = await createFixture();
+      try {
+        const projection = await new InsightService(fixture.pool).getProjection(fixture.scope, {
+          asOf: "2026-08-05",
+          months: 1,
+        });
+
+        expect(projection).toMatchObject({
+          asOf: "2026-08-05",
+          to: "2026-09-05",
+          months: 1,
+          startingBalance: { currency: "BRL", minor: "1700" },
+          confidence: {
+            level: "medium",
+            reasons: ["evento_variavel_sem_estimativa"],
+          },
+        });
+        expect(projection.points[0]).toMatchObject({
+          date: "2026-09-05",
+          balance: { currency: "BRL", minor: "1075" },
+          delta: { currency: "BRL", minor: "-625" },
+          unknownEventCount: 1,
+        });
+        expect(projection.points[0]?.events.map((event) => event.source.type)).toEqual([
+          "transaction",
+          "loan",
+          "transaction",
+          "recurrence",
+          "transaction",
+          "statement",
+          "loan",
+        ]);
+        expect(
+          projection.points[0]?.events.some((event) => event.source.type === "statement"),
+        ).toBe(true);
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  integrationIt(
     "reconciles monthly and category report rows with published transactions",
     async () => {
       const fixture = await createFixture();
