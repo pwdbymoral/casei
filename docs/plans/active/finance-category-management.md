@@ -1,6 +1,6 @@
 # Plano: gerenciamento de categorias financeiras
 
-- Status: ativo
+- Status: FIN-006 implementado; revisão independente pendente
 - Specs: [finanças](../../specs/financas.md#categorias)
 
 ## Objetivo
@@ -16,11 +16,15 @@ isolamento por workspace e auditoria de comando.
 - Arquivar impede novos usos, mas mantém lançamentos existentes; restaurar exige nome livre.
 - Toda mutação exige papel `owner`/`member`, chave de idempotência e `If-Match`.
 - API e UI expõem estados de erro, conflito, vazio e permissão sem vazar outro espaço.
+- Reclassificação em lote oferece prévia sem mutação e confirmação atômica em
+  `POST /transactions/reclassify`, com hash da prévia, `If-Match` da categoria,
+  idempotência e auditoria sanitizada por transação. A prévia marca conflitos de
+  versão, categoria inativa/incompatível, transações de cartão, recorrência,
+  parcelamento, canceladas ou de outro espaço antes da confirmação.
 
 ## Tarefas
 
-- [ ] Contratos e rotas de atualização/arquivamento/restauração.
-- [ ] Serviço transacional com auditoria e testes de domínio/integração.
-- [ ] Adapter e UI de categorias com edição progressiva.
-- [ ] Validar suíte, typecheck, lint e build; atualizar rastreabilidade do MVP.
-
+- [x] Contratos e rotas de atualização/arquivamento/restauração e reclassificação em lote.
+- [x] Serviço transacional com auditoria e testes de domínio/integração.
+- [x] Adapter e UI de categorias com edição progressiva e prévia da reclassificação.
+- [ ] Validar suíte, typecheck, lint e build; revisão independente pendente.

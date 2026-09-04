@@ -61,6 +61,8 @@ import {
   shouldRetryIdempotentCommand,
   statementItemAmountPrefix,
   type Transaction,
+  type TransactionReclassificationInput,
+  type TransactionReclassificationPreview,
   transactionAmountPrefix,
   transactionKindLabel,
   transactionQueryFromSearchParams,
@@ -90,6 +92,7 @@ function auditActionLabel(action: string): string {
   if (action === "transaction.created") return "Lançamento criado";
   if (action === "transaction.posted") return "Lançamento realizado";
   if (action === "transaction.reversed") return "Lançamento desfeito";
+  if (action === "transaction.reclassified") return "Categoria reclassificada";
   return action;
 }
 
@@ -205,6 +208,14 @@ function FinanceDashboard({
   const [timelineTo, setTimelineTo] = useState("");
   const [timelineState, setTimelineState] = useState<"" | Transaction["state"]>("");
   const [timelineKind, setTimelineKind] = useState<"" | Transaction["kind"]>("");
+  const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
+  const [reclassificationCategoryId, setReclassificationCategoryId] = useState("");
+  const [reclassificationPreview, setReclassificationPreview] =
+    useState<TransactionReclassificationPreview | null>(null);
+  const [reclassificationOpen, setReclassificationOpen] = useState(false);
+  const [previewingReclassification, setPreviewingReclassification] = useState(false);
+  const [savingReclassification, setSavingReclassification] = useState(false);
+  const reclassificationCommandKey = useRef<string | null>(null);
   const [undoableTransaction, setUndoableTransaction] = useState<Transaction | null>(null);
   const [undoing, setUndoing] = useState(false);
   const [settlingTransaction, setSettlingTransaction] = useState<Transaction | null>(null);
@@ -318,6 +329,10 @@ function FinanceDashboard({
     setTransactionsHasMore(false);
     setCards([]);
     setCategories([]);
+    setSelectedTransactionIds([]);
+    setReclassificationCategoryId("");
+    setReclassificationPreview(null);
+    setReclassificationOpen(false);
     setStatements([]);
     setStatus("loading");
     setError(null);
@@ -1533,6 +1548,83 @@ function FinanceDashboard({
     }
   }
 
+  async function previewReclassification() {
+    if (
+      !writeAccess ||
+      previewingReclassification ||
+      selectedTransactionIds.length === 0 ||
+      !reclassificationCategoryId
+    )
+      return;
+    const input: TransactionReclassificationInput = {
+      categoryId: reclassificationCategoryId,
+      transactions: selectedTransactionIds.flatMap((id) => {
+        const transaction = visibleTransactions.find((item) => item.id === id);
+        return transaction ? [{ id: transaction.id, version: transaction.version }] : [];
+      }),
+    };
+    setPreviewingReclassification(true);
+    setError(null);
+    try {
+      const preview = await adapter.previewTransactionReclassification(workspaceId, input);
+      setReclassificationPreview(preview);
+      setReclassificationOpen(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível gerar a prévia.");
+    } finally {
+      setPreviewingReclassification(false);
+    }
+  }
+
+  async function confirmReclassification() {
+    if (!reclassificationPreview?.canConfirm || savingReclassification) return;
+    const input: TransactionReclassificationInput = {
+      categoryId: reclassificationPreview.categoryId,
+      transactions: reclassificationPreview.rows.map((row) => ({
+        id: row.transactionId,
+        version: row.version,
+      })),
+    };
+    setSavingReclassification(true);
+    setError(null);
+    const commandKey =
+      reclassificationCommandKey.current ?? `web-reclassify-${crypto.randomUUID()}`;
+    reclassificationCommandKey.current = commandKey;
+    try {
+      const result = await adapter.reclassifyTransactions(
+        workspaceId,
+        input,
+        reclassificationPreview,
+        commandKey,
+      );
+      setTransactions((current) =>
+        current.map(
+          (transaction) =>
+            result.transactions.find((item) => item.id === transaction.id) ?? transaction,
+        ),
+      );
+      setSelectedTransactionIds([]);
+      setReclassificationPreview(null);
+      setReclassificationOpen(false);
+      reclassificationCommandKey.current = null;
+      setNotice("Transações reclassificadas.");
+    } catch (cause) {
+      if (cause instanceof FinanceAdapterError && cause.status === 412) {
+        setReclassificationPreview(null);
+        setReclassificationOpen(false);
+        await load(false);
+        setError("Uma categoria ou transação mudou enquanto você revisava. Gere uma nova prévia.");
+      } else {
+        if (!shouldRetryIdempotentCommand(cause)) reclassificationCommandKey.current = null;
+        setError(
+          cause instanceof Error ? cause.message : "Não foi possível reclassificar as transações.",
+        );
+      }
+    } finally {
+      setSavingReclassification(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -1992,6 +2084,40 @@ function FinanceDashboard({
                 ) : null}
               </div>
             </form>
+            {writeAccess && selectedTransactionIds.length > 0 ? (
+              <div className="mt-4 flex flex-wrap items-end gap-3 rounded-lg border bg-muted/30 p-3">
+                <Field className="min-w-52 flex-1">
+                  <FieldLabel htmlFor="reclassification-category">Nova categoria</FieldLabel>
+                  <select
+                    id="reclassification-category"
+                    className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                    value={reclassificationCategoryId}
+                    onChange={(event) => setReclassificationCategoryId(event.target.value)}
+                  >
+                    <option value="">Selecione uma categoria ativa</option>
+                    {visibleCategories
+                      .filter((category) => !category.archived)
+                      .map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                  </select>
+                </Field>
+                <Button
+                  type="button"
+                  onClick={() => void previewReclassification()}
+                  disabled={!reclassificationCategoryId || previewingReclassification}
+                >
+                  {previewingReclassification
+                    ? "Gerando prévia…"
+                    : `Reclassificar ${selectedTransactionIds.length}`}
+                </Button>
+                <Button type="button" variant="ghost" onClick={() => setSelectedTransactionIds([])}>
+                  Limpar seleção
+                </Button>
+              </div>
+            ) : null}
             {visibleStatus === "loading" ? (
               <p role="status" className="text-sm text-muted-foreground">
                 Carregando lançamentos…
@@ -2010,6 +2136,20 @@ function FinanceDashboard({
                       key={transaction.id}
                       className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
                     >
+                      <input
+                        type="checkbox"
+                        aria-label={`Selecionar ${transactionLabel(transaction)} para reclassificação`}
+                        checked={selectedTransactionIds.includes(transaction.id)}
+                        onChange={(event) =>
+                          setSelectedTransactionIds((current) =>
+                            event.target.checked
+                              ? [...current, transaction.id]
+                              : current.filter((id) => id !== transaction.id),
+                          )
+                        }
+                        disabled={!writeAccess || transaction.state === "canceled"}
+                        className="size-4 shrink-0 accent-primary"
+                      />
                       <div className="min-w-0">
                         <p className="truncate font-medium">{transactionLabel(transaction)}</p>
                         <p className="text-sm text-muted-foreground">
@@ -3476,6 +3616,59 @@ function FinanceDashboard({
                 : visiblePendingStatementAction?.type === "reopen"
                   ? "Reabrir fatura"
                   : "Fechar fatura"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={reclassificationOpen} onOpenChange={setReclassificationOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Revisar reclassificação</DialogTitle>
+            <DialogDescription>
+              Confira todos os lançamentos antes de confirmar. Nada é alterado nesta prévia.
+            </DialogDescription>
+          </DialogHeader>
+          {reclassificationPreview ? (
+            <div className="grid gap-3">
+              <p className="text-sm">
+                {reclassificationPreview.rows.filter((row) => row.status === "ready").length} de{" "}
+                {reclassificationPreview.rows.length} prontos para a nova categoria.
+              </p>
+              <ul className="grid max-h-56 gap-2 overflow-y-auto text-sm">
+                {reclassificationPreview.rows.map((row) => {
+                  const transaction = visibleTransactions.find(
+                    (item) => item.id === row.transactionId,
+                  );
+                  return (
+                    <li key={row.transactionId} className="rounded-lg border p-2">
+                      <p className="font-medium">
+                        {transaction ? transactionLabel(transaction) : row.transactionId}
+                      </p>
+                      {row.status === "invalid" ? (
+                        <p className="text-destructive">{row.errors.join(" ")}</p>
+                      ) : (
+                        <p className="text-muted-foreground">Pronto para confirmar</p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <DialogClose
+              render={<Button type="button" variant="outline" />}
+              disabled={savingReclassification}
+            >
+              Cancelar
+            </DialogClose>
+            <Button
+              type="button"
+              onClick={() => void confirmReclassification()}
+              disabled={!reclassificationPreview?.canConfirm || savingReclassification}
+            >
+              {savingReclassification ? "Salvando…" : "Confirmar reclassificação"}
             </Button>
           </DialogFooter>
         </DialogContent>

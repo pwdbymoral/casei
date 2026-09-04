@@ -196,6 +196,16 @@ Todos os totais são calculados no servidor a partir de lançamentos canônicos.
 - Categoria pertence ao espaço, tem nome único entre ativas e pode ser de receita, despesa ou ambas.
 - Arquivar categoria impede novos usos, preservando histórico.
 - Reclassificação em lote é permitida com prévia e auditoria.
+
+Reclassificação em lote seleciona transações explicitamente editáveis e uma categoria destino.
+`POST /v1/workspaces/:workspaceId/transactions/reclassify/preview` valida, sem mutar, o espaço,
+a categoria ativa e compatível, as versões e as restrições de origem (transação de carteira não
+cancelada, sem recorrência, parcelamento ou cartão), retornando uma linha por seleção e indicando
+erros parciais antes da confirmação. A confirmação repete a seleção e o hash da prévia em
+`POST /v1/workspaces/:workspaceId/transactions/reclassify`, exige `Idempotency-Key` e
+`If-Match: "v<categoryVersion>"`, revalida todas as linhas sob lock e só então altera todas
+atomicamente; conflito ou qualquer erro não altera nenhuma. Cada transação alterada incrementa
+sua versão e registra `transaction.reclassified` com snapshots `before`/`after` sanitizados.
 - Categorias não controlam autorização.
 
 ## Edge cases e falhas

@@ -311,6 +311,46 @@ describe("finance adapter", () => {
     });
   });
 
+  it("previews and confirms a transaction reclassification with the preview hash and category version", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      if (String(input).endsWith("/reclassify/preview")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          categoryId: "category-2",
+          transactions: [{ id: "transaction-1", version: 3 }],
+        });
+        return Response.json({
+          categoryId: "category-2",
+          categoryVersion: 7,
+          previewHash: "a".repeat(64),
+          rows: [],
+          canConfirm: true,
+        });
+      }
+      expect(String(input)).toContain("/transactions/reclassify");
+      expect(new Headers(init?.headers).get("If-Match")).toBe('"v7"');
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("reclassify-1");
+      expect(JSON.parse(String(init?.body))).toMatchObject({ previewHash: "a".repeat(64) });
+      return Response.json({
+        committed: true,
+        preview: {
+          categoryId: "category-2",
+          categoryVersion: 7,
+          previewHash: "a".repeat(64),
+          rows: [],
+          canConfirm: true,
+        },
+        transactions: [],
+      });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const input = { categoryId: "category-2", transactions: [{ id: "transaction-1", version: 3 }] };
+    const preview = await adapter.previewTransactionReclassification("workspace", input);
+    await expect(
+      adapter.reclassifyTransactions("workspace", input, preview, "reclassify-1"),
+    ).resolves.toMatchObject({ committed: true });
+  });
+
   it("reuses the logical idempotency key after a network failure", async () => {
     let attempts = 0;
     const keys: string[] = [];
