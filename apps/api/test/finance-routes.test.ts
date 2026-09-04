@@ -254,14 +254,18 @@ describe("finance HTTP composition", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "idempotency-key": "reclass-route-1",
+          "idempotency-key": "reclass-route-01",
           "if-match": '"v2"',
         },
         body: JSON.stringify({ ...input, previewHash: preview.previewHash }),
       },
     );
     expect(confirmed.status).toBe(200);
-    expect(calls[1]?.args.slice(1)).toEqual([input, "reclass-route-1", 2]);
+    expect(calls[1]?.args.slice(1)).toEqual([
+      { ...input, previewHash: preview.previewHash },
+      "reclass-route-01",
+      2,
+    ]);
   });
 
   it("wires finance through createApp's authenticated actor and workspace scope", async () => {
