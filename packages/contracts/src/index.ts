@@ -900,6 +900,52 @@ export const updateTransactionSchema = z
 
 export type UpdateTransactionInput = z.infer<typeof updateTransactionSchema>;
 
+const transactionReclassificationItemSchema = z.object({
+  id: domainIdSchema,
+  version: versionSchema,
+});
+
+/** A category-only operation over a set of explicitly versioned transactions. */
+export const transactionReclassificationSchema = z
+  .object({
+    categoryId: domainIdSchema,
+    transactions: z.array(transactionReclassificationItemSchema).min(1).max(500),
+    previewHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .superRefine((value, context) => {
+    const ids = value.transactions.map((item) => item.id);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["transactions"],
+        message: "Há transações repetidas.",
+      });
+    }
+  });
+export type TransactionReclassificationInput = z.infer<typeof transactionReclassificationSchema>;
+
+export const transactionReclassificationPreviewRowSchema = z.object({
+  transactionId: domainIdSchema,
+  currentCategoryId: domainIdSchema.nullable(),
+  categoryId: domainIdSchema,
+  version: versionSchema,
+  status: z.enum(["ready", "invalid"]),
+  errors: z.array(z.string().min(1)),
+});
+export const transactionReclassificationPreviewSchema = z.object({
+  categoryId: domainIdSchema,
+  categoryVersion: versionSchema,
+  previewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  rows: z.array(transactionReclassificationPreviewRowSchema).max(500),
+  canConfirm: z.boolean(),
+});
+export type TransactionReclassificationPreview = z.infer<
+  typeof transactionReclassificationPreviewSchema
+>;
+
 /** Cancelling a planned transaction is an explicit, auditable command. */
 export const cancelTransactionSchema = z.object({ confirm: z.literal(true) });
 export type CancelTransactionInput = z.infer<typeof cancelTransactionSchema>;

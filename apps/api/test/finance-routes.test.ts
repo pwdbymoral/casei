@@ -212,6 +212,72 @@ describe("finance HTTP composition", () => {
     expect(calls[1]?.args.slice(1)).toEqual([category.id, "category-archive-route-001", 1]);
   });
 
+  it("routes reclassification preview and confirmation through the scoped service", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const preview = {
+      categoryId: "0190f3c8-2a10-7abc-8def-1234567890af",
+      categoryVersion: 2,
+      previewHash: "a".repeat(64),
+      rows: [],
+      canConfirm: true,
+    };
+    const fakeService = {
+      previewTransactionReclassification: async (...args: unknown[]) => {
+        calls.push({ method: "preview", args });
+        return preview;
+      },
+      reclassifyTransactions: async (...args: unknown[]) => {
+        calls.push({ method: "confirm", args });
+        return { replayed: false, committed: true, statusCode: 200, preview, transactions: [] };
+      },
+    } as unknown as FinanceService;
+    const scopeMiddleware = createActorMiddleware(async () => ({ userId: "user-1" }));
+    const membershipMiddleware = createWorkspaceScopeMiddleware(
+      async ({ actor, workspaceId: id }) => ({ actor, workspaceId: id, role: "member" as const }),
+    );
+    const app = createApp((v1) =>
+      configureFinanceRoutes(v1, {
+        service: fakeService,
+        scopeMiddleware: async (context, next) => {
+          await scopeMiddleware(context, async () => {
+            await membershipMiddleware(context, next);
+          });
+        },
+      }),
+    );
+    const input = {
+      categoryId: preview.categoryId,
+      transactions: [{ id: transactionId, version: 1 }],
+    };
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions/reclassify/preview`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    expect(response.status).toBe(200);
+    const confirmed = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/transactions/reclassify`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "reclass-route-01",
+          "if-match": '"v2"',
+        },
+        body: JSON.stringify({ ...input, previewHash: preview.previewHash }),
+      },
+    );
+    expect(confirmed.status).toBe(200);
+    expect(calls[1]?.args.slice(1)).toEqual([
+      { ...input, previewHash: preview.previewHash },
+      "reclass-route-01",
+      2,
+    ]);
+  });
+
   it("wires finance through createApp's authenticated actor and workspace scope", async () => {
     let receivedActor: unknown;
     let receivedWorkspaceId: string | undefined;

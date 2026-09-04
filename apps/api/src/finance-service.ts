@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type CreateTransactionInput,
   categoryTransitionSchema,
@@ -18,6 +19,8 @@ import {
   recurrenceTransitionSchema,
   settleTransactionSchema,
   type TransactionListQuery,
+  type TransactionReclassificationPreview,
+  transactionReclassificationSchema,
   updateCategorySchema,
   updateCreditCardSchema,
   updateRecurrenceSchema,
@@ -145,6 +148,14 @@ export interface CategoryView {
   kind: "income" | "expense" | "both";
   archived: boolean;
   version: number;
+}
+
+export interface TransactionReclassificationResult {
+  replayed: boolean;
+  committed: boolean;
+  preview: TransactionReclassificationPreview;
+  transactions: TransactionView[];
+  statusCode: 200 | 422;
 }
 
 export interface CreditCardView {
@@ -917,6 +928,108 @@ export class FinanceService {
     return {
       replayed: result.replayed,
       transaction: result.response as unknown as TransactionView,
+    };
+  }
+
+  async previewTransactionReclassification(
+    scope: FinanceScope,
+    input: unknown,
+  ): Promise<TransactionReclassificationPreview> {
+    const parsed = transactionReclassificationSchema.parse(input);
+    return this.withUnitOfWork(scope, async ({ client }) => {
+      const category = await lockReclassificationCategory(
+        client,
+        scope.workspaceId,
+        parsed.categoryId,
+      );
+      const rows = await loadReclassificationTransactions(client, scope.workspaceId, parsed);
+      return makeTransactionReclassificationPreview(parsed, category, rows);
+    });
+  }
+
+  async reclassifyTransactions(
+    scope: FinanceScope,
+    input: unknown,
+    idempotencyKey: string,
+    expectedCategoryVersion: number,
+  ): Promise<TransactionReclassificationResult> {
+    assertFinanceCapability(scope, "finance.write");
+    const parsed = transactionReclassificationSchema.parse(input);
+    if (!parsed.previewHash) {
+      throw new FinanceConflictError("A confirmação precisa usar uma prévia válida.");
+    }
+    const result = await this.withUnitOfWork(scope, async ({ client }) =>
+      executeIdempotent(client, {
+        scope: `${scope.actorId}:${scope.workspaceId}:POST:/transactions/reclassify`,
+        key: idempotencyKey,
+        request: { ...parsed, expectedCategoryVersion },
+        execute: async () => {
+          const category = await lockReclassificationCategory(
+            client,
+            scope.workspaceId,
+            parsed.categoryId,
+          );
+          if (category.version !== expectedCategoryVersion) {
+            throw new VersionConflictError(category.version);
+          }
+          const rows = await loadReclassificationTransactions(
+            client,
+            scope.workspaceId,
+            parsed,
+            true,
+          );
+          const preview = makeTransactionReclassificationPreview(parsed, category, rows);
+          if (preview.previewHash !== parsed.previewHash) {
+            throw new FinanceConflictError(
+              "A confirmação precisa usar exatamente a prévia revisada.",
+            );
+          }
+          if (!preview.canConfirm) {
+            return {
+              statusCode: 422,
+              response: { committed: false, preview, transactions: [] } as unknown as JsonValue,
+            };
+          }
+          const updated: TransactionView[] = [];
+          for (const row of rows) {
+            const changed = await client.query<TransactionRow>(
+              `UPDATE finance_transaction
+                  SET category_id = $3, version = version + 1, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND version = $4
+                RETURNING id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+                          occurred_on, due_on, posted_on, description, category_id, card_id,
+                          statement_id, recurrence_id, installment_plan_id, version`,
+              [scope.workspaceId, row.id, parsed.categoryId, row.version],
+            );
+            const next = changed.rows[0];
+            if (!next) throw new VersionConflictError(row.version);
+            await this.recordTransactionAudit(
+              client,
+              scope,
+              row.id,
+              "transaction.reclassified",
+              transactionAuditSnapshot(row),
+              transactionAuditSnapshot(next),
+            );
+            updated.push(toTransactionView(next));
+          }
+          return {
+            statusCode: 200,
+            response: { committed: true, preview, transactions: updated } as unknown as JsonValue,
+          };
+        },
+      }),
+    );
+    const response = result.response as unknown as Omit<
+      TransactionReclassificationResult,
+      "replayed" | "statusCode"
+    >;
+    return {
+      replayed: result.replayed,
+      statusCode: result.statusCode as 200 | 422,
+      committed: response.committed,
+      preview: response.preview,
+      transactions: response.transactions,
     };
   }
 
@@ -4980,6 +5093,112 @@ function transactionAuditSnapshot(
     statementId: row.statement_id,
     version: row.version,
   };
+}
+
+type ReclassificationCategoryRow = Pick<CategoryView, "id" | "kind" | "archived" | "version">;
+
+async function lockReclassificationCategory(
+  client: PgPoolClient,
+  workspaceId: string,
+  categoryId: string,
+): Promise<ReclassificationCategoryRow> {
+  const result = await client.query<ReclassificationCategoryRow>(
+    `SELECT id, kind, archived, version
+       FROM finance_category
+      WHERE workspace_id = $1 AND id = $2
+      FOR SHARE`,
+    [workspaceId, categoryId],
+  );
+  const category = result.rows[0];
+  if (!category) throw new FinanceNotFoundError();
+  return category;
+}
+
+async function loadReclassificationTransactions(
+  client: PgPoolClient,
+  workspaceId: string,
+  input: { transactions: Array<{ id: string; version: number }> },
+  forUpdate = false,
+): Promise<TransactionRow[]> {
+  const ids = input.transactions.map((item) => item.id);
+  const result = await client.query<TransactionRow>(
+    `SELECT id, workspace_id, kind, state, amount_minor, settled_minor, currency_code,
+            occurred_on::text AS occurred_on, due_on::text AS due_on, posted_on,
+            description, category_id, card_id, statement_id, recurrence_id,
+            installment_plan_id, version
+       FROM finance_transaction
+      WHERE workspace_id = $1 AND id = ANY($2::uuid[])
+      ORDER BY id ${forUpdate ? "FOR UPDATE" : ""}`,
+    [workspaceId, ids],
+  );
+  return result.rows;
+}
+
+function makeTransactionReclassificationPreview(
+  input: { categoryId: string; transactions: Array<{ id: string; version: number }> },
+  category: ReclassificationCategoryRow,
+  rows: TransactionRow[],
+): TransactionReclassificationPreview {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const previewRows = input.transactions.map((selected) => {
+    const row = byId.get(selected.id);
+    const errors = row
+      ? reclassificationErrors(row, selected.version, category)
+      : ["A transação não foi encontrada neste espaço."];
+    return {
+      transactionId: selected.id,
+      currentCategoryId: row?.category_id ?? null,
+      categoryId: input.categoryId,
+      version: row?.version ?? selected.version,
+      status: errors.length === 0 ? ("ready" as const) : ("invalid" as const),
+      errors,
+    };
+  });
+  const hashInput = {
+    categoryId: category.id,
+    categoryVersion: category.version,
+    rows: previewRows.map((row) => ({
+      transactionId: row.transactionId,
+      currentCategoryId: row.currentCategoryId,
+      categoryId: row.categoryId,
+      version: row.version,
+      status: row.status,
+      errors: row.errors,
+    })),
+  };
+  const previewHash = createHash("sha256").update(JSON.stringify(hashInput)).digest("hex");
+  return {
+    categoryId: category.id,
+    categoryVersion: category.version,
+    previewHash,
+    rows: previewRows,
+    canConfirm: previewRows.every((row) => row.status === "ready"),
+  };
+}
+
+function reclassificationErrors(
+  row: TransactionRow,
+  expectedVersion: number,
+  category: ReclassificationCategoryRow,
+): string[] {
+  const errors: string[] = [];
+  if (row.version !== expectedVersion) errors.push("A transação foi alterada desde a prévia.");
+  if (category.archived) errors.push("A categoria está arquivada.");
+  if (
+    (row.kind === "income" && !["income", "both"].includes(category.kind)) ||
+    (row.kind === "expense" && !["expense", "both"].includes(category.kind))
+  ) {
+    errors.push("A categoria não é compatível com o tipo da transação.");
+  }
+  if (!((row.kind === "income" || row.kind === "expense") && row.state !== "canceled")) {
+    errors.push("A transação não pode ser reclassificada.");
+  }
+  if (row.recurrence_id) errors.push("Ocorrências de recorrência devem ser editadas pela série.");
+  if (row.installment_plan_id) errors.push("Parcelas devem ser editadas pelo plano.");
+  if (row.card_id || row.statement_id)
+    errors.push("Compras de cartão devem ser editadas pela fatura.");
+  if (row.category_id === category.id) errors.push("A transação já usa esta categoria.");
+  return errors;
 }
 
 interface CreditCardRow {
