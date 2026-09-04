@@ -751,6 +751,21 @@ describe("finance adapter", () => {
     expect(categories).toEqual([]);
   });
 
+  it("drops a late reclassification preview after changing workspace", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    const request = guard.begin("workspace-a");
+    let resolvePreview!: (preview: string) => void;
+    const oldPreview = new Promise<string>((resolve) => {
+      resolvePreview = resolve;
+    });
+    guard.switchWorkspace("workspace-b");
+    const visiblePreview: string[] = [];
+    resolvePreview("preview-from-a");
+    const preview = await oldPreview;
+    if (guard.isCurrent(request)) visiblePreview.push(preview);
+    expect(visiblePreview).toEqual([]);
+  });
+
   it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
     const adapter = createFixtureFinanceAdapter();
     const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";

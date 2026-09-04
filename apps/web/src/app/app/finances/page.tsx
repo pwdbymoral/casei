@@ -1791,14 +1791,17 @@ function FinanceDashboard({
     };
     setPreviewingReclassification(true);
     setError(null);
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const preview = await adapter.previewTransactionReclassification(workspaceId, input);
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setReclassificationPreview(preview);
       setReclassificationOpen(true);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível gerar a prévia.");
+      if (workspaceRequests.isCurrent(workspaceRequest))
+        setError(cause instanceof Error ? cause.message : "Não foi possível gerar a prévia.");
     } finally {
-      setPreviewingReclassification(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setPreviewingReclassification(false);
     }
   }
 
@@ -1816,6 +1819,7 @@ function FinanceDashboard({
     const commandKey =
       reclassificationCommandKey.current ?? `web-reclassify-${crypto.randomUUID()}`;
     reclassificationCommandKey.current = commandKey;
+    const workspaceRequest = workspaceRequests.begin(workspaceId);
     try {
       const result = await adapter.reclassifyTransactions(
         workspaceId,
@@ -1823,6 +1827,7 @@ function FinanceDashboard({
         reclassificationPreview,
         commandKey,
       );
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       setTransactions((current) =>
         current.map(
           (transaction) =>
@@ -1835,6 +1840,7 @@ function FinanceDashboard({
       reclassificationCommandKey.current = null;
       setNotice("Transações reclassificadas.");
     } catch (cause) {
+      if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       if (cause instanceof FinanceAdapterError && cause.status === 412) {
         setReclassificationPreview(null);
         setReclassificationOpen(false);
@@ -1847,7 +1853,7 @@ function FinanceDashboard({
         );
       }
     } finally {
-      setSavingReclassification(false);
+      if (workspaceRequests.isCurrent(workspaceRequest)) setSavingReclassification(false);
     }
   }
 
