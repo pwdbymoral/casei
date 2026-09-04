@@ -129,6 +129,19 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
     );
   }, [filter, preview]);
 
+  const visibleDrafts = useMemo(() => {
+    if (!preview) return [];
+    return drafts
+      .map((draft, index) => ({ draft, index, status: preview.rows[index]?.status }))
+      .filter(({ status }) =>
+        filter === "all"
+          ? true
+          : filter === "errors"
+            ? status === "invalid" || status === "duplicate"
+            : status === "new" || status === "update",
+      );
+  }, [drafts, filter, preview]);
+
   async function requestPreview() {
     if (!content.trim()) {
       setError("Cole ou digite pelo menos um produto.");
@@ -318,7 +331,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
                         </tr>
                       </thead>
                       <tbody>
-                        {drafts.map((row, index) => (
+                        {visibleDrafts.map(({ draft: row, index }) => (
                           <tr key={row.lineNumber} className="border-t align-top">
                             <td className="px-3 py-2 text-muted-foreground">{row.lineNumber}</td>
                             {(
