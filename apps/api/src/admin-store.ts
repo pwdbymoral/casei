@@ -12,6 +12,7 @@ import type { Pool, PoolClient } from "@casei/database";
 import { canonicalJson } from "@casei/database";
 import { PlatformBootstrapAlreadyCompletedError } from "./admin-bootstrap.js";
 import { AdminPolicyError } from "./admin-policy.js";
+import type { AdminRateLimiter } from "./admin-routes.js";
 import {
   type AdminAccountStore,
   type AdminEmailCommand,
@@ -620,6 +621,75 @@ export class PostgresAdminAccountStore implements AdminAccountStore {
       await client.query(`SET LOCAL ROLE "${quotedRole}"`);
     }
     await client.query(`SELECT set_config('app.actor_id', $1, true)`, [actorId ?? ""]);
+  }
+}
+
+/**
+ * Durable fixed-window limiter for administrative requests. The bucket is
+ * actor-scoped and protected by RLS, so a restart or a second API instance
+ * cannot reset the limit.
+ */
+export class PostgresAdminRateLimiter implements AdminRateLimiter {
+  constructor(
+    private readonly pool: Pool,
+    private readonly applicationRole = "casei_app",
+    private readonly limit = 60,
+    private readonly windowSeconds = 60,
+  ) {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RangeError("Admin rate limit must be a positive integer");
+    }
+    if (!Number.isInteger(windowSeconds) || windowSeconds < 1) {
+      throw new RangeError("Admin rate-limit window must be a positive integer");
+    }
+  }
+
+  async consume(key: string): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(this.applicationRole)) {
+        throw new Error("Invalid PostgreSQL role identifier");
+      }
+      await client.query(`SET LOCAL ROLE "${this.applicationRole.replaceAll('"', '""')}"`);
+      await client.query(`SELECT set_config('app.actor_id', $1, true)`, [key]);
+      const result = await client.query<{
+        attempts: number;
+        window_started_at: Date;
+      }>(
+        `INSERT INTO admin_rate_limit_bucket (actor_id, window_started_at, attempts)
+         VALUES ($1, now(), 1)
+         ON CONFLICT (actor_id) DO UPDATE
+           SET attempts = CASE
+             WHEN admin_rate_limit_bucket.window_started_at <= now() - ($3 * interval '1 second')
+               THEN 1
+             ELSE LEAST($2, admin_rate_limit_bucket.attempts + 1)
+           END,
+           window_started_at = CASE
+             WHEN admin_rate_limit_bucket.window_started_at <= now() - ($3 * interval '1 second')
+               THEN now()
+             ELSE admin_rate_limit_bucket.window_started_at
+           END
+         RETURNING attempts, window_started_at`,
+        [key, this.limit + 1, this.windowSeconds],
+      );
+      await client.query("COMMIT");
+      const row = result.rows[0];
+      if (!row) throw new Error("Rate-limit bucket was not returned");
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil(
+          (new Date(row.window_started_at).getTime() + this.windowSeconds * 1_000 - Date.now()) /
+            1_000,
+        ),
+      );
+      return { allowed: row.attempts <= this.limit, retryAfterSeconds };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

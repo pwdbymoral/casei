@@ -440,9 +440,10 @@ export class AdminService {
     correlationId: string;
     result: AdminAuditResult;
   }): Promise<void> {
-    if (!this.store.recordAudit) return Promise.resolve();
+    const recordAudit = this.store.recordAudit;
+    if (!recordAudit) return Promise.resolve();
     return this.withActor(input.actor, () =>
-      this.store.recordAudit?.({
+      recordAudit.call(this.store, {
         actorId: input.actor.userId,
         targetId: input.targetId,
         action: input.action,
@@ -472,27 +473,41 @@ export class AdminService {
     const scope = `${actor.userId}:platform:${action}:${userId}`;
     const request = { action, targetId: userId, input };
     if (this.store.executeEmailIdempotent) {
-      return this.store.executeEmailIdempotent(
-        scope,
-        idempotencyKey,
-        request,
-        async () => {
-          const account = await this.requireAccount(userId);
-          return { email: account.email, result: null };
-        },
-        send,
-        {
-          actorId: actor.userId,
-          targetId: userId,
-          action,
-          reason: commandReason(input),
-          correlationId,
-          ipAddress: actor.ipAddress,
-          endpoint: actor.endpoint,
-        },
-        actor.userId,
-        actor.stepUpToken,
-      );
+      try {
+        return await this.store.executeEmailIdempotent(
+          scope,
+          idempotencyKey,
+          request,
+          async () => {
+            const account = await this.requireAccount(userId);
+            return { email: account.email, result: null };
+          },
+          send,
+          {
+            actorId: actor.userId,
+            targetId: userId,
+            action,
+            reason: commandReason(input),
+            correlationId,
+            ipAddress: actor.ipAddress,
+            endpoint: actor.endpoint,
+          },
+          actor.userId,
+          actor.stepUpToken,
+        );
+      } catch (error) {
+        if (error instanceof AdminNotFoundError) {
+          await this.recordCommandAudit({
+            actor,
+            targetId: userId,
+            action,
+            reason: `${commandReason(input)} [failure:${adminErrorCode(error)}]`,
+            correlationId,
+            result: "failure",
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
     }
     const result = await this.executeCommand(
       actor,

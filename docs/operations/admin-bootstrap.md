@@ -16,13 +16,17 @@ ou e-mail enviados pelo navegador.
 
 O primeiro admin não é criado por seed automático, header, fixture ou sessão fabricada. Promoções,
 rebaixamentos, suspensão e reativação posteriores acontecem no console, com autenticação recente,
-motivo e auditoria transacional. Aplique `0021_platform_admin_and_step_up.sql` depois de
-DATA-004/0019 e cartões/0020. Essa migration cria o papel persistido, o schema oficial do Better
+motivo e auditoria transacional. Aplique `0022_platform_admin_and_step_up.sql` depois de
+DATA-004/0019, cartões/0020 e export/0021. Essa migration cria o papel persistido, o schema oficial do Better
 Auth two-factor, RLS e as funções controladas de metadados administrativos. Após o bootstrap, o
 primeiro `platform_admin` precisa cadastrar e verificar TOTP; sem isso o layout/API liberam somente
 a jornada de enrollment, não contas, sessões ou comandos.
 
-Reenvios de verificação/recuperação criam uma intent `pending` na migration 0021 e só marcam a
+Reenvios de verificação/recuperação criam uma intent `pending` na migration 0022 e só marcam a
 idempotência/auditoria como sucesso depois que Better Auth aceita o envio. Falhas ficam `failed` e
 podem ser reprocessadas com a mesma chave escopada por ator, ação e alvo; a outbox de Better Auth
-recebe uma identidade determinística. Não altere 0019, 0020 ou 0021 depois de aplicadas.
+recebe uma identidade determinística. Não altere 0019, 0020, 0021 ou 0022 depois de aplicadas.
+
+A boundary `/v1/admin` também usa um bucket durável de 60 tentativas por janela de 60 segundos
+por ator. Quando o limite é excedido, a API responde `429` e inclui `Retry-After`; a janela é
+compartilhada entre instâncias e não é resetada por restart.

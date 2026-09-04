@@ -90,6 +90,19 @@ export const platformAuditEvent = pgTable(
   ],
 );
 
+/** Durable fixed-window buckets for administrative endpoint protection. */
+export const adminRateLimitBucket = pgTable(
+  "admin_rate_limit_bucket",
+  {
+    actorId: text("actor_id")
+      .primaryKey()
+      .references(() => user.id, { onDelete: "cascade" }),
+    windowStartedAt: instant("window_started_at").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+  },
+  (table) => [check("admin_rate_limit_bucket_attempts_check", sql`${table.attempts} >= 0`)],
+);
+
 /** Short-lived, one-use proof that a platform actor completed step-up auth. */
 export const adminStepUpChallenge = pgTable(
   "admin_step_up_challenge",

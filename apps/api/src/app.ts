@@ -4,9 +4,13 @@ import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { BetterAuthAdminAuthPort } from "./admin-auth-port.js";
-import { configureAdminRoutes } from "./admin-routes.js";
+import {
+  type AdminRateLimiter,
+  type AdminRateLimitOptions,
+  configureAdminRoutes,
+} from "./admin-routes.js";
 import { type AdminAccountStore, type AdminAuthPort, AdminService } from "./admin-service.js";
-import { PostgresAdminAccountStore } from "./admin-store.js";
+import { PostgresAdminAccountStore, PostgresAdminRateLimiter } from "./admin-store.js";
 import {
   auth,
   defaultAuthOrigins,
@@ -83,6 +87,7 @@ export interface AdminAppOptions {
   authPort?: AdminAuthPort;
   applicationRole?: string;
   webOrigin?: string;
+  rateLimit?: AdminRateLimiter | AdminRateLimitOptions;
 }
 
 export interface FinanceAppOptions {
@@ -225,6 +230,12 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
           )
         : undefined))
     : undefined;
+  const adminRateLimiter = options.admin
+    ? (options.admin.rateLimit ??
+      (options.admin.pool
+        ? new PostgresAdminRateLimiter(options.admin.pool, options.admin.applicationRole)
+        : undefined))
+    : undefined;
   const actorMiddleware = identityService ? createActorMiddleware(actorResolver) : undefined;
   const scopeMiddleware = identityService
     ? createWorkspaceScopeMiddleware(async ({ actor, workspaceId, context }) =>
@@ -315,7 +326,11 @@ export function createApp(configureV1?: V1Configurator, options: AppOptions = {}
       throw new Error("Admin auth boundary is unavailable");
     }
     if (!adminService) throw new Error("Admin service is unavailable");
-    configureAdminRoutes(v1, { service: adminService, actorMiddleware });
+    configureAdminRoutes(v1, {
+      service: adminService,
+      actorMiddleware,
+      rateLimit: adminRateLimiter,
+    });
   }
   app.route("/v1", v1);
 

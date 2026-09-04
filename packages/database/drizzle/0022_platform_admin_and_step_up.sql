@@ -108,6 +108,15 @@ CREATE TABLE "admin_email_delivery" (
 CREATE INDEX "admin_email_delivery_actor_updated_idx"
   ON "admin_email_delivery" ("actor_id", "updated_at");
 --> statement-breakpoint
+-- A durable actor bucket protects all administrative endpoints across
+-- restarts and multiple API instances.
+CREATE TABLE "admin_rate_limit_bucket" (
+  "actor_id" text PRIMARY KEY NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+  "window_started_at" timestamptz NOT NULL,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  CONSTRAINT "admin_rate_limit_bucket_attempts_check" CHECK ("attempts" >= 0)
+);
+--> statement-breakpoint
 -- SECURITY DEFINER functions must not run as the migration owner. The
 -- boundary role is NOLOGIN/NOSUPERUSER/NOBYPASSRLS and receives only the
 -- narrow policies needed by the functions below.
@@ -252,7 +261,7 @@ $$;
 GRANT USAGE ON SCHEMA "public", "app" TO casei_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   "twoFactor", "platform_account", "platform_audit_event", "admin_step_up_challenge",
-  "admin_email_delivery"
+  "admin_email_delivery", "admin_rate_limit_bucket"
   TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."current_platform_role"() TO casei_app;
 GRANT EXECUTE ON FUNCTION "app"."platform_role_for_user"(text) TO casei_app;
@@ -335,6 +344,12 @@ CREATE POLICY "admin_email_delivery_scope" ON "admin_email_delivery"
     "actor_id" = "app"."current_actor_id"()
     AND "app"."current_platform_role"() IN ('platform_admin', 'platform_support')
   );
+--> statement-breakpoint
+ALTER TABLE "admin_rate_limit_bucket" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "admin_rate_limit_bucket" FORCE ROW LEVEL SECURITY;
+CREATE POLICY "admin_rate_limit_bucket_actor_scope" ON "admin_rate_limit_bucket"
+  USING ("actor_id" = "app"."current_actor_id"())
+  WITH CHECK ("actor_id" = "app"."current_actor_id"());
 --> statement-breakpoint
 -- Better Auth owns the two-factor table lifecycle. It already scopes rows by
 -- authenticated user, so unlike platform authority tables this table is not

@@ -20,6 +20,7 @@ const account = {
 function createAdminApp(
   platformRole: "platform_admin" | "platform_support" | null = "platform_admin",
   twoFactorEnabled = true,
+  adminOptions: { rateLimit?: { limit: number; windowSeconds: number } } = {},
 ) {
   const service = {
     searchAccounts: async () => {
@@ -65,7 +66,7 @@ function createAdminApp(
             }
           : null,
     },
-    admin: { service: service as AdminService },
+    admin: { service: service as AdminService, ...adminOptions },
   });
 }
 
@@ -174,5 +175,21 @@ describe("ADMIN-002 HTTP boundary", () => {
       },
     );
     expect(response.status).toBe(403);
+  });
+
+  it("returns 429 and Retry-After when an administrative actor exceeds the limit", async () => {
+    const app = createAdminApp("platform_support", true, {
+      rateLimit: { limit: 1, windowSeconds: 60 },
+    });
+
+    const first = await app.request("http://localhost/v1/admin/session");
+    expect(first.status).toBe(200);
+
+    const second = await app.request("http://localhost/v1/admin/session");
+    expect(second.status).toBe(429);
+    expect(second.headers.get("Retry-After")).toBe("60");
+    await expect(second.json()).resolves.toMatchObject({
+      error: { code: "rate_limited" },
+    });
   });
 });

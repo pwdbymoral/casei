@@ -100,6 +100,9 @@ Não inclui editar transações do usuário, revelar senha/token, assumir identi
   proxies reversos estão explicitamente configurados em `CASEI_TRUSTED_PROXIES` (e a origem não é
   alcançável diretamente pelos clientes). Sem proxy confiável configurado, headers de IP enviados
   pelo cliente são ignorados e o sistema usa o bucket compartilhado como fallback seguro.
+- Endpoints em `/v1/admin` usam um bucket fixo durável por ator, com limite padrão de 60 requisições
+  por 60 segundos. Excedentes respondem `429 rate_limited` com `Retry-After` calculado pelo servidor;
+  o bucket é atômico, compartilhado entre instâncias e não reinicia com o processo.
 - Se o callback de identidade ocorrer depois do commit e a gravação da intent/outbox falhar, a
   mensagem fica em spool local criptografado e persistente (`CASEI_AUTH_EMAIL_RECOVERY_SPOOL`),
   drenado pelo worker após restart antes de novas claims. O spool não registra token ou URL em claro.

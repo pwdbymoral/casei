@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 test("ADMIN-001/002 journals platform schema with RLS and Better Auth two-factor storage", async () => {
   const migration = await readFile(
-    fileURLToPath(new URL("../drizzle/0021_platform_admin_and_step_up.sql", import.meta.url)),
+    fileURLToPath(new URL("../drizzle/0022_platform_admin_and_step_up.sql", import.meta.url)),
     "utf8",
   );
   const journal = await readFile(
@@ -18,6 +18,7 @@ test("ADMIN-001/002 journals platform schema with RLS and Better Auth two-factor
   assert.match(migration, /CREATE TABLE "twoFactor"/i);
   assert.match(migration, /CREATE TABLE "admin_step_up_challenge"/i);
   assert.match(migration, /CREATE TABLE "admin_email_delivery"/i);
+  assert.match(migration, /CREATE TABLE "admin_rate_limit_bucket"/i);
   assert.match(migration, /admin_email_delivery_scope/i);
   assert.match(migration, /pg_advisory_xact_lock|platform.bootstrap/i);
   assert.match(migration, /claim_first_platform_admin/i);
@@ -39,5 +40,5 @@ test("ADMIN-001/002 journals platform schema with RLS and Better Auth two-factor
   assert.match(migration, /membership_platform_boundary/i);
   assert.match(migration, /ip_address/i);
   assert.match(migration, /endpoint/i);
-  assert.match(journal, /"idx": 21[\s\S]*"tag": "0021_platform_admin_and_step_up"/i);
+  assert.match(journal, /"idx": 22[\s\S]*"tag": "0022_platform_admin_and_step_up"/i);
 });

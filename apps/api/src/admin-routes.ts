@@ -7,16 +7,95 @@ import type { Hono, MiddlewareHandler } from "hono";
 import { z } from "zod";
 import type { AdminService } from "./admin-service.js";
 import type { ApiContext, ApiEnv, RequestActor } from "./http/index.js";
-import { ApiHttpError, parseJsonBody, parseQuery } from "./http/index.js";
+import { ApiHttpError, parseJsonBody, parseQuery, rateLimitedError } from "./http/index.js";
+
+const DEFAULT_ADMIN_RATE_LIMIT = 60;
+const DEFAULT_ADMIN_RATE_WINDOW_SECONDS = 60;
+
+export interface AdminRateLimiter {
+  consume(
+    key: string,
+  ):
+    | { allowed: boolean; retryAfterSeconds: number }
+    | Promise<{ allowed: boolean; retryAfterSeconds: number }>;
+}
+
+export interface AdminRateLimitOptions {
+  limit?: number;
+  windowSeconds?: number;
+  now?: () => number;
+}
+
+/**
+ * Process-local fallback for the MVP. The route accepts an injected limiter
+ * so deployments with multiple API instances can provide a shared store
+ * without changing the administrative HTTP contract.
+ */
+export class InMemoryAdminRateLimiter implements AdminRateLimiter {
+  private readonly buckets = new Map<string, { startedAt: number; count: number }>();
+  private readonly limit: number;
+  private readonly windowMilliseconds: number;
+  private readonly now: () => number;
+
+  constructor(options: AdminRateLimitOptions = {}) {
+    this.limit = options.limit ?? DEFAULT_ADMIN_RATE_LIMIT;
+    this.windowMilliseconds = (options.windowSeconds ?? DEFAULT_ADMIN_RATE_WINDOW_SECONDS) * 1_000;
+    this.now = options.now ?? Date.now;
+    if (!Number.isInteger(this.limit) || this.limit < 1) {
+      throw new RangeError("Admin rate limit must be a positive integer");
+    }
+    if (!Number.isFinite(this.windowMilliseconds) || this.windowMilliseconds <= 0) {
+      throw new RangeError("Admin rate-limit window must be positive");
+    }
+  }
+
+  consume(key: string): { allowed: boolean; retryAfterSeconds: number } {
+    const now = this.now();
+    const current = this.buckets.get(key);
+    if (!current || now - current.startedAt >= this.windowMilliseconds) {
+      this.buckets.set(key, { startedAt: now, count: 1 });
+      this.prune(now, key);
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    if (current.count < this.limit) {
+      current.count += 1;
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((current.startedAt + this.windowMilliseconds - now) / 1_000),
+      ),
+    };
+  }
+
+  private prune(now: number, currentKey: string): void {
+    for (const [key, bucket] of this.buckets) {
+      if (key !== currentKey && now - bucket.startedAt >= this.windowMilliseconds) {
+        this.buckets.delete(key);
+      }
+    }
+  }
+}
 
 export interface AdminRoutesOptions {
   service: AdminService;
   actorMiddleware: MiddlewareHandler<ApiEnv>;
+  rateLimit?: AdminRateLimiter | AdminRateLimitOptions;
 }
 
 export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesOptions): void {
   const { service } = options;
+  const rateLimiter = isAdminRateLimiter(options.rateLimit)
+    ? options.rateLimit
+    : new InMemoryAdminRateLimiter(options.rateLimit);
   router.use("/admin/*", options.actorMiddleware);
+  router.use("/admin/*", async (context, next) => {
+    const result = await rateLimiter.consume(actorOf(context).userId);
+    if (!result.allowed) throw rateLimitedError(result.retryAfterSeconds);
+    await next();
+  });
 
   router.get("/admin/session", (context) =>
     context.json(service.getPlatformSession(actorOf(context))),
@@ -153,6 +232,12 @@ export function configureAdminRoutes(router: Hono<ApiEnv>, options: AdminRoutesO
     context.header("X-Idempotent-Replay", result.replayed ? "true" : "false");
     return context.body(null, 204);
   });
+}
+
+function isAdminRateLimiter(
+  value: AdminRateLimiter | AdminRateLimitOptions | undefined,
+): value is AdminRateLimiter {
+  return typeof value === "object" && value !== null && "consume" in value;
 }
 
 function actorOf(context: ApiContext): RequestActor {

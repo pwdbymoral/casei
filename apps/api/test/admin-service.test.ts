@@ -401,4 +401,27 @@ describe("ADMIN-001/002 service", () => {
       "auth:verification-resend:success",
     ]);
   });
+
+  it("audits a failed verification resend when the target account does not exist", async () => {
+    const store = new PendingEmailStore();
+    const service = new AdminService(store, new MemoryAuthPort());
+
+    await expect(
+      service.resendVerification(
+        actor("platform_support"),
+        "missing-user",
+        { reason: "requested" },
+        "verify-key-missing-target",
+        "01J00000000000000000000000",
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+
+    expect(store.audits).toEqual([
+      {
+        action: "auth:verification-resend",
+        reason: "requested [failure:not_found]",
+      },
+    ]);
+    expect(store.auditResults).toEqual(["failure"]);
+  });
 });
