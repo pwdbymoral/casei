@@ -87,7 +87,10 @@ describe("INSIGHT read model PostgreSQL reconstruction", () => {
           startingBalance: { currency: "BRL", minor: "1700" },
           confidence: {
             level: "medium",
-            reasons: ["evento_variavel_sem_estimativa"],
+            reasons: [
+              "recorrencia_variavel_sem_estimativa",
+              "evento_variavel_sem_estimativa",
+            ],
           },
         });
         expect(projection.points[0]).toMatchObject({
