@@ -1,6 +1,6 @@
 # FIN-003 — edição versionada de transações simples
 
-- Status: implementado; aguardando merge da branch de consolidação
+- Status: concluído
 - Spec associada: [finanças](../../specs/financas.md)
 - Plano macro: [MVP Casei](mvp-casei.md)
 

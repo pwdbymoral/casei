@@ -79,7 +79,7 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 
 - [ ] **FIN-001 Ledger schema e domínio:** accounts, user transactions, events, entries, categorias, constraints de soma/escopo e guards de imutabilidade de evento publicado conforme ADR; testar insert/update/delete, alteração de cabeçalho e unpublish.
 - [x] **FIN-002 Carteira:** saldo inicial materializado no onboarding, saldo atual canônico do ledger e conferência por saldo observado com prévia, motivo, idempotência, versão e auditoria. O ajuste publica somente o delta assinado entre `wallet` e `adjustment`; testes unitários, HTTP e PostgreSQL real cobrem conservação, replay e concorrência.
-- [ ] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
+- [x] **FIN-003 CRUD transação simples API:** criar, listar, detalhar, editar por comando, liquidar, cancelar/reverter; idempotência e version conflict.
 - [x] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer por reversão auditável.
 - [x] **FIN-005 Linha do tempo — base:** busca, período, filtros em URL, paginação incremental, detalhe básico e estados de carregamento/vazio/erro.
 - [ ] **FIN-005b Histórico auditável:** detalhe com eventos de auditoria, origem, antes/depois sanitizado e consequências relacionadas.
@@ -88,8 +88,10 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
 auditável, categorias, idempotência, isolamento por papel e moeda, além dos contratos e guards
 necessários. A fatia FIN-004/FIN-005 acrescenta captura rápida e linha do tempo autenticadas, com
-filtros/cursor no contrato HTTP e desfazer por reversão. Edição completa, ajustes com saldo observado,
-auditoria detalhada e concorrência de produção continuam pendentes para o Gate 2.
+filtros/cursor no contrato HTTP e desfazer por reversão. O FIN-002 materializa ajustes por saldo
+observado com prévia, idempotência, concorrência e auditoria; o FIN-003 acrescenta edição e
+cancelamento versionados, com bloqueios por origem e replay idempotente. Permanece pendente o
+FIN-005b (histórico auditável detalhado) e a validação E2E do Gate 2.
 
 **Gate 2:** saldo e resultado reconciliam com lançamentos; captura simples cumpre o caminho mínimo; editar/cancelar não perde histórico; E2E cobre receita, despesa, falha/retry e conflito.
 
