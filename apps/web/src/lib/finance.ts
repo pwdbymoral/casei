@@ -29,7 +29,61 @@ export type Transaction = {
   categoryId: string | null;
   cardId: string | null;
   statementId: string | null;
+  /** Source plan identifiers are returned when the fact belongs to a series. */
+  recurrenceId?: string | null;
+  installmentPlanId?: string | null;
   version: number;
+};
+
+export type Recurrence = {
+  id: string;
+  workspaceId: string;
+  kind: "income" | "expense";
+  amount: Money;
+  frequency: "weekly" | "monthly" | "annual";
+  interval: number;
+  startOn: string;
+  endOn: string | null;
+  maxOccurrences: number | null;
+  variable: boolean;
+  estimatedAmount: Money | null;
+  description: string;
+  pausedOn: string | null;
+  version: number;
+};
+
+export type RecurrenceEditInput = {
+  scope: "this" | "this_and_future" | "future_unsettled";
+  effectiveOn: string;
+  amount?: Money;
+  description?: string;
+  endOn?: string | null;
+  estimatedAmount?: Money | null;
+};
+
+export type RecurrenceEditResponse = {
+  recurrence: Recurrence;
+  affectedOccurrences: string[];
+};
+
+export type Installment = {
+  id: string;
+  number: number;
+  amount: Money;
+  dueOn: string;
+  transactionId: string;
+  state: string;
+  version: number;
+};
+
+export type InstallmentPlan = {
+  id: string;
+  workspaceId: string;
+  total: Money;
+  count: number;
+  firstDueOn: string;
+  version: number;
+  installments: Installment[];
 };
 
 export type CreditCard = {
@@ -550,6 +604,20 @@ export type FinanceAdapter = {
     },
     idempotencyKey?: string,
   ): Promise<{ id: string; occurrences: string[] }>;
+  getRecurrence(workspaceId: string, recurrenceId: string): Promise<Recurrence>;
+  updateRecurrence(
+    workspaceId: string,
+    recurrence: Recurrence,
+    input: RecurrenceEditInput,
+    idempotencyKey?: string,
+  ): Promise<RecurrenceEditResponse>;
+  transitionRecurrence(
+    workspaceId: string,
+    recurrence: Recurrence,
+    action: "pause" | "resume",
+    effectiveOn?: string,
+    idempotencyKey?: string,
+  ): Promise<Recurrence>;
   createInstallmentPlan(
     workspaceId: string,
     input: { total: Money; count: number; firstDueOn: string; description?: string },
@@ -560,6 +628,25 @@ export type FinanceAdapter = {
     count: number;
     installments: Array<{ id: string; number: number; amount: Money; dueOn: string }>;
   }>;
+  getInstallmentPlan(workspaceId: string, planId: string): Promise<InstallmentPlan>;
+  updateInstallmentPlan(
+    workspaceId: string,
+    plan: InstallmentPlan,
+    input: { total?: Money; count?: number; firstDueOn?: string; description?: string },
+    idempotencyKey?: string,
+  ): Promise<InstallmentPlan>;
+  updateInstallment(
+    workspaceId: string,
+    plan: InstallmentPlan,
+    installment: Installment,
+    input: { amount?: Money; dueOn?: string; description?: string },
+    idempotencyKey?: string,
+  ): Promise<InstallmentPlan>;
+  cancelFutureInstallments(
+    workspaceId: string,
+    plan: InstallmentPlan,
+    idempotencyKey?: string,
+  ): Promise<InstallmentPlan>;
 };
 
 /**
@@ -641,7 +728,14 @@ export const unauthenticatedFinanceAdapter: FinanceAdapter = {
   createStatementAdjustment: unavailableFinanceOperation,
   createStatementRefund: unavailableFinanceOperation,
   createRecurrence: unavailableFinanceOperation,
+  getRecurrence: unavailableFinanceOperation,
+  updateRecurrence: unavailableFinanceOperation,
+  transitionRecurrence: unavailableFinanceOperation,
   createInstallmentPlan: unavailableFinanceOperation,
+  getInstallmentPlan: unavailableFinanceOperation,
+  updateInstallmentPlan: unavailableFinanceOperation,
+  updateInstallment: unavailableFinanceOperation,
+  cancelFutureInstallments: unavailableFinanceOperation,
 };
 
 type JsonResponse<T> = { items: T[]; page: { nextCursor: string | null; hasMore: boolean } };
@@ -927,6 +1021,34 @@ export function createHttpFinanceAdapter(
         headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
+    getRecurrence: (workspaceId, recurrenceId) =>
+      call<Recurrence>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/recurrences/${encodeURIComponent(recurrenceId)}`,
+      ),
+    updateRecurrence: (workspaceId, recurrence, input, commandKey) =>
+      call<RecurrenceEditResponse>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/recurrences/${encodeURIComponent(recurrence.id)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${recurrence.version}"`,
+          },
+          body: JSON.stringify(input),
+        },
+      ),
+    transitionRecurrence: (workspaceId, recurrence, action, effectiveOn, commandKey) =>
+      call<Recurrence>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/recurrences/${encodeURIComponent(recurrence.id)}/${action}`,
+        {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${recurrence.version}"`,
+          },
+          body: JSON.stringify(effectiveOn ? { effectiveOn } : {}),
+        },
+      ),
     createInstallmentPlan: (workspaceId, input, commandKey) =>
       call<
         FinanceAdapter["createInstallmentPlan"] extends (...args: never[]) => Promise<infer T>
@@ -937,6 +1059,46 @@ export function createHttpFinanceAdapter(
         headers: { "Idempotency-Key": commandKey ?? idempotencyKey() },
         body: JSON.stringify(input),
       }),
+    getInstallmentPlan: (workspaceId, planId) =>
+      call<InstallmentPlan>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/installments/${encodeURIComponent(planId)}`,
+      ),
+    updateInstallmentPlan: (workspaceId, plan, input, commandKey) =>
+      call<InstallmentPlan>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/installments/${encodeURIComponent(plan.id)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${plan.version}"`,
+          },
+          body: JSON.stringify(input),
+        },
+      ),
+    updateInstallment: (workspaceId, plan, installment, input, commandKey) =>
+      call<InstallmentPlan>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/installments/${encodeURIComponent(plan.id)}/${encodeURIComponent(installment.id)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${plan.version}"`,
+          },
+          body: JSON.stringify(input),
+        },
+      ),
+    cancelFutureInstallments: (workspaceId, plan, commandKey) =>
+      call<InstallmentPlan>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/installments/${encodeURIComponent(plan.id)}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": commandKey ?? idempotencyKey(),
+            "If-Match": `"v${plan.version}"`,
+          },
+          body: JSON.stringify({ confirm: true }),
+        },
+      ),
   };
 }
 
@@ -1004,45 +1166,29 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
         sourceTransactionId: string | null;
       }
     >;
-    recurrences: Map<string, { input: unknown; value: { id: string; occurrences: string[] } }>;
+    recurrences: Map<string, { input: unknown; value: Recurrence }>;
     recurrenceCommands: Map<
       string,
       { fingerprint: string; value: { id: string; occurrences: string[] } }
     >;
+    recurrenceEditCommands: Map<string, { fingerprint: string; value: RecurrenceEditResponse }>;
+    recurrenceTransitionCommands: Map<string, { fingerprint: string; value: Recurrence }>;
     installmentPlans: Map<
       string,
       {
         input: unknown;
-        value: {
-          id: string;
-          total: Money;
-          count: number;
-          installments: Array<{
-            id: string;
-            number: number;
-            amount: Money;
-            dueOn: string;
-          }>;
-        };
+        value: InstallmentPlan;
       }
     >;
     installmentCommands: Map<
       string,
       {
         fingerprint: string;
-        value: {
-          id: string;
-          total: Money;
-          count: number;
-          installments: Array<{
-            id: string;
-            number: number;
-            amount: Money;
-            dueOn: string;
-          }>;
-        };
+        value: InstallmentPlan;
       }
     >;
+    installmentEditCommands: Map<string, { fingerprint: string; value: InstallmentPlan }>;
+    installmentCancelCommands: Map<string, { fingerprint: string; value: InstallmentPlan }>;
     reverseCommands: Map<
       string,
       { transactionId: string; fingerprint: string; transaction: Transaction }
@@ -1104,8 +1250,12 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       statementAdjustments: new Map(),
       recurrences: new Map(),
       recurrenceCommands: new Map(),
+      recurrenceEditCommands: new Map(),
+      recurrenceTransitionCommands: new Map(),
       installmentPlans: new Map(),
       installmentCommands: new Map(),
+      installmentEditCommands: new Map(),
+      installmentCancelCommands: new Map(),
       reverseCommands: new Map(),
     };
   };
@@ -2068,10 +2218,117 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
           return previous.value;
         }
       }
-      const value = { id: fixtureId(90 + state.recurrences.size), occurrences: [] };
-      state.recurrences.set(value.id, { input, value });
-      if (commandKey) state.recurrenceCommands.set(commandKey, { fingerprint, value });
+      const id = fixtureId(90 + state.recurrences.size);
+      const value: Recurrence = {
+        id,
+        workspaceId,
+        kind: input.kind,
+        amount: input.amount,
+        frequency: input.frequency,
+        interval: input.interval,
+        startOn: input.startOn,
+        endOn: input.endOn ?? null,
+        maxOccurrences: input.maxOccurrences ?? null,
+        variable: input.variable,
+        estimatedAmount: input.estimatedAmount ?? null,
+        description: input.description ?? "",
+        pausedOn: null,
+        version: 0,
+      };
+      const created = { id, occurrences: [] };
+      state.recurrences.set(id, { input, value });
+      if (commandKey) state.recurrenceCommands.set(commandKey, { fingerprint, value: created });
+      return created;
+    },
+    getRecurrence: async (workspaceId, recurrenceId) => {
+      const value = stateFor(workspaceId).recurrences.get(recurrenceId)?.value;
+      if (!value) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
       return value;
+    },
+    updateRecurrence: async (workspaceId, recurrence, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.recurrences.get(recurrence.id)?.value;
+      if (!current) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
+      if (input.scope !== "this_and_future") {
+        throw new FinanceAdapterError(
+          "Este escopo exige ocorrências materializadas e só está disponível no servidor.",
+          422,
+        );
+      }
+      const fingerprint = JSON.stringify({
+        recurrenceId: recurrence.id,
+        expectedVersion: recurrence.version,
+        input,
+      });
+      if (commandKey) {
+        const previous = state.recurrenceEditCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra recorrência.", 409);
+          return previous.value;
+        }
+      }
+      if (current.version !== recurrence.version)
+        throw new FinanceAdapterError(
+          "A recorrência foi alterada por outra pessoa.",
+          412,
+          current.version,
+        );
+      const next: Recurrence = {
+        ...current,
+        amount: input.amount ?? current.amount,
+        description: input.description ?? current.description,
+        endOn: input.endOn === undefined ? current.endOn : input.endOn,
+        estimatedAmount:
+          input.estimatedAmount === undefined ? current.estimatedAmount : input.estimatedAmount,
+        version: current.version + 1,
+      };
+      state.recurrences.set(next.id, { input: current, value: next });
+      const response = { recurrence: next, affectedOccurrences: [input.effectiveOn] };
+      if (commandKey)
+        state.recurrenceEditCommands.set(commandKey, {
+          fingerprint,
+          value: response,
+        });
+      return response;
+    },
+    transitionRecurrence: async (workspaceId, recurrence, action, effectiveOn, _commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.recurrences.get(recurrence.id)?.value;
+      const fingerprint = JSON.stringify({
+        recurrenceId: recurrence.id,
+        expectedVersion: recurrence.version,
+        action,
+        effectiveOn,
+      });
+      if (!current) throw new FinanceAdapterError("Recorrência não encontrada.", 404);
+      if (_commandKey) {
+        const previous = state.recurrenceTransitionCommands.get(_commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra transição.", 409);
+          return previous.value;
+        }
+      }
+      if (current.version !== recurrence.version)
+        throw new FinanceAdapterError(
+          "A recorrência foi alterada por outra pessoa.",
+          412,
+          current.version,
+        );
+      const next: Recurrence = {
+        ...current,
+        pausedOn:
+          action === "pause" ? (effectiveOn ?? new Date().toISOString().slice(0, 10)) : null,
+        version: current.version + 1,
+      };
+      state.recurrences.set(next.id, { input: current, value: next });
+      if (_commandKey)
+        state.recurrenceTransitionCommands.set(_commandKey, {
+          fingerprint,
+          value: next,
+        });
+      return next;
     },
     createInstallmentPlan: async (workspaceId, input, commandKey) => {
       const state = stateFor(workspaceId);
@@ -2090,20 +2347,204 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       if (amounts.length === 0 || dates.length !== amounts.length) {
         throw new FinanceAdapterError("O parcelamento não é válido.", 422);
       }
-      const value = {
+      const value: InstallmentPlan = {
         id: fixtureId(91 + state.installmentPlans.size),
+        workspaceId,
         total: input.total,
         count: input.count,
+        firstDueOn: input.firstDueOn,
+        version: 0,
         installments: amounts.map((minor, index) => ({
           id: fixtureId(110 + state.installmentPlans.size * input.count + index),
           number: index + 1,
           amount: { ...input.total, minor },
           dueOn: dates[index] as string,
+          transactionId: fixtureId(300 + state.installmentPlans.size * input.count + index),
+          state: "planned",
+          version: 0,
         })),
       };
       state.installmentPlans.set(value.id, { input, value });
       if (commandKey) state.installmentCommands.set(commandKey, { fingerprint, value });
       return value;
+    },
+    getInstallmentPlan: async (workspaceId, planId) => {
+      const value = stateFor(workspaceId).installmentPlans.get(planId)?.value;
+      if (!value) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
+      return value;
+    },
+    updateInstallmentPlan: async (workspaceId, plan, input, _commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.installmentPlans.get(plan.id)?.value;
+      if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
+      const fingerprint = JSON.stringify({ planId: plan.id, expectedVersion: plan.version, input });
+      if (_commandKey) {
+        const previous = state.installmentEditCommands.get(_commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outro parcelamento.", 409);
+          return previous.value;
+        }
+      }
+      if (current.version !== plan.version)
+        throw new FinanceAdapterError(
+          "O parcelamento foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      const nextCount = input.count ?? current.count;
+      const nextTotal = input.total ?? current.total;
+      const realized = current.installments.filter(
+        (item) => item.state === "posted" || item.state === "partially_settled",
+      );
+      if (nextCount < realized.length)
+        throw new FinanceAdapterError("Não é possível remover parcelas realizadas.", 409);
+      const realizedTotal = realized.reduce(
+        (sum, item) => sum + BigInt(item.amount.minor),
+        BigInt(0),
+      );
+      const futureCount = nextCount - realized.length;
+      const remaining = BigInt(nextTotal.minor) - realizedTotal;
+      if (futureCount < 1 || remaining <= BigInt(0))
+        throw new FinanceAdapterError("O total precisa manter saldo futuro positivo.", 409);
+      const amounts = previewInstallmentMinor(remaining.toString(), futureCount);
+      const dates = previewInstallmentDates(input.firstDueOn ?? current.firstDueOn, nextCount);
+      if (!amounts.length || dates.length !== nextCount)
+        throw new FinanceAdapterError("O parcelamento não é válido.", 422);
+      const next: InstallmentPlan = {
+        ...current,
+        total: nextTotal,
+        count: nextCount,
+        firstDueOn: input.firstDueOn ?? current.firstDueOn,
+        version: current.version + 1,
+        installments: (() => {
+          let futureIndex = 0;
+          return Array.from({ length: nextCount }, (_, index) => {
+            const existing = current.installments[index];
+            if (existing && (existing.state === "posted" || existing.state === "partially_settled"))
+              return existing;
+            const value = {
+              ...(existing ?? {
+                id: fixtureId(400 + index),
+                transactionId: fixtureId(500 + index),
+                state: "planned",
+                version: 0,
+              }),
+              number: index + 1,
+              amount: { ...nextTotal, minor: amounts[futureIndex] as string },
+              dueOn: dates[index] as string,
+            };
+            futureIndex += 1;
+            return value;
+          });
+        })(),
+      };
+      state.installmentPlans.set(plan.id, { input: current, value: next });
+      if (_commandKey)
+        state.installmentEditCommands.set(_commandKey, {
+          fingerprint,
+          value: next,
+        });
+      return next;
+    },
+    updateInstallment: async (workspaceId, plan, installment, input, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.installmentPlans.get(plan.id)?.value;
+      if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
+      const fingerprint = JSON.stringify({
+        planId: plan.id,
+        installmentId: installment.id,
+        expectedVersion: plan.version,
+        input,
+      });
+      if (commandKey) {
+        const previous = state.installmentEditCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outra parcela.", 409);
+          return previous.value;
+        }
+      }
+      if (current.version !== plan.version)
+        throw new FinanceAdapterError(
+          "O parcelamento foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      const target = current.installments.find((item) => item.id === installment.id);
+      if (target?.state !== "planned")
+        throw new FinanceAdapterError("Somente parcelas futuras podem ser alteradas.", 409);
+      const next: InstallmentPlan = {
+        ...current,
+        version: current.version + 1,
+        installments: current.installments.map((item) =>
+          item.id === installment.id
+            ? {
+                ...item,
+                amount: input.amount ?? item.amount,
+                dueOn: input.dueOn ?? item.dueOn,
+                version: item.version + 1,
+              }
+            : item,
+        ),
+      };
+      const oldMinor = BigInt(target.amount.minor);
+      const newMinor = BigInt((input.amount ?? target.amount).minor);
+      const companion = next.installments.find(
+        (item) => item.id !== target.id && item.state === "planned",
+      );
+      if (
+        oldMinor !== newMinor &&
+        (!companion || BigInt(companion.amount.minor) + oldMinor - newMinor <= BigInt(0))
+      ) {
+        throw new FinanceAdapterError(
+          "É preciso conservar um valor positivo em outra parcela futura.",
+          409,
+        );
+      }
+      if (oldMinor !== newMinor && companion) {
+        companion.amount = {
+          ...companion.amount,
+          minor: (BigInt(companion.amount.minor) + oldMinor - newMinor).toString(),
+        };
+      }
+      state.installmentPlans.set(plan.id, { input: current, value: next });
+      if (commandKey) state.installmentEditCommands.set(commandKey, { fingerprint, value: next });
+      return next;
+    },
+    cancelFutureInstallments: async (workspaceId, plan, commandKey) => {
+      const state = stateFor(workspaceId);
+      const current = state.installmentPlans.get(plan.id)?.value;
+      if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
+      const fingerprint = JSON.stringify({
+        planId: plan.id,
+        expectedVersion: plan.version,
+        confirm: true,
+      });
+      if (commandKey) {
+        const previous = state.installmentCancelCommands.get(commandKey);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint)
+            throw new FinanceAdapterError("A chave já foi usada para outro cancelamento.", 409);
+          return previous.value;
+        }
+      }
+      if (current.version !== plan.version)
+        throw new FinanceAdapterError(
+          "O parcelamento foi alterado por outra pessoa.",
+          412,
+          current.version,
+        );
+      const next = {
+        ...current,
+        version: current.version + 1,
+        installments: current.installments.map((item) =>
+          item.state === "planned" ? { ...item, state: "canceled" } : item,
+        ),
+      };
+      state.installmentPlans.set(plan.id, { input: current, value: next });
+      if (commandKey) state.installmentCancelCommands.set(commandKey, { fingerprint, value: next });
+      return next;
     },
   };
 }

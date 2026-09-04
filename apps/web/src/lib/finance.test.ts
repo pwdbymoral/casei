@@ -751,6 +751,21 @@ describe("finance adapter", () => {
     expect(categories).toEqual([]);
   });
 
+  it("drops a late reclassification preview after changing workspace", async () => {
+    const guard = createWorkspaceGenerationGuard("workspace-a");
+    const request = guard.begin("workspace-a");
+    let resolvePreview!: (preview: string) => void;
+    const oldPreview = new Promise<string>((resolve) => {
+      resolvePreview = resolve;
+    });
+    guard.switchWorkspace("workspace-b");
+    const visiblePreview: string[] = [];
+    resolvePreview("preview-from-a");
+    const preview = await oldPreview;
+    if (guard.isCurrent(request)) visiblePreview.push(preview);
+    expect(visiblePreview).toEqual([]);
+  });
+
   it("keeps fixture data isolated by workspace and replays a transaction command", async () => {
     const adapter = createFixtureFinanceAdapter();
     const firstWorkspace = "019b5d9e-3c12-7a02-8d47-7b5b5dd7a202";
@@ -1603,5 +1618,231 @@ describe("finance adapter", () => {
       ["statement-refund-test", '"v1"'],
     ]);
     expect(statementItemAmountPrefix({ type: "refund", state: "posted" })).toBe("−");
+  });
+
+  it("sends scoped recurrence and installment edits with version guards", async () => {
+    const requests: Array<{ path: string; method: string; headers: Headers; body: unknown }> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      requests.push({
+        path: String(input),
+        method: init?.method ?? "GET",
+        headers: new Headers(init?.headers),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (String(input).includes("recurrences")) {
+        return Response.json({ recurrence: { id: "rec-1", version: 3 }, affectedOccurrences: [] });
+      }
+      return Response.json({ id: "plan-1", version: 4, installments: [] });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const recurrence = {
+      id: "rec-1",
+      workspaceId: "workspace",
+      kind: "expense" as const,
+      amount: { currency: "BRL", minor: "1000" },
+      frequency: "monthly" as const,
+      interval: 1,
+      startOn: "2026-08-01",
+      endOn: null,
+      maxOccurrences: null,
+      variable: true,
+      estimatedAmount: { currency: "BRL", minor: "1500" },
+      description: "Conta",
+      pausedOn: null,
+      version: 2,
+    };
+    await adapter.updateRecurrence(
+      "workspace",
+      recurrence,
+      { scope: "this", effectiveOn: "2026-09-01", amount: recurrence.amount },
+      "rec-edit-1",
+    );
+    const plan = {
+      id: "plan-1",
+      workspaceId: "workspace",
+      total: { currency: "BRL", minor: "3000" },
+      count: 3,
+      firstDueOn: "2026-08-01",
+      version: 3,
+      installments: [],
+    };
+    await adapter.updateInstallmentPlan("workspace", plan, { count: 4 }, "plan-edit-1");
+    expect(requests.map(({ path, method }) => [path, method])).toEqual([
+      ["/v1/workspaces/workspace/recurrences/rec-1", "PATCH"],
+      ["/v1/workspaces/workspace/installments/plan-1", "PATCH"],
+    ]);
+    expect(
+      requests.map(({ headers }) => [headers.get("Idempotency-Key"), headers.get("If-Match")]),
+    ).toEqual([
+      ["rec-edit-1", '"v2"'],
+      ["plan-edit-1", '"v3"'],
+    ]);
+    expect(requests[0]?.body).not.toHaveProperty("estimatedAmount");
+  });
+
+  it("edits fixture recurrence and keeps installment totals distributed", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const recurrenceInput = {
+      kind: "expense" as const,
+      amount: { currency: "BRL", minor: "1000" },
+      frequency: "monthly" as const,
+      interval: 1,
+      startOn: "2026-08-01",
+      variable: false,
+      description: "Aluguel",
+    };
+    const created = await adapter.createRecurrence("plans", recurrenceInput, "rec-create");
+    const recurrence = await adapter.getRecurrence("plans", created.id);
+    const edited = await adapter.updateRecurrence(
+      "plans",
+      recurrence,
+      {
+        scope: "this_and_future",
+        effectiveOn: "2026-08-01",
+        amount: { currency: "BRL", minor: "1200" },
+      },
+      "rec-edit",
+    );
+    expect(edited.recurrence.amount.minor).toBe("1200");
+    await expect(
+      adapter.updateRecurrence(
+        "plans",
+        edited.recurrence,
+        { scope: "this", effectiveOn: "2026-08-01", amount: { currency: "BRL", minor: "900" } },
+        "rec-exception",
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+    const planCreated = await adapter.createInstallmentPlan(
+      "plans",
+      { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
+      "plan-create",
+    );
+    const plan = await adapter.getInstallmentPlan("plans", planCreated.id);
+    const updated = await adapter.updateInstallmentPlan("plans", plan, { count: 4 }, "plan-edit");
+    expect(updated.installments).toHaveLength(4);
+    expect(
+      updated.installments.reduce((sum, item) => sum + BigInt(item.amount.minor), BigInt(0)),
+    ).toBe(BigInt(1000));
+  });
+
+  it("binds recurrence edit idempotency to the expected version", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createRecurrence(
+      "recurrence-invariants",
+      {
+        kind: "expense",
+        amount: { currency: "BRL", minor: "1000" },
+        frequency: "monthly",
+        interval: 1,
+        startOn: "2026-08-01",
+        variable: false,
+        description: "Conta",
+      },
+      "recurrence-plan-create",
+    );
+    const recurrence = await adapter.getRecurrence("recurrence-invariants", created.id);
+    const input = {
+      scope: "this_and_future" as const,
+      effectiveOn: "2026-08-01",
+      amount: { currency: "BRL", minor: "1200" },
+    };
+    const updated = await adapter.updateRecurrence(
+      "recurrence-invariants",
+      recurrence,
+      input,
+      "recurrence-edit-command",
+    );
+    await expect(
+      adapter.updateRecurrence(
+        "recurrence-invariants",
+        updated.recurrence,
+        input,
+        "recurrence-edit-command",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("replays plan edits and never redistributes a realized installment", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createInstallmentPlan(
+      "plan-invariants",
+      { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
+      "plan-create-invariants",
+    );
+    const plan = await adapter.getInstallmentPlan("plan-invariants", created.id);
+    plan.installments[0] = { ...plan.installments[0], state: "posted" };
+    const updated = await adapter.updateInstallmentPlan(
+      "plan-invariants",
+      plan,
+      { total: { currency: "BRL", minor: "1300" }, count: 4 },
+      "plan-edit-invariants",
+    );
+    const replay = await adapter.updateInstallmentPlan(
+      "plan-invariants",
+      plan,
+      { total: { currency: "BRL", minor: "1300" }, count: 4 },
+      "plan-edit-invariants",
+    );
+    expect(replay).toEqual(updated);
+    expect(updated.installments[0]?.amount.minor).toBe("334");
+    expect(
+      updated.installments.reduce((sum, item) => sum + BigInt(item.amount.minor), BigInt(0)),
+    ).toBe(BigInt(1300));
+  });
+
+  it("replays installment item commands before the stale-version check and rejects broken conservation", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createInstallmentPlan(
+      "item-invariants",
+      { total: { currency: "BRL", minor: "1000" }, count: 2, firstDueOn: "2026-08-01" },
+      "item-plan-create",
+    );
+    const plan = await adapter.getInstallmentPlan("item-invariants", created.id);
+    const item = plan.installments[0];
+    const updated = await adapter.updateInstallment(
+      "item-invariants",
+      plan,
+      item,
+      { amount: { currency: "BRL", minor: "600" } },
+      "item-edit",
+    );
+    await expect(
+      adapter.updateInstallment(
+        "item-invariants",
+        plan,
+        item,
+        { amount: { currency: "BRL", minor: "600" } },
+        "item-edit",
+      ),
+    ).resolves.toEqual(updated);
+    await expect(
+      adapter.updateInstallment(
+        "item-invariants",
+        updated,
+        updated.installments[0],
+        { amount: { currency: "BRL", minor: "1000" } },
+        "item-invalid",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("binds cancellation idempotency to the expected plan version", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createInstallmentPlan(
+      "cancel-invariants",
+      { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
+      "cancel-plan-create",
+    );
+    const plan = await adapter.getInstallmentPlan("cancel-invariants", created.id);
+    const canceled = await adapter.cancelFutureInstallments(
+      "cancel-invariants",
+      plan,
+      "cancel-command",
+    );
+    expect(canceled.version).toBe(plan.version + 1);
+    const current = await adapter.getInstallmentPlan("cancel-invariants", created.id);
+    await expect(
+      adapter.cancelFutureInstallments("cancel-invariants", current, "cancel-command"),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });
