@@ -1772,4 +1772,24 @@ describe("finance adapter", () => {
       ),
     ).rejects.toMatchObject({ status: 409 });
   });
+
+  it("binds cancellation idempotency to the expected plan version", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const created = await adapter.createInstallmentPlan(
+      "cancel-invariants",
+      { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
+      "cancel-plan-create",
+    );
+    const plan = await adapter.getInstallmentPlan("cancel-invariants", created.id);
+    const canceled = await adapter.cancelFutureInstallments(
+      "cancel-invariants",
+      plan,
+      "cancel-command",
+    );
+    expect(canceled.version).toBe(plan.version + 1);
+    const current = await adapter.getInstallmentPlan("cancel-invariants", created.id);
+    await expect(
+      adapter.cancelFutureInstallments("cancel-invariants", current, "cancel-command"),
+    ).rejects.toMatchObject({ status: 409 });
+  });
 });

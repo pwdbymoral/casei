@@ -2507,7 +2507,11 @@ export function createFixtureFinanceAdapter(): FinanceAdapter {
       const state = stateFor(workspaceId);
       const current = state.installmentPlans.get(plan.id)?.value;
       if (!current) throw new FinanceAdapterError("Parcelamento não encontrado.", 404);
-      const fingerprint = JSON.stringify({ planId: plan.id, confirm: true });
+      const fingerprint = JSON.stringify({
+        planId: plan.id,
+        expectedVersion: plan.version,
+        confirm: true,
+      });
       if (commandKey) {
         const previous = state.installmentCancelCommands.get(commandKey);
         if (previous) {
