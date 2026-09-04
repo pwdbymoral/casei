@@ -42,6 +42,125 @@ export const workspace = pgTable(
   ],
 );
 
+/** Global platform authority is separate from workspace memberships. */
+export const platformAccount = pgTable(
+  "platform_account",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role"),
+    status: text("status").notNull().default("active"),
+    suspensionReason: text("suspension_reason"),
+    roleChangeReason: text("role_change_reason"),
+    version: integer("version").notNull().default(0),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("platform_account_role_status_idx").on(table.role, table.status),
+    check(
+      "platform_account_role_check",
+      sql`${table.role} is null or ${table.role} in ('platform_admin', 'platform_support')`,
+    ),
+    check("platform_account_status_check", sql`${table.status} in ('active', 'suspended')`),
+    check("platform_account_version_check", sql`${table.version} >= 0`),
+  ],
+);
+
+/** Administrative audit has no workspace scope and stores no domestic content. */
+export const platformAuditEvent = pgTable(
+  "platform_audit_event",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    actorId: text("actor_id").references(() => user.id, { onDelete: "set null" }),
+    targetId: text("target_id"),
+    action: text("action").notNull(),
+    occurredAt: instant("occurred_at").defaultNow().notNull(),
+    origin: text("origin").notNull(),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    ipAddress: text("ip_address"),
+    endpoint: text("endpoint"),
+    result: text("result").notNull(),
+    reason: text("reason").notNull(),
+  },
+  (table) => [
+    index("platform_audit_actor_occurred_idx").on(table.actorId, table.occurredAt),
+    index("platform_audit_target_occurred_idx").on(table.targetId, table.occurredAt),
+  ],
+);
+
+/** Durable fixed-window buckets for administrative endpoint protection. */
+export const adminRateLimitBucket = pgTable(
+  "admin_rate_limit_bucket",
+  {
+    actorId: text("actor_id")
+      .primaryKey()
+      .references(() => user.id, { onDelete: "cascade" }),
+    windowStartedAt: instant("window_started_at").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+  },
+  (table) => [check("admin_rate_limit_bucket_attempts_check", sql`${table.attempts} >= 0`)],
+);
+
+/** Short-lived, one-use proof that a platform actor completed step-up auth. */
+export const adminStepUpChallenge = pgTable(
+  "admin_step_up_challenge",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    method: text("method").notNull(),
+    issuedAt: instant("issued_at").defaultNow().notNull(),
+    expiresAt: instant("expires_at").notNull(),
+    consumedAt: instant("consumed_at"),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("admin_step_up_token_hash_unique").on(table.tokenHash),
+    index("admin_step_up_user_expiry_idx").on(table.userId, table.expiresAt),
+    check("admin_step_up_method_check", sql`${table.method} in ('totp', 'backup_code')`),
+    check("admin_step_up_expiry_check", sql`${table.expiresAt} > ${table.issuedAt}`),
+  ],
+);
+
+/** Durable delivery state for platform email commands. */
+export const adminEmailDelivery = pgTable(
+  "admin_email_delivery",
+  {
+    scope: text("scope").notNull(),
+    key: varchar("key", { length: 128 }).notNull(),
+    requestHash: text("request_hash").notNull(),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    targetId: text("target_id").notNull(),
+    action: text("action").notNull(),
+    email: text("email").notNull(),
+    reason: text("reason").notNull(),
+    correlationId: varchar("correlation_id", { length: 26 }).notNull(),
+    ipAddress: text("ip_address"),
+    endpoint: text("endpoint"),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+    updatedAt: instant("updated_at").defaultNow().notNull(),
+    sentAt: instant("sent_at"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scope, table.key], name: "admin_email_delivery_pkey" }),
+    index("admin_email_delivery_actor_updated_idx").on(table.actorId, table.updatedAt),
+    check(
+      "admin_email_delivery_status_check",
+      sql`${table.status} in ('pending', 'sent', 'failed')`,
+    ),
+    check("admin_email_delivery_attempts_check", sql`${table.attempts} >= 0`),
+  ],
+);
+
 export const userPreference = pgTable(
   "user_preference",
   {

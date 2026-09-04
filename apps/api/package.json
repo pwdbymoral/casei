@@ -16,6 +16,7 @@
     "worker:export": "node dist/export-worker.js",
     "worker:export:dev": "tsx src/export-worker.ts",
     "build": "tsup src/server.ts src/auth-email-worker.ts src/workspace-worker.ts src/recurrence-worker.ts src/import-worker.ts src/export-worker.ts --format esm --target node24 --out-dir dist",
+    "bootstrap:platform-admin": "tsx src/bootstrap-platform-admin.ts",
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

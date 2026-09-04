@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { createDatabase } from "@casei/database";
-import type { BetterAuthOptions } from "better-auth";
+import { APIError, type BetterAuthOptions } from "better-auth";
 import { betterAuth } from "better-auth/minimal";
+import { twoFactor } from "better-auth/plugins";
+import { sql } from "drizzle-orm";
 import {
   type AuthEmailEnqueueFailureSink,
   type AuthEmailIntentStore,
@@ -29,6 +31,8 @@ export interface AuthOptions {
   trustedOrigins?: string[];
   trustedProxies?: string[];
   secret?: string;
+  /** Injectable status lookup keeps auth tests independent of platform schema. */
+  platformAccountStatus?: (userId: string) => Promise<"active" | "suspended" | null>;
 }
 
 function envList(value: string | undefined): string[] {
@@ -170,6 +174,7 @@ function makeAuthMessage(
 ): AuthEmailMessage {
   const callbackUrl = assertCallbackUrlAllowlist(data.url, origins);
   const expiresAt = new Date(Date.now() + expiresIn * 1000);
+  const idempotencyKey = request?.headers.get("idempotency-key")?.trim();
   return {
     kind,
     userId: data.user.id,
@@ -179,7 +184,9 @@ function makeAuthMessage(
     callbackUrl,
     correlationId: authCorrelationId(request),
     expiresAt,
-    sourceId: createHash("sha256").update(`${kind}\0${data.token}`).digest("hex"),
+    sourceId: createHash("sha256")
+      .update(`${kind}\0${idempotencyKey ? `admin:${idempotencyKey}` : data.token}`)
+      .digest("hex"),
   };
 }
 
@@ -199,6 +206,16 @@ export function createAuth(options: AuthOptions = {}) {
     drizzleAdapter(applicationDatabase as NonNullable<typeof applicationDatabase>, {
       provider: "pg",
     });
+  const platformStatus =
+    options.platformAccountStatus ??
+    (applicationDatabase
+      ? async (userId: string): Promise<"active" | "suspended" | null> => {
+          const rows = await applicationDatabase.execute<{ allowed: boolean }>(
+            sql`SELECT app.assert_platform_session_allowed(${userId}) AS allowed`,
+          );
+          return rows.rows[0]?.allowed === false ? "suspended" : "active";
+        }
+      : undefined);
   const emailStore =
     options.emailStore ??
     (options.database
@@ -237,6 +254,33 @@ export function createAuth(options: AuthOptions = {}) {
     baseURL,
     basePath: "/api/auth",
     secret,
+    plugins: [
+      twoFactor({
+        issuer: process.env.CASEI_APP_NAME ?? "Casei",
+        twoFactorCookieMaxAge: 10 * 60,
+        accountLockout: {
+          enabled: true,
+          maxFailedAttempts: 5,
+          durationSeconds: 15 * 60,
+        },
+      }),
+    ],
+    databaseHooks: platformStatus
+      ? {
+          session: {
+            create: {
+              before: async (data) => {
+                if ((await platformStatus(data.userId)) === "suspended") {
+                  throw APIError.from("FORBIDDEN", {
+                    code: "SUSPENDED_ACCOUNT",
+                    message: "Suspended platform accounts cannot create sessions",
+                  });
+                }
+              },
+            },
+          },
+        }
+      : undefined,
     trustedOrigins: origins,
     advanced: {
       ipAddress: defaultAuthIpAddressOptions(options.trustedProxies),

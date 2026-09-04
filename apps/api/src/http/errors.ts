@@ -13,6 +13,7 @@ const DEFAULT_MESSAGES: Record<ErrorCode, string> = {
   malformed_request: "A requisição não pôde ser lida.",
   validation_failed: "Revise os campos indicados.",
   unauthenticated: "Autentique-se para continuar.",
+  step_up_required: "Confirme o segundo fator para continuar.",
   not_found: "Recurso não encontrado.",
   permission_denied: "Você não tem permissão para esta ação.",
   precondition_required: "A requisição precisa informar a versão atual.",
@@ -165,6 +166,13 @@ function normalizeError(error: unknown): {
       message: "Confirme sua identidade novamente para continuar.",
     };
   }
+  if (hasCode(error, "step_up_required")) {
+    return {
+      status: 401,
+      code: "step_up_required",
+      message: "Confirme o segundo fator para continuar.",
+    };
+  }
   if (hasCode(error, "rate_limited")) {
     return {
       status: 429,
@@ -185,6 +193,20 @@ function normalizeError(error: unknown): {
         typeof error === "object" && error !== null && "currentVersion" in error
           ? Number((error as { currentVersion?: unknown }).currentVersion)
           : undefined,
+    };
+  }
+  if (hasCode(error, "last_platform_admin")) {
+    return {
+      status: 409,
+      code: "validation_failed",
+      message: "O último administrador ativo não pode ser removido ou suspenso.",
+    };
+  }
+  if (hasCode(error, "idempotency_conflict")) {
+    return {
+      status: 409,
+      code: "idempotency_conflict",
+      message: DEFAULT_MESSAGES.idempotency_conflict,
     };
   }
   if (hasCode(error, "conflict")) {
