@@ -1604,4 +1604,100 @@ describe("finance adapter", () => {
     ]);
     expect(statementItemAmountPrefix({ type: "refund", state: "posted" })).toBe("−");
   });
+
+  it("sends scoped recurrence and installment edits with version guards", async () => {
+    const requests: Array<{ path: string; method: string; headers: Headers; body: unknown }> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      requests.push({
+        path: String(input),
+        method: init?.method ?? "GET",
+        headers: new Headers(init?.headers),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (String(input).includes("recurrences")) {
+        return Response.json({ recurrence: { id: "rec-1", version: 3 }, affectedOccurrences: [] });
+      }
+      return Response.json({ id: "plan-1", version: 4, installments: [] });
+    });
+    const adapter = createHttpFinanceAdapter({ fetch });
+    const recurrence = {
+      id: "rec-1",
+      workspaceId: "workspace",
+      kind: "expense" as const,
+      amount: { currency: "BRL", minor: "1000" },
+      frequency: "monthly" as const,
+      interval: 1,
+      startOn: "2026-08-01",
+      endOn: null,
+      maxOccurrences: null,
+      variable: false,
+      estimatedAmount: null,
+      description: "Conta",
+      pausedOn: null,
+      version: 2,
+    };
+    await adapter.updateRecurrence(
+      "workspace",
+      recurrence,
+      { scope: "this_and_future", effectiveOn: "2026-09-01", amount: recurrence.amount },
+      "rec-edit-1",
+    );
+    const plan = {
+      id: "plan-1",
+      workspaceId: "workspace",
+      total: { currency: "BRL", minor: "3000" },
+      count: 3,
+      firstDueOn: "2026-08-01",
+      version: 3,
+      installments: [],
+    };
+    await adapter.updateInstallmentPlan("workspace", plan, { count: 4 }, "plan-edit-1");
+    expect(requests.map(({ path, method }) => [path, method])).toEqual([
+      ["/v1/workspaces/workspace/recurrences/rec-1", "PATCH"],
+      ["/v1/workspaces/workspace/installments/plan-1", "PATCH"],
+    ]);
+    expect(
+      requests.map(({ headers }) => [headers.get("Idempotency-Key"), headers.get("If-Match")]),
+    ).toEqual([
+      ["rec-edit-1", '"v2"'],
+      ["plan-edit-1", '"v3"'],
+    ]);
+  });
+
+  it("edits fixture recurrence and keeps installment totals distributed", async () => {
+    const adapter = createFixtureFinanceAdapter();
+    const recurrenceInput = {
+      kind: "expense" as const,
+      amount: { currency: "BRL", minor: "1000" },
+      frequency: "monthly" as const,
+      interval: 1,
+      startOn: "2026-08-01",
+      variable: false,
+      description: "Aluguel",
+    };
+    const created = await adapter.createRecurrence("plans", recurrenceInput, "rec-create");
+    const recurrence = await adapter.getRecurrence("plans", created.id);
+    const edited = await adapter.updateRecurrence(
+      "plans",
+      recurrence,
+      {
+        scope: "this_and_future",
+        effectiveOn: "2026-08-01",
+        amount: { currency: "BRL", minor: "1200" },
+      },
+      "rec-edit",
+    );
+    expect(edited.recurrence.amount.minor).toBe("1200");
+    const planCreated = await adapter.createInstallmentPlan(
+      "plans",
+      { total: { currency: "BRL", minor: "1000" }, count: 3, firstDueOn: "2026-08-01" },
+      "plan-create",
+    );
+    const plan = await adapter.getInstallmentPlan("plans", planCreated.id);
+    const updated = await adapter.updateInstallmentPlan("plans", plan, { count: 4 }, "plan-edit");
+    expect(updated.installments).toHaveLength(4);
+    expect(
+      updated.installments.reduce((sum, item) => sum + BigInt(item.amount.minor), BigInt(0)),
+    ).toBe(BigInt(1000));
+  });
 });

@@ -40,6 +40,7 @@ parcial informado pelo usuário.
 - [x] Implementar compromissos e diálogos de captura/settlement na tela de finanças.
 - [x] Implementar criação de recorrência e parcelamento com prévia local.
 - [x] Completar pagamento parcial e composição explicável de faturas.
+- [x] Conectar IDs de origem e editar recorrências por escopo e planos de parcelas pela tela de finanças.
 - [ ] Validar browser responsivo/acessível, testes, typecheck e abrir PR para revisão.
 
 ## Rastreabilidade
@@ -58,9 +59,9 @@ parcial informado pelo usuário.
   substituir essa leitura em fatia posterior sem mudar o fluxo.
 - O shell fornece o fuso IANA do workspace ao browser, e os defaults de data
   usam esse calendário civil (não o fuso local do dispositivo).
-- A API ainda não expõe `recurrenceId` no contrato da transação; o campo de valor
-  efetivo é apresentado para qualquer compromisso e a validação de recorrência
-  variável permanece no servidor.
+- A API expõe `recurrenceId` e `installmentPlanId` quando disponíveis. Os campos são opcionais
+  para manter compatibilidade com respostas legadas; a validação de recorrência variável continua
+  no servidor.
 
 ## Validação
 
@@ -75,3 +76,5 @@ parcial informado pelo usuário.
 - A prévia de parcelas usa a distribuição determinística disponível no domínio
   visualmente antes do submit; o valor retornado pela API continua a fonte de
   verdade e a tela recarrega após sucesso.
+- A edição de recorrência exige ocorrência materializada e oferece os três escopos do contrato.
+  Edição de parcela só habilita itens planejados e mantém o total por redistribuição das futuras.

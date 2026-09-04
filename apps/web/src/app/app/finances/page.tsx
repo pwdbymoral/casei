@@ -50,10 +50,13 @@ import {
   type FinanceAuditEvent,
   financeAdapterForEnvironment,
   hasTransactionQueryFilters,
+  type Installment,
+  type InstallmentPlan,
   listAllTransactions,
   mergeTransactionPage,
   previewInstallmentDates,
   previewInstallmentMinor,
+  type Recurrence,
   retainVisibleTransactionSelection,
   type SettlementInput,
   type Statement,
@@ -242,6 +245,27 @@ function FinanceDashboard({
   const [installmentFirstDueOn, setInstallmentFirstDueOn] = useState("");
   const [installmentDescription, setInstallmentDescription] = useState("");
   const [savingInstallment, setSavingInstallment] = useState(false);
+  const [editingRecurrence, setEditingRecurrence] = useState<Recurrence | null>(null);
+  const [recurrenceEditScope, setRecurrenceEditScope] = useState<
+    "this" | "this_and_future" | "future_unsettled"
+  >("this_and_future");
+  const [recurrenceEditEffectiveOn, setRecurrenceEditEffectiveOn] = useState("");
+  const [recurrenceEditAmount, setRecurrenceEditAmount] = useState("");
+  const [recurrenceEditDescription, setRecurrenceEditDescription] = useState("");
+  const [recurrenceEditEndOn, setRecurrenceEditEndOn] = useState("");
+  const [recurrenceEditEstimate, setRecurrenceEditEstimate] = useState("");
+  const [savingRecurrenceEdit, setSavingRecurrenceEdit] = useState(false);
+  const [editingInstallmentPlan, setEditingInstallmentPlan] = useState<InstallmentPlan | null>(
+    null,
+  );
+  const [installmentEditTotal, setInstallmentEditTotal] = useState("");
+  const [installmentEditCount, setInstallmentEditCount] = useState("");
+  const [installmentEditFirstDueOn, setInstallmentEditFirstDueOn] = useState("");
+  const [installmentEditDescription, setInstallmentEditDescription] = useState("");
+  const [editingInstallment, setEditingInstallment] = useState<Installment | null>(null);
+  const [installmentEditAmount, setInstallmentEditAmount] = useState("");
+  const [installmentEditDueOn, setInstallmentEditDueOn] = useState("");
+  const [savingInstallmentEdit, setSavingInstallmentEdit] = useState(false);
   const [pendingStatementPayment, setPendingStatementPayment] = useState<Statement | null>(null);
   const [statementPaymentAmount, setStatementPaymentAmount] = useState("");
   const [payingStatement, setPayingStatement] = useState(false);
@@ -394,6 +418,11 @@ function FinanceDashboard({
     setSettling(false);
     setSavingRecurrence(false);
     setSavingInstallment(false);
+    setEditingRecurrence(null);
+    setEditingInstallmentPlan(null);
+    setEditingInstallment(null);
+    setSavingRecurrenceEdit(false);
+    setSavingInstallmentEdit(false);
     settlementCommandKey.current = null;
   }, [
     statementDeepLinkRequest,
@@ -830,6 +859,148 @@ function FinanceDashboard({
       }
     } finally {
       if (workspaceRequests.isCurrent(workspaceRequest)) setSavingInstallment(false);
+    }
+  }
+
+  async function openRecurringOrInstallmentEditor(transaction: Transaction) {
+    if (!writeAccess) return;
+    setError(null);
+    try {
+      if (transaction.recurrenceId) {
+        const recurrence = await adapter.getRecurrence(workspaceId, transaction.recurrenceId);
+        setEditingRecurrence(recurrence);
+        setRecurrenceEditScope("this_and_future");
+        setRecurrenceEditEffectiveOn(transaction.dueOn ?? transaction.occurredOn);
+        setRecurrenceEditAmount(recurrence.amount.minor);
+        setRecurrenceEditDescription(recurrence.description);
+        setRecurrenceEditEndOn(recurrence.endOn ?? "");
+        setRecurrenceEditEstimate(recurrence.estimatedAmount?.minor ?? "");
+        return;
+      }
+      if (transaction.installmentPlanId) {
+        const plan = await adapter.getInstallmentPlan(workspaceId, transaction.installmentPlanId);
+        setEditingInstallmentPlan(plan);
+        setInstallmentEditTotal(plan.total.minor);
+        setInstallmentEditCount(String(plan.count));
+        setInstallmentEditFirstDueOn(plan.firstDueOn);
+        setInstallmentEditDescription(transactionLabel(transaction));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível carregar o plano.");
+    }
+  }
+
+  async function handleRecurrenceEditSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingRecurrence || savingRecurrenceEdit || !writeAccess) return;
+    let amount: bigint;
+    try {
+      amount = BigInt(recurrenceEditAmount || "0");
+    } catch {
+      setError("Informe um valor válido para a recorrência.");
+      return;
+    }
+    if (amount <= BigInt(0) || !recurrenceEditEffectiveOn) {
+      setError("Informe valor e ocorrência válidos para editar a recorrência.");
+      return;
+    }
+    setSavingRecurrenceEdit(true);
+    setError(null);
+    try {
+      const result = await adapter.updateRecurrence(
+        workspaceId,
+        editingRecurrence,
+        {
+          scope: recurrenceEditScope,
+          effectiveOn: recurrenceEditEffectiveOn,
+          amount: { currency, minor: amount.toString() },
+          description: recurrenceEditDescription.trim(),
+          ...(recurrenceEditScope !== "this" ? { endOn: recurrenceEditEndOn || null } : {}),
+          ...(editingRecurrence.variable
+            ? {
+                estimatedAmount: recurrenceEditEstimate
+                  ? { currency, minor: recurrenceEditEstimate }
+                  : null,
+              }
+            : {}),
+        },
+        `web-recurrence-edit-${crypto.randomUUID()}`,
+      );
+      setEditingRecurrence(null);
+      setNotice(`Recorrência atualizada (${result.affectedOccurrences.length} ocorrência(s)).`);
+      await load(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível editar a recorrência.");
+    } finally {
+      setSavingRecurrenceEdit(false);
+    }
+  }
+
+  async function handleInstallmentPlanEditSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingInstallmentPlan || savingInstallmentEdit || !writeAccess) return;
+    const count = Number(installmentEditCount);
+    if (!previewInstallmentMinor(installmentEditTotal, count).length) {
+      setError("Informe total positivo e entre 2 e 999 parcelas.");
+      return;
+    }
+    setSavingInstallmentEdit(true);
+    setError(null);
+    try {
+      const updated = await adapter.updateInstallmentPlan(
+        workspaceId,
+        editingInstallmentPlan,
+        {
+          total: { currency, minor: installmentEditTotal },
+          count,
+          firstDueOn: installmentEditFirstDueOn,
+          description: installmentEditDescription.trim(),
+        },
+        `web-installment-edit-${crypto.randomUUID()}`,
+      );
+      setEditingInstallmentPlan(updated);
+      setNotice("Parcelamento atualizado; parcelas já realizadas foram preservadas.");
+      await load(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível editar o parcelamento.");
+    } finally {
+      setSavingInstallmentEdit(false);
+    }
+  }
+
+  async function handleInstallmentEditSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingInstallmentPlan || !editingInstallment || savingInstallmentEdit || !writeAccess)
+      return;
+    let amount: bigint;
+    try {
+      amount = BigInt(installmentEditAmount || "0");
+    } catch {
+      setError("Informe um valor válido para a parcela.");
+      return;
+    }
+    if (amount <= BigInt(0) || !installmentEditDueOn) {
+      setError("Informe valor e vencimento válidos para a parcela.");
+      return;
+    }
+    setSavingInstallmentEdit(true);
+    setError(null);
+    try {
+      const updated = await adapter.updateInstallment(
+        workspaceId,
+        editingInstallmentPlan,
+        editingInstallment,
+        { amount: { currency, minor: amount.toString() }, dueOn: installmentEditDueOn },
+        `web-installment-item-edit-${crypto.randomUUID()}`,
+      );
+      setEditingInstallmentPlan(updated);
+      setEditingInstallment(null);
+      setNotice("Parcela atualizada.");
+      await load(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível editar a parcela.");
+    } finally {
+      setSavingInstallmentEdit(false);
     }
   }
 
@@ -2191,6 +2362,19 @@ function FinanceDashboard({
                       >
                         Detalhes
                       </Button>
+                      {transaction.recurrenceId || transaction.installmentPlanId ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void openRecurringOrInstallmentEditor(transaction)}
+                          disabled={!writeAccess}
+                          aria-label={`Editar plano de ${transactionLabel(transaction)}`}
+                        >
+                          <PencilIcon aria-hidden="true" />
+                          <span className="sr-only">Editar plano</span>
+                        </Button>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
@@ -2800,6 +2984,257 @@ function FinanceDashboard({
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={editingRecurrence !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingRecurrenceEdit) setEditingRecurrence(null);
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Editar recorrência</DialogTitle>
+            <DialogDescription>
+              Escolha a partir de qual ocorrência a alteração vale. Ocorrências já liquidadas ficam
+              preservadas.
+            </DialogDescription>
+          </DialogHeader>
+          {editingRecurrence ? (
+            <form className="grid gap-4" onSubmit={handleRecurrenceEditSubmit}>
+              <Field>
+                <FieldLabel htmlFor="recurrence-edit-scope">Aplicar em</FieldLabel>
+                <select
+                  id="recurrence-edit-scope"
+                  className="h-9 rounded-lg border border-input bg-background px-2.5 text-sm"
+                  value={recurrenceEditScope}
+                  onChange={(event) =>
+                    setRecurrenceEditScope(
+                      event.target.value as "this" | "this_and_future" | "future_unsettled",
+                    )
+                  }
+                  disabled={savingRecurrenceEdit}
+                >
+                  <option value="this">Somente esta ocorrência</option>
+                  <option value="this_and_future">Esta e futuras</option>
+                  <option value="future_unsettled">Futuras ainda não liquidadas</option>
+                </select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="recurrence-edit-effective">Ocorrência inicial</FieldLabel>
+                <Input
+                  id="recurrence-edit-effective"
+                  type="date"
+                  value={recurrenceEditEffectiveOn}
+                  onChange={(event) => setRecurrenceEditEffectiveOn(event.target.value)}
+                  disabled={savingRecurrenceEdit}
+                  required
+                />
+              </Field>
+              <MoneyInput
+                id="recurrence-edit-amount"
+                value={recurrenceEditAmount}
+                onChange={setRecurrenceEditAmount}
+                label="Valor planejado"
+                currency={currency}
+                disabled={savingRecurrenceEdit}
+              />
+              {editingRecurrence.variable ? (
+                <MoneyInput
+                  id="recurrence-edit-estimate"
+                  value={recurrenceEditEstimate}
+                  onChange={setRecurrenceEditEstimate}
+                  label="Estimativa variável (opcional)"
+                  currency={currency}
+                  disabled={savingRecurrenceEdit}
+                />
+              ) : null}
+              {recurrenceEditScope !== "this" ? (
+                <Field>
+                  <FieldLabel htmlFor="recurrence-edit-end">Novo fim (opcional)</FieldLabel>
+                  <Input
+                    id="recurrence-edit-end"
+                    type="date"
+                    value={recurrenceEditEndOn}
+                    onChange={(event) => setRecurrenceEditEndOn(event.target.value)}
+                    disabled={savingRecurrenceEdit}
+                  />
+                </Field>
+              ) : null}
+              <Field>
+                <FieldLabel htmlFor="recurrence-edit-description">Descrição</FieldLabel>
+                <Input
+                  id="recurrence-edit-description"
+                  value={recurrenceEditDescription}
+                  onChange={(event) => setRecurrenceEditDescription(event.target.value)}
+                  maxLength={500}
+                  disabled={savingRecurrenceEdit}
+                />
+              </Field>
+              <DialogFooter>
+                <DialogClose
+                  render={<Button type="button" variant="outline" />}
+                  disabled={savingRecurrenceEdit}
+                >
+                  Cancelar
+                </DialogClose>
+                <Button type="submit" disabled={savingRecurrenceEdit || !writeAccess}>
+                  {savingRecurrenceEdit ? "Salvando…" : "Salvar alteração"}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={editingInstallmentPlan !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingInstallmentEdit) {
+            setEditingInstallmentPlan(null);
+            setEditingInstallment(null);
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Editar parcelamento</DialogTitle>
+            <DialogDescription>
+              Parcelas realizadas permanecem iguais. Alterar uma parcela redistribui a diferença
+              entre as próximas para conservar o total.
+            </DialogDescription>
+          </DialogHeader>
+          {editingInstallmentPlan ? (
+            <div className="grid gap-4">
+              <form className="grid gap-3" onSubmit={handleInstallmentPlanEditSubmit}>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <MoneyInput
+                    id="installment-edit-total"
+                    value={installmentEditTotal}
+                    onChange={setInstallmentEditTotal}
+                    label="Total"
+                    currency={currency}
+                    disabled={savingInstallmentEdit}
+                  />
+                  <Field>
+                    <FieldLabel htmlFor="installment-edit-count">Quantidade</FieldLabel>
+                    <Input
+                      id="installment-edit-count"
+                      type="number"
+                      min={2}
+                      max={999}
+                      value={installmentEditCount}
+                      onChange={(event) => setInstallmentEditCount(event.target.value)}
+                      disabled={savingInstallmentEdit}
+                    />
+                  </Field>
+                </div>
+                <Field>
+                  <FieldLabel htmlFor="installment-edit-first-due">Primeiro vencimento</FieldLabel>
+                  <Input
+                    id="installment-edit-first-due"
+                    type="date"
+                    value={installmentEditFirstDueOn}
+                    onChange={(event) => setInstallmentEditFirstDueOn(event.target.value)}
+                    disabled={savingInstallmentEdit}
+                    required
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="installment-edit-description">Descrição</FieldLabel>
+                  <Input
+                    id="installment-edit-description"
+                    value={installmentEditDescription}
+                    onChange={(event) => setInstallmentEditDescription(event.target.value)}
+                    maxLength={500}
+                    disabled={savingInstallmentEdit}
+                  />
+                </Field>
+                <Button type="submit" disabled={savingInstallmentEdit || !writeAccess}>
+                  {savingInstallmentEdit ? "Salvando…" : "Salvar plano"}
+                </Button>
+              </form>
+              <div className="rounded-lg border p-3">
+                <h3 className="text-sm font-semibold">Parcelas</h3>
+                <ul className="mt-2 grid gap-2 text-sm">
+                  {editingInstallmentPlan.installments.map((installment) => (
+                    <li
+                      key={installment.id}
+                      className="flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <span>
+                        Parcela {installment.number} · {installment.dueOn} ·{" "}
+                        {installment.state === "planned" ? "futura" : "realizada"}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        <strong>
+                          {formatMoneyMinor(installment.amount.minor, installment.amount.currency)}
+                        </strong>
+                        {installment.state === "planned" ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setEditingInstallment(installment);
+                              setInstallmentEditAmount(installment.amount.minor);
+                              setInstallmentEditDueOn(installment.dueOn);
+                            }}
+                            disabled={savingInstallmentEdit}
+                          >
+                            Editar
+                          </Button>
+                        ) : null}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {editingInstallment ? (
+                <form
+                  className="grid gap-3 rounded-lg border bg-muted/30 p-3"
+                  onSubmit={handleInstallmentEditSubmit}
+                >
+                  <h3 className="text-sm font-semibold">
+                    Editar parcela {editingInstallment.number}
+                  </h3>
+                  <MoneyInput
+                    id="installment-edit-item-amount"
+                    value={installmentEditAmount}
+                    onChange={setInstallmentEditAmount}
+                    label="Valor"
+                    currency={currency}
+                    disabled={savingInstallmentEdit}
+                  />
+                  <Field>
+                    <FieldLabel htmlFor="installment-edit-item-due">Vencimento</FieldLabel>
+                    <Input
+                      id="installment-edit-item-due"
+                      type="date"
+                      value={installmentEditDueOn}
+                      onChange={(event) => setInstallmentEditDueOn(event.target.value)}
+                      disabled={savingInstallmentEdit}
+                      required
+                    />
+                  </Field>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => setEditingInstallment(null)}
+                      disabled={savingInstallmentEdit}
+                    >
+                      Cancelar
+                    </Button>
+                    <Button type="submit" disabled={savingInstallmentEdit || !writeAccess}>
+                      {savingInstallmentEdit ? "Salvando…" : "Salvar parcela"}
+                    </Button>
+                  </div>
+                </form>
+              ) : null}
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
 
