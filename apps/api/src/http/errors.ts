@@ -209,6 +209,9 @@ function normalizeError(error: unknown): {
       message: DEFAULT_MESSAGES.idempotency_conflict,
     };
   }
+  if (hasCode(error, "job_not_ready")) {
+    return { status: 409, code: "job_not_ready", message: DEFAULT_MESSAGES.job_not_ready };
+  }
   if (hasCode(error, "conflict")) {
     return {
       status: 409,

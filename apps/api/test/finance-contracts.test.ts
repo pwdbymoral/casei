@@ -21,6 +21,8 @@ import {
   safeToSpendQuerySchema,
   settleTransactionSchema,
   transactionListQuerySchema,
+  transactionReclassificationPreviewSchema,
+  transactionReclassificationSchema,
   updateCreditCardSchema,
   updateRecurrenceSchema,
   updateTransactionSchema,
@@ -30,6 +32,26 @@ import {
 import { describe, expect, it } from "vitest";
 
 describe("finance contracts", () => {
+  it("requires unique versioned transactions for a batch reclassification preview", () => {
+    expect(() =>
+      transactionReclassificationSchema.parse({
+        categoryId: "0190f3c8-2a10-7abc-8def-1234567890ae",
+        transactions: [
+          { id: "0190f3c8-2a10-7abc-8def-1234567890af", version: 0 },
+          { id: "0190f3c8-2a10-7abc-8def-1234567890af", version: 0 },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      transactionReclassificationPreviewSchema.parse({
+        categoryId: "0190f3c8-2a10-7abc-8def-1234567890ae",
+        categoryVersion: 2,
+        previewHash: "0".repeat(64),
+        rows: [],
+        canConfirm: false,
+      }),
+    ).not.toThrow();
+  });
   it("requires explicit confirmation to cancel a transaction", () => {
     expect(cancelTransactionSchema.parse({ confirm: true })).toEqual({ confirm: true });
     expect(() => cancelTransactionSchema.parse({ confirm: false })).toThrow();

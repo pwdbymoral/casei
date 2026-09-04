@@ -3,6 +3,10 @@ import {
   adminAccountDetailSchema,
   adminAccountSearchQuerySchema,
   adminAccountSummarySchema,
+  adminAuditSearchQuerySchema,
+  adminJobListSchema,
+  adminJobRetrySchema,
+  adminJobSearchQuerySchema,
   adminPlatformRoleUpdateSchema,
   adminSessionSchema,
   platformAccountStatusSchema,
@@ -76,5 +80,53 @@ describe("ADMIN-001/002 contracts", () => {
     });
     expect(detail.sessions[0]?.ipAddress).toBe("203.0.113.0/24");
     expect(() => adminSessionSchema.parse({ id: "s", token: "bearer" })).toThrow();
+  });
+
+  it("bounds job operations and audit filters", () => {
+    expect(adminJobSearchQuerySchema.parse({ type: "data.import", state: "dead" })).toEqual({
+      type: "data.import",
+      state: "dead",
+      limit: 50,
+    });
+    expect(() => adminJobSearchQuerySchema.parse({ state: "queued" })).toThrow();
+    expect(adminJobRetrySchema.parse({ reason: "reprocessamento seguro" })).toEqual({
+      reason: "reprocessamento seguro",
+    });
+    expect(() => adminAuditSearchQuerySchema.parse({ from: "not-a-date" })).toThrow();
+    expect(() =>
+      adminAuditSearchQuerySchema.parse({
+        from: "2026-09-02T00:00:00.000Z",
+        to: "2026-09-01T00:00:00.000Z",
+      }),
+    ).toThrow();
+    expect(() => adminAuditSearchQuerySchema.parse({ limit: 101 })).toThrow();
+  });
+
+  it("does not permit job payloads in the operational response", () => {
+    const job = adminJobListSchema.parse({
+      items: [
+        {
+          id: "0190f3c8-2a10-7abc-8def-1234567890ab",
+          type: "data.import",
+          version: 1,
+          workspaceId: null,
+          actorId: null,
+          requiredCapability: "import",
+          state: "dead",
+          attempts: 3,
+          availableAt: "2026-08-25T12:00:00.000Z",
+          leaseUntil: null,
+          correlationId: "01J00000000000000000000000",
+          lastError: "timeout",
+          createdAt: "2026-08-25T12:00:00.000Z",
+          updatedAt: "2026-08-25T12:30:00.000Z",
+          retryable: true,
+          payload: { sensitive: true },
+        },
+      ],
+      page: { nextCursor: null, hasMore: false },
+      health: { pending: 0, running: 0, succeeded: 0, failed: 0, dead: 1, cancelled: 0 },
+    });
+    expect(job.items[0]).not.toHaveProperty("payload");
   });
 });

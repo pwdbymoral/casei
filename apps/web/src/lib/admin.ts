@@ -34,6 +34,48 @@ export type AdminAccountList = {
   page: { nextCursor: string | null; hasMore: boolean };
 };
 
+export type AdminJobType = "data.import" | "recurrence.expand";
+export type AdminJobState = "pending" | "running" | "succeeded" | "failed" | "dead" | "cancelled";
+export type AdminJob = {
+  id: string;
+  type: AdminJobType;
+  version: number;
+  workspaceId: string | null;
+  actorId: string | null;
+  requiredCapability: string | null;
+  state: AdminJobState;
+  attempts: number;
+  availableAt: string;
+  leaseUntil: string | null;
+  correlationId: string;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  retryable: boolean;
+};
+export type AdminJobList = {
+  items: AdminJob[];
+  page: { nextCursor: string | null; hasMore: boolean };
+  health: Record<AdminJobState, number>;
+};
+export type AdminAuditEvent = {
+  id: string;
+  actorId: string | null;
+  targetId: string | null;
+  action: string;
+  occurredAt: string;
+  origin: string;
+  correlationId: string;
+  ipAddress: string | null;
+  endpoint: string | null;
+  result: "success" | "failure";
+  reason: string;
+};
+export type AdminAuditList = {
+  items: AdminAuditEvent[];
+  page: { nextCursor: string | null; hasMore: boolean };
+};
+
 export class AdminAdapterError extends Error {
   readonly status: number;
   readonly code: string;
@@ -121,6 +163,43 @@ export const authenticatedAdminAdapter = {
   async searchAccounts(query: string, limit = 50): Promise<AdminAdapterResult<AdminAccountList>> {
     const params = new URLSearchParams({ query, limit: String(limit) });
     return adminRequest<AdminAccountList>(`/v1/admin/accounts?${params.toString()}`);
+  },
+  async searchJobs(
+    filters: { type?: AdminJobType; state?: AdminJobState; limit?: number; cursor?: string } = {},
+  ): Promise<AdminAdapterResult<AdminJobList>> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters))
+      if (value !== undefined) params.set(key, String(value));
+    return adminRequest<AdminJobList>(`/v1/admin/jobs?${params.toString()}`);
+  },
+  async retryJob(
+    jobId: string,
+    reason: string,
+    commandKey?: string,
+    stepUpToken?: string,
+  ): Promise<AdminAdapterResult<AdminJob>> {
+    return adminRequest<AdminJob>(`/v1/admin/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+      idempotencyKey: commandKey ?? createAdminCommandKey("job-retry"),
+      stepUpToken,
+    });
+  },
+  async searchAudit(
+    filters: {
+      actorId?: string;
+      targetId?: string;
+      action?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<AdminAdapterResult<AdminAuditList>> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters))
+      if (value !== undefined) params.set(key, String(value));
+    return adminRequest<AdminAuditList>(`/v1/admin/audit?${params.toString()}`);
   },
   async getAccount(userId: string): Promise<AdminAdapterResult<AdminAccountDetail>> {
     return adminRequest<AdminAccountDetail>(`/v1/admin/accounts/${encodeURIComponent(userId)}`);

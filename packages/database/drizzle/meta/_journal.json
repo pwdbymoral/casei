@@ -164,6 +164,13 @@
       "breakpoints": true
     },
     {
+      "idx": 23,
+      "version": "7",
+      "when": 1787597600000,
+      "tag": "0023_platform_job_scope",
+      "breakpoints": true
+    },
+    {
       "idx": 24,
       "version": "7",
       "when": 1788537500000,

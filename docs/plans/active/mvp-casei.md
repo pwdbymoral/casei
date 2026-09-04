@@ -83,7 +83,9 @@ AUTH-002..005 também conectam o guard server-side ao endpoint `/v1/me/workspace
 - [x] **FIN-004 Captura rápida UI:** despesa/receita com somente valor obrigatório, defaults explícitos, detalhes progressivos, feedback e desfazer por reversão auditável.
 - [x] **FIN-005 Linha do tempo — base:** busca, período, filtros em URL, paginação incremental, detalhe básico e estados de carregamento/vazio/erro.
 - [ ] **FIN-005b Histórico auditável:** detalhe com eventos de auditoria, origem, antes/depois sanitizado e consequências relacionadas.
-- [ ] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia.
+- [x] **FIN-006 Categorias:** defaults, criar/editar/arquivar e reclassificação em lote com prévia,
+  confirmação atômica, `If-Match`, idempotência, validação de categoria/transações e auditoria
+  sanitizada; revisão independente e validação final permanecem pendentes.
 
 O PR #19 entrega o núcleo de ledger/contas, criação e listagem de transações, liquidação/reversão
 auditável, categorias, idempotência, isolamento por papel e moeda, além dos contratos e guards
@@ -197,8 +199,8 @@ Pode iniciar após Gate 1 em contratos/UI, integrando vínculo financeiro soment
 
 - [ ] **ADMIN-001 Papéis de plataforma/bootstrap:** primeiro admin por procedimento único, promoção posterior no console, proteção do último admin.
 - [ ] **ADMIN-002 Console de contas:** busca e metadados mínimos, suspensão/reativação, sessões e reenvios.
-- [ ] **ADMIN-003 Operação de jobs:** saúde, dead-letter, retry idempotente e correlation IDs sem conteúdo sensível.
-- [ ] **ADMIN-004 Auditoria administrativa:** motivo obrigatório, filtros, retenção e step-up para ações críticas.
+- [x] **ADMIN-003 Operação de jobs:** saúde, dead-letter, retry idempotente e correlation IDs sem conteúdo sensível.
+- [x] **ADMIN-004 Auditoria administrativa:** motivo obrigatório, filtros, retenção e step-up para ações críticas.
 - [ ] **SEC-001 Threat model:** autenticação, isolamento, import, admin, PWA cache, logs e supply chain; resolver riscos altos.
 - [ ] **SEC-002 Privacidade/operação:** termos aprovados quando aplicável, operacionalizar a política de retenção já aprovada (30/35/365 dias), exportação/exclusão do titular, backup/restore testado e runbooks.
 - [ ] **QA-001 Matriz E2E:** jornadas críticas em mobile/desktop, dois usuários/dois espaços, calendário, falhas de rede e concorrência.

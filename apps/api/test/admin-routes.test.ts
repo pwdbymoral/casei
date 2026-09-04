@@ -50,6 +50,13 @@ function createAdminApp(
     revokeSession: async () => ({ replayed: false, result: null }),
     resendVerification: async () => ({ replayed: false, result: null }),
     resendRecovery: async () => ({ replayed: false, result: null }),
+    searchJobs: async () => ({
+      items: [],
+      page: { nextCursor: null, hasMore: false },
+      health: { pending: 0, running: 0, succeeded: 0, failed: 0, dead: 0, cancelled: 0 },
+    }),
+    searchAudit: async () => ({ items: [], page: { nextCursor: null, hasMore: false } }),
+    retryJob: async () => ({ replayed: false, result: null }),
   } as unknown as AdminService;
   return createApp(undefined, {
     identity: {
@@ -190,6 +197,51 @@ describe("ADMIN-002 HTTP boundary", () => {
     expect(second.headers.get("Retry-After")).toBe("60");
     await expect(second.json()).resolves.toMatchObject({
       error: { code: "rate_limited" },
+    });
+  });
+});
+
+describe("ADMIN-003/004 HTTP boundary", () => {
+  it("lists jobs and audit through the platform boundary", async () => {
+    const app = createAdminApp();
+    const jobs = await app.request("http://localhost/v1/admin/jobs?state=dead&limit=10");
+    expect(jobs.status).toBe(200);
+    await expect(jobs.json()).resolves.toMatchObject({ health: { dead: 0 }, items: [] });
+    const audit = await app.request("http://localhost/v1/admin/audit?action=job%3Aretry");
+    expect(audit.status).toBe(200);
+    await expect(audit.json()).resolves.toEqual({
+      items: [],
+      page: { nextCursor: null, hasMore: false },
+    });
+  });
+
+  it("requires idempotency key for job retry", async () => {
+    const response = await createAdminApp().request(
+      "http://localhost/v1/admin/jobs/0190f3c8-2a10-7abc-8def-1234567890ab/retry",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "retry" }),
+      },
+    );
+    expect(response.status).toBe(422);
+  });
+
+  it("rejects a malformed job id before reaching the retry service", async () => {
+    const response = await createAdminApp().request(
+      "http://localhost/v1/admin/jobs/not-a-uuid/retry",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "admin-job-retry-invalid-id",
+        },
+        body: JSON.stringify({ reason: "retry" }),
+      },
+    );
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "validation_failed" },
     });
   });
 });

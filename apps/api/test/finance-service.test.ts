@@ -17,6 +17,135 @@ describe("finance command guards", () => {
     });
     expect(() => calculateStatementPayment(1_000n, 1_250n, false)).toThrow(/excede/);
   });
+
+  it("previews a batch reclassification and reports an ineligible transaction without mutating", async () => {
+    const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
+    const categoryId = "0190f3c8-2a10-7abc-8def-1234567890ae";
+    const transactionId = "0190f3c8-2a10-7abc-8def-1234567890af";
+    const client = {
+      query: vi.fn(async (sql: string, _values?: unknown[]) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes("FROM finance_category"))
+          return { rows: [{ id: categoryId, kind: "expense", archived: false, version: 2 }] };
+        if (sql.includes("FROM finance_transaction"))
+          return {
+            rows: [
+              {
+                id: transactionId,
+                workspace_id: workspaceId,
+                kind: "expense",
+                state: "posted",
+                amount_minor: "100",
+                settled_minor: "100",
+                currency_code: "BRL",
+                occurred_on: "2026-08-24",
+                due_on: null,
+                posted_on: null,
+                description: "Mercado",
+                category_id: "0190f3c8-2a10-7abc-8def-1234567890b0",
+                card_id: null,
+                statement_id: null,
+                recurrence_id: null,
+                installment_plan_id: null,
+                version: 1,
+              },
+            ],
+          };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const preview = await service.previewTransactionReclassification(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "viewer",
+      },
+      { categoryId, transactions: [{ id: transactionId, version: 0 }] },
+    );
+    expect(preview.canConfirm).toBe(false);
+    expect(preview.rows[0]?.errors).toContain("A transação foi alterada desde a prévia.");
+    expect(
+      client.query.mock.calls.some(([sql]) => String(sql).includes("UPDATE finance_transaction")),
+    ).toBe(false);
+  });
+
+  it("reclassifies the whole batch atomically and audits sanitized category transitions", async () => {
+    const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
+    const categoryId = "0190f3c8-2a10-7abc-8def-1234567890ae";
+    const transactionId = "0190f3c8-2a10-7abc-8def-1234567890af";
+    const source = {
+      id: transactionId,
+      workspace_id: workspaceId,
+      kind: "expense",
+      state: "posted",
+      amount_minor: "100",
+      settled_minor: "100",
+      currency_code: "BRL",
+      occurred_on: "2026-08-24",
+      due_on: null,
+      posted_on: null,
+      description: "sensível",
+      category_id: null,
+      card_id: null,
+      statement_id: null,
+      recurrence_id: null,
+      installment_plan_id: null,
+      version: 1,
+    };
+    const changed = { ...source, category_id: categoryId, version: 2 };
+    const client = {
+      query: vi.fn(async (sql: string, _values?: unknown[]) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.startsWith("SET LOCAL ROLE") || sql.includes("set_config")) return { rows: [] };
+        if (sql.includes('DELETE FROM "idempotency_key"')) return { rows: [] };
+        if (sql.includes('INSERT INTO "idempotency_key"'))
+          return { rowCount: 1, rows: [{ id: "idem-reclass" }] };
+        if (sql.includes("FROM finance_category"))
+          return { rows: [{ id: categoryId, kind: "expense", archived: false, version: 2 }] };
+        if (sql.includes("UPDATE finance_transaction")) return { rows: [changed] };
+        if (sql.includes("FROM finance_transaction")) return { rows: [source] };
+        if (sql.includes("INSERT INTO audit_event")) return { rows: [] };
+        if (sql.includes('UPDATE "idempotency_key"')) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    const service = new FinanceService({ connect: vi.fn(async () => client) } as never);
+    const input = { categoryId, transactions: [{ id: transactionId, version: 1 }] };
+    const preview = await service.previewTransactionReclassification(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "member",
+      },
+      input,
+    );
+    const result = await service.reclassifyTransactions(
+      {
+        workspaceId,
+        actorId: "user-1",
+        correlationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        role: "member",
+      },
+      { ...input, previewHash: preview.previewHash },
+      "reclass-command-1",
+      preview.categoryVersion,
+    );
+    expect(result.committed).toBe(true);
+    expect(result.transactions[0]?.categoryId).toBe(categoryId);
+    expect(
+      client.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE finance_transaction")),
+    ).toHaveLength(1);
+    const auditCall = client.query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO audit_event"),
+    );
+    expect(auditCall?.[1]).toEqual(expect.arrayContaining(["transaction.reclassified"]));
+  });
   it("paginates loan payments with a signed cursor inside the workspace", async () => {
     const workspaceId = "0190f3c8-2a10-7abc-8def-1234567890ab";
     const loanId = "0190f3c8-2a10-7abc-8def-1234567890ac";
