@@ -34,6 +34,9 @@ type BulkDraft = {
   quantity: string;
   minimum: string;
   unit: string;
+  unitLabel: string;
+  shoppingAuto: boolean;
+  markedMissing: boolean;
   category: string;
   location: string;
   note: string;
@@ -73,6 +76,9 @@ function draftsFromPreview(preview: StockBulkPreview): BulkDraft[] {
     quantity: value(row, "quantity"),
     minimum: value(row, "minimum"),
     unit: value(row, "unit"),
+    unitLabel: value(row, "unitLabel"),
+    shoppingAuto: value(row, "shoppingAuto") !== "false",
+    markedMissing: value(row, "markedMissing") === "true",
     category: value(row, "category"),
     location: value(row, "location"),
     note: value(row, "note"),
@@ -85,9 +91,20 @@ function csvCell(raw: string): string {
 
 function contentFromDrafts(rows: BulkDraft[]): string {
   return [
-    "Nome\tQuantidade\tMínimo\tUnidade\tCategoria\tLocal\tNota",
+    "Nome\tQuantidade\tMínimo\tUnidade\tRótulo\tComprar automaticamente\tFaltando\tCategoria\tLocal\tNota",
     ...rows.map((row) =>
-      [row.name, row.quantity, row.minimum, row.unit, row.category, row.location, row.note]
+      [
+        row.name,
+        row.quantity,
+        row.minimum,
+        row.unit,
+        row.unitLabel,
+        row.shoppingAuto ? "sim" : "não",
+        row.markedMissing ? "sim" : "não",
+        row.category,
+        row.location,
+        row.note,
+      ]
         .map(csvCell)
         .join("\t"),
     ),
@@ -177,7 +194,8 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
       );
       if (!result.committed) {
         setPreview(result.preview);
-        setPreviewContent(content);
+        setPreviewContent(null);
+        setApplyKey(null);
         setDrafts(draftsFromPreview(result.preview));
         setError("Nada foi aplicado. Revise as linhas destacadas e gere uma nova prévia.");
         return;
@@ -197,7 +215,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
     }
   }
 
-  function updateDraft(index: number, field: keyof BulkDraft, next: string) {
+  function updateDraft(index: number, field: keyof BulkDraft, next: string | boolean) {
     setDrafts((current) => {
       const updated = current.map((row, rowIndex) =>
         rowIndex === index ? { ...row, [field]: next } : row,
@@ -344,9 +362,13 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
                           <th className="w-28 px-3 py-2">Quantidade</th>
                           <th className="w-24 px-3 py-2">Mínimo</th>
                           <th className="w-28 px-3 py-2">Unidade</th>
+                          <th className="w-28 px-3 py-2">Rótulo</th>
                           <th className="px-3 py-2">Categoria</th>
                           <th className="px-3 py-2">Local</th>
                           <th className="px-3 py-2">Nota</th>
+                          <th className="w-24 px-3 py-2">Compra auto.</th>
+                          <th className="w-24 px-3 py-2">Faltando</th>
+                          <th className="w-44 px-3 py-2">Resultado</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -359,6 +381,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
                                 "quantity",
                                 "minimum",
                                 "unit",
+                                "unitLabel",
                                 "category",
                                 "location",
                                 "note",
@@ -375,6 +398,38 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
                                 />
                               </td>
                             ))}
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={row.shoppingAuto}
+                                onChange={(event) =>
+                                  updateDraft(index, "shoppingAuto", event.target.checked)
+                                }
+                                aria-label={`Compra automática da linha ${row.lineNumber}`}
+                              />
+                            </td>
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={row.markedMissing}
+                                onChange={(event) =>
+                                  updateDraft(index, "markedMissing", event.target.checked)
+                                }
+                                aria-label={`Faltando da linha ${row.lineNumber}`}
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-xs">
+                              <span
+                                className={`rounded-full px-2 py-1 ${statusClass[preview.rows[index]?.status ?? "invalid"]}`}
+                              >
+                                {statusLabel[preview.rows[index]?.status ?? "invalid"]}
+                              </span>
+                              {preview.rows[index]?.errors.length ? (
+                                <span className="mt-2 block text-destructive" role="alert">
+                                  {preview.rows[index]?.errors.join(" ")}
+                                </span>
+                              ) : null}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
