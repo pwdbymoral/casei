@@ -90,6 +90,118 @@ describe("stock adapter", () => {
     expect(requests[0]?.headers.get("If-Match")).toBe('"v3"');
     expect(requests[0]?.headers.get("Idempotency-Key")).toMatch(/^stock-/);
   });
+
+  it("previews and applies bulk products with the preview hash and operation key", async () => {
+    const requests: Request[] = [];
+    const adapter = createHttpStockAdapter({
+      baseUrl: "https://casei.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (request.url.endsWith("/bulk/preview")) {
+          return Response.json({
+            contentHash: "a".repeat(64),
+            headers: ["Nome"],
+            fatalErrors: [],
+            rows: [],
+            counts: { new: 0, update: 0, duplicate: 0, invalid: 0 },
+            canApplyValidOnly: false,
+            canApplyAllOrNothing: false,
+          });
+        }
+        return Response.json({ committed: true, preview: {}, applied: [] });
+      },
+    });
+    await adapter.previewBulkProducts(workspaceA, "Arroz");
+    await adapter.applyBulkProducts(
+      workspaceA,
+      { content: "Arroz", mode: "valid_only", previewHash: "a".repeat(64) },
+      "stock-bulk-ui-0001",
+    );
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://casei.test/v1/workspaces/${workspaceA}/stock/products/bulk/preview`,
+      `https://casei.test/v1/workspaces/${workspaceA}/stock/products/bulk`,
+    ]);
+    expect(requests[1]?.headers.get("Idempotency-Key")).toBe("stock-bulk-ui-0001");
+    await expect(requests[1]?.json()).resolves.toMatchObject({ mode: "valid_only" });
+  });
+
+  it("preserves the operation key across a lost response and retry", async () => {
+    const keys: string[] = [];
+    let attempts = 0;
+    const adapter = createHttpStockAdapter({
+      fetch: async (_input, init) => {
+        attempts += 1;
+        keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+        if (attempts === 1) throw new TypeError("response lost");
+        return Response.json({ committed: true, preview: {}, applied: [] });
+      },
+    });
+    const input = { content: "Arroz", mode: "valid_only" as const, previewHash: "a".repeat(64) };
+    await expect(
+      adapter.applyBulkProducts(workspaceA, input, "stock-bulk-retry-0001"),
+    ).rejects.toThrow("Esta ação precisa de conexão.");
+    await expect(
+      adapter.applyBulkProducts(workspaceA, input, "stock-bulk-retry-0001"),
+    ).resolves.toMatchObject({ committed: true });
+    expect(keys).toEqual(["stock-bulk-retry-0001", "stock-bulk-retry-0001"]);
+  });
+
+  it("returns the server preview when all-or-nothing is rejected with 422", async () => {
+    const rejected = { committed: false, preview: { contentHash: "a".repeat(64) }, applied: [] };
+    const adapter = createHttpStockAdapter({
+      fetch: async () => Response.json(rejected, { status: 422 }),
+    });
+    await expect(
+      adapter.applyBulkProducts(workspaceA, {
+        content: "Arroz",
+        mode: "all_or_nothing",
+        previewHash: "a".repeat(64),
+      }),
+    ).resolves.toEqual(rejected);
+  });
+
+  it("keeps fixture bulk confirmation explicit and skips invalid rows", async () => {
+    const adapter = createFixtureStockAdapter();
+    const content = "Arroz novo\n\nArroz novo";
+    const preview = await adapter.previewBulkProducts(workspaceA, content);
+    expect(preview.counts).toMatchObject({ new: 1, invalid: 1, duplicate: 1 });
+    const applied = await adapter.applyBulkProducts(workspaceA, {
+      content,
+      mode: "valid_only",
+      previewHash: preview.contentHash,
+    });
+    expect(applied.committed).toBe(true);
+    expect(applied.applied).toHaveLength(1);
+    expect(
+      (await adapter.listProducts(workspaceA)).some((item) => item.name === "Arroz novo"),
+    ).toBe(true);
+  });
+
+  it("supports semicolon tables, quantities and updates in fixtures", async () => {
+    const adapter = createFixtureStockAdapter();
+    const content = "Quantidade;Nome\n2;Leite";
+    const preview = await adapter.previewBulkProducts(workspaceA, content);
+    expect(preview.rows[0]).toMatchObject({ status: "update", name: "Leite" });
+    const applied = await adapter.applyBulkProducts(workspaceA, {
+      content,
+      mode: "valid_only",
+      previewHash: preview.contentHash,
+    });
+    expect(applied.applied[0]?.action).toBe("update");
+    expect(
+      (await adapter.listProducts(workspaceA)).find((item) => item.name === "Leite")?.quantity,
+    ).toBe("2");
+  });
+
+  it("reports invalid tabular headers in the fixture preview", async () => {
+    const preview = await createFixtureStockAdapter().previewBulkProducts(
+      workspaceA,
+      "Fornecedor;Quantidade\nAcme;2",
+    );
+    expect(preview.fatalErrors).toEqual(["O cabeçalho precisa conter Nome."]);
+    expect(preview.rows).toHaveLength(0);
+  });
   it("reuses one operation-scoped idempotency key after a network retry", async () => {
     let attempts = 0;
     const keys: string[] = [];
