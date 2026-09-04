@@ -736,10 +736,13 @@ function FinanceDashboard({
         updated,
       ]);
       try {
-        setWallet(await adapter.getWallet(workspaceId));
+        const wallet = await adapter.getWallet(workspaceId);
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
+        setWallet(wallet);
       } catch {
         // The settlement succeeded; keep the transaction visible and let the next refresh
         // reconcile the aggregate if the follow-up read was interrupted.
+        if (!workspaceRequests.isCurrent(workspaceRequest)) return;
       }
       setCommitmentTransactions((current) =>
         updated.state === "posted" || updated.state === "canceled"
@@ -936,7 +939,7 @@ function FinanceDashboard({
           amount: { currency, minor: amount.toString() },
           description: recurrenceEditDescription.trim(),
           ...(recurrenceEditScope !== "this" ? { endOn: recurrenceEditEndOn || null } : {}),
-          ...(editingRecurrence.variable
+          ...(editingRecurrence.variable && recurrenceEditScope !== "this"
             ? {
                 estimatedAmount: recurrenceEditEstimate
                   ? { currency, minor: recurrenceEditEstimate }

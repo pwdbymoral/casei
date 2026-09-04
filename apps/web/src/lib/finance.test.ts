@@ -1630,8 +1630,8 @@ describe("finance adapter", () => {
       startOn: "2026-08-01",
       endOn: null,
       maxOccurrences: null,
-      variable: false,
-      estimatedAmount: null,
+      variable: true,
+      estimatedAmount: { currency: "BRL", minor: "1500" },
       description: "Conta",
       pausedOn: null,
       version: 2,
@@ -1639,7 +1639,7 @@ describe("finance adapter", () => {
     await adapter.updateRecurrence(
       "workspace",
       recurrence,
-      { scope: "this_and_future", effectiveOn: "2026-09-01", amount: recurrence.amount },
+      { scope: "this", effectiveOn: "2026-09-01", amount: recurrence.amount },
       "rec-edit-1",
     );
     const plan = {
@@ -1662,6 +1662,7 @@ describe("finance adapter", () => {
       ["rec-edit-1", '"v2"'],
       ["plan-edit-1", '"v3"'],
     ]);
+    expect(requests[0]?.body).not.toHaveProperty("estimatedAmount");
   });
 
   it("edits fixture recurrence and keeps installment totals distributed", async () => {
