@@ -106,6 +106,16 @@ export type StockBulkApplyResult = {
   applied: { lineNumber: number; action: "new" | "update"; productId: string }[];
 };
 
+function isBulkApplyResult(value: unknown): value is StockBulkApplyResult {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<StockBulkApplyResult>;
+  return Boolean(
+    candidate.preview &&
+      Array.isArray(candidate.applied) &&
+      typeof candidate.committed === "boolean",
+  );
+}
+
 function bulkContentHash(content: string): string {
   // The API computes SHA-256. The fixture only needs a stable preview token.
   let hash = 2166136261;
@@ -114,6 +124,172 @@ function bulkContentHash(content: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return `${(hash >>> 0).toString(16).padStart(8, "0")}`.repeat(8);
+}
+
+function previewStockBulk(
+  content: string,
+  existing: readonly (StockProduct & { hasMovement: boolean })[],
+): {
+  headers: string[];
+  fatalErrors: string[];
+  rows: StockBulkPreviewRow[];
+  counts: StockBulkPreview["counts"];
+  canApplyValidOnly: boolean;
+  canApplyAllOrNothing: boolean;
+} {
+  const lines = content
+    .replace(/^\uFEFF/u, "")
+    .replace(/\r\n?/gu, "\n")
+    .split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  const delimiter = lines[0]?.includes("\t") ? "\t" : lines[0]?.includes(";") ? ";" : null;
+  const headers = delimiter ? (lines[0] ?? "").split(delimiter).map((header) => header.trim()) : [];
+  const normalize = (value: string) =>
+    value
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "")
+      .toLocaleLowerCase("pt-BR")
+      .trim();
+  const nameIndex = delimiter
+    ? headers.findIndex((header) => ["nome", "name", "produto"].includes(normalize(header)))
+    : 0;
+  const fatalErrors = delimiter && nameIndex < 0 ? ["O cabeçalho precisa conter Nome."] : [];
+  const start = delimiter ? 1 : 0;
+  const seen = new Set<string>();
+  const rows = fatalErrors.length
+    ? []
+    : lines.slice(start).map((line, offset): StockBulkPreviewRow => {
+        const cells = delimiter ? line.split(delimiter) : [line];
+        const lineNumber = offset + start + 1;
+        const name = (cells[nameIndex >= 0 ? nameIndex : 0] ?? "").trim().replace(/\s+/gu, " ");
+        const key = normalize(name).replace(/\s+/gu, " ");
+        const errors = name ? [] : ["O nome do produto é obrigatório."];
+        const values: FixtureBulkValues = { name };
+        const get = (field: string) =>
+          delimiter
+            ? (cells[headers.findIndex((header) => normalize(header) === field)] ?? "").trim()
+            : "";
+        for (const [field, header] of [
+          ["quantity", "quantidade"],
+          ["minimum", "minimo"],
+        ] as const) {
+          const raw = get(header);
+          if (raw)
+            try {
+              values[field] = fixtureFormatQuantity(fixtureParseQuantity(raw, true));
+            } catch {
+              errors.push(`Quantidade inválida: ${raw}.`);
+            }
+        }
+        const unit = get("unidade");
+        if (unit) values.unit = unit as StockUnit;
+        for (const [field, header] of [
+          ["category", "categoria"],
+          ["location", "local"],
+          ["note", "nota"],
+        ] as const) {
+          const raw = get(header);
+          if (raw) values[field] = raw;
+        }
+        const current = existing.find(
+          (product) => normalize(product.name).replace(/\s+/gu, " ") === key,
+        );
+        if (errors.length === 0 && seen.has(key))
+          errors.push("A linha é duplicada dentro deste lote.");
+        if (errors.length > 0)
+          return {
+            lineNumber,
+            status: seen.has(key) ? "duplicate" : "invalid",
+            name,
+            values,
+            changes: [],
+            errors,
+          };
+        seen.add(key);
+        if (!current)
+          return {
+            lineNumber,
+            status: "new",
+            name,
+            values,
+            changes: [{ field: "name", before: null, after: name }],
+            errors: [],
+          };
+        const changes = Object.entries(values)
+          .filter(
+            ([field, next]) => field !== "name" && next !== current[field as keyof StockProduct],
+          )
+          .map(([field, next]) => ({
+            field,
+            before: (current[field as keyof StockProduct] as string | null) ?? null,
+            after: String(next),
+          }));
+        if (name !== current.name)
+          changes.unshift({ field: "name", before: current.name, after: name });
+        return changes.length
+          ? {
+              lineNumber,
+              status: "update",
+              name,
+              existingProductId: current.id,
+              values,
+              changes,
+              errors: [],
+            }
+          : {
+              lineNumber,
+              status: "duplicate",
+              name,
+              existingProductId: current.id,
+              values,
+              changes: [],
+              errors: ["A linha duplicada não altera o produto existente."],
+            };
+      });
+  const counts = {
+    new: rows.filter((row) => row.status === "new").length,
+    update: rows.filter((row) => row.status === "update").length,
+    duplicate: rows.filter((row) => row.status === "duplicate").length,
+    invalid: rows.filter((row) => row.status === "invalid").length,
+  };
+  return {
+    headers,
+    fatalErrors,
+    rows,
+    counts,
+    canApplyValidOnly: counts.new + counts.update > 0,
+    canApplyAllOrNothing:
+      counts.new + counts.update > 0 && counts.invalid === 0 && counts.duplicate === 0,
+  };
+}
+
+type FixtureBulkValues = CreateStockProductInput & { markedMissing?: boolean };
+
+function bulkCreateInput(values: FixtureBulkValues): CreateStockProductInput {
+  return {
+    name: values.name,
+    unit: values.unit,
+    unitLabel: values.unitLabel,
+    quantity: values.quantity ?? null,
+    minimum: values.minimum ?? null,
+    shoppingAuto: values.shoppingAuto,
+    category: values.category ?? null,
+    location: values.location ?? null,
+    note: values.note ?? null,
+  };
+}
+
+function bulkUpdateInput(values: FixtureBulkValues): UpdateStockProductInput {
+  return {
+    name: values.name,
+    unit: values.unit,
+    unitLabel: values.unitLabel,
+    minimum: values.minimum,
+    shoppingAuto: values.shoppingAuto,
+    category: values.category,
+    location: values.location,
+    note: values.note,
+  };
 }
 
 export interface StockAdapter {
@@ -196,6 +372,7 @@ export class StockAdapterError extends Error {
     readonly status?: number,
     readonly currentVersion?: number,
     readonly code: StockAdapterErrorCode = "request_failed",
+    readonly payload?: unknown,
   ) {
     super(message);
     this.name = "StockAdapterError";
@@ -355,6 +532,8 @@ export function createHttpStockAdapter(
         error?.message ?? "Não foi possível atualizar o estoque.",
         response.status,
         error?.currentVersion,
+        "request_failed",
+        payload,
       );
     }
     return payload as T;
@@ -470,12 +649,23 @@ export function createHttpStockAdapter(
         method: "POST",
         body: JSON.stringify({ content }),
       }),
-    applyBulkProducts: (workspaceId, input, commandKey) =>
-      call<StockBulkApplyResult>(path(workspaceId, "/bulk"), {
-        method: "POST",
-        headers: { "Idempotency-Key": commandKey ?? key() },
-        body: JSON.stringify(input),
-      }),
+    async applyBulkProducts(workspaceId, input, commandKey) {
+      try {
+        return await call<StockBulkApplyResult>(path(workspaceId, "/bulk"), {
+          method: "POST",
+          headers: { "Idempotency-Key": commandKey ?? key() },
+          body: JSON.stringify(input),
+        });
+      } catch (error) {
+        if (
+          error instanceof StockAdapterError &&
+          error.status === 422 &&
+          isBulkApplyResult(error.payload)
+        )
+          return error.payload;
+        throw error;
+      }
+    },
     async listMovements(workspaceId, productId) {
       return (await call<JsonPage<StockMovement>>(path(workspaceId, `/${productId}/movements`)))
         .items;
@@ -804,67 +994,31 @@ export function createFixtureStockAdapter(): StockAdapter {
       return { item: { ...current }, product: product ? { ...product } : null, movement };
     },
     async previewBulkProducts(workspaceId, content) {
-      const lines = content
-        .replace(/^\uFEFF/u, "")
-        .replace(/\r\n?/gu, "\n")
-        .split("\n");
-      if (lines.at(-1) === "") lines.pop();
-      const tabular = lines[0]?.includes("\t") ?? false;
-      const start = tabular && /(?:^|\t)nome(?:\t|$)/iu.test(lines[0] ?? "") ? 1 : 0;
       const active = getProducts(workspaceId).filter((product) => !product.archived);
-      const seen = new Set<string>();
-      const rows: StockBulkPreviewRow[] = lines.slice(start).map((line, offset) => {
-        const lineNumber = offset + start + 1;
-        const cells = tabular ? line.split("\t") : [line];
-        const name = (cells[tabular ? 0 : 0] ?? "").trim();
-        const key = name.toLocaleLowerCase("pt-BR").replace(/\s+/gu, " ");
-        const current = active.find((product) => product.name.toLocaleLowerCase("pt-BR") === key);
-        const errors = name ? [] : ["O nome do produto é obrigatório."];
-        if (errors.length === 0 && seen.has(key))
-          errors.push("A linha é duplicada dentro deste lote.");
-        if (errors.length > 0)
-          return {
-            lineNumber,
-            status: seen.has(key) ? "duplicate" : "invalid",
-            name,
-            values: { name },
-            changes: [],
-            errors,
-          };
-        seen.add(key);
-        if (current)
-          return {
-            lineNumber,
-            status: "duplicate",
-            name,
-            existingProductId: current.id,
-            values: { name },
-            changes: [],
-            errors: ["A linha duplicada não altera o produto existente."],
-          };
-        return {
-          lineNumber,
-          status: "new",
-          name,
-          values: { name },
-          changes: [{ field: "name", before: null, after: name }],
-          errors: [],
-        };
-      });
-      const counts = {
-        new: rows.filter((row) => row.status === "new").length,
-        update: rows.filter((row) => row.status === "update").length,
-        duplicate: rows.filter((row) => row.status === "duplicate").length,
-        invalid: rows.filter((row) => row.status === "invalid").length,
-      };
+      const result = previewStockBulk(
+        content,
+        active.map((product) => ({
+          ...product,
+          hasMovement: (movementsByProduct.get(product.id)?.length ?? 0) > 0,
+        })),
+      );
+      const rows: StockBulkPreviewRow[] = result.rows.map((row) => ({
+        lineNumber: row.lineNumber,
+        status: row.status,
+        name: row.name,
+        ...(row.existingProductId ? { existingProductId: row.existingProductId } : {}),
+        ...(row.values ? { values: { ...row.values } } : {}),
+        changes: row.changes.map((change) => ({ ...change })),
+        errors: [...row.errors],
+      }));
       return {
         contentHash: bulkContentHash(content),
-        headers: tabular ? (lines[0] ?? "").split("\t") : [],
-        fatalErrors: [],
+        headers: [...result.headers],
+        fatalErrors: [...result.fatalErrors],
         rows,
-        counts,
-        canApplyValidOnly: counts.new > 0,
-        canApplyAllOrNothing: counts.new > 0 && counts.invalid === 0 && counts.duplicate === 0,
+        counts: { ...result.counts },
+        canApplyValidOnly: result.canApplyValidOnly,
+        canApplyAllOrNothing: result.canApplyAllOrNothing,
       };
     },
     async applyBulkProducts(workspaceId, input) {
@@ -874,9 +1028,35 @@ export function createFixtureStockAdapter(): StockAdapter {
       if (input.mode === "all_or_nothing" && !preview.canApplyAllOrNothing)
         return { committed: false, preview, applied: [] };
       const applied: StockBulkApplyResult["applied"] = [];
-      for (const row of preview.rows.filter((item) => item.status === "new")) {
-        const product = await this.createProduct(workspaceId, { name: row.name });
-        applied.push({ lineNumber: row.lineNumber, action: "new", productId: product.id });
+      for (const row of preview.rows.filter(
+        (item) => item.status === "new" || item.status === "update",
+      )) {
+        const values = row.values as FixtureBulkValues | undefined;
+        if (!values) continue;
+        if (row.status === "new") {
+          const product = await this.createProduct(workspaceId, bulkCreateInput(values));
+          if (values.markedMissing !== undefined && values.markedMissing)
+            await this.markMissing(workspaceId, product, true);
+          applied.push({ lineNumber: row.lineNumber, action: "new", productId: product.id });
+          continue;
+        }
+        const current = getProducts(workspaceId).find(
+          (product) => product.id === row.existingProductId,
+        );
+        if (!current) continue;
+        let latest = current;
+        if (values.quantity !== undefined && values.quantity !== null) {
+          latest = (
+            await this.createMovement(workspaceId, latest, {
+              kind: "correction",
+              quantity: values.quantity,
+            })
+          ).product;
+        }
+        latest = await this.updateProduct(workspaceId, latest, bulkUpdateInput(values));
+        if (values.markedMissing !== undefined)
+          latest = await this.markMissing(workspaceId, latest, values.markedMissing);
+        applied.push({ lineNumber: row.lineNumber, action: "update", productId: latest.id });
       }
       return { committed: applied.length > 0, preview, applied };
     },

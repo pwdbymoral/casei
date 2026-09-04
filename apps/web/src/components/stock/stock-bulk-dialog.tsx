@@ -98,6 +98,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
   const [content, setContent] = useState("");
   const [preview, setPreview] = useState<StockBulkPreview | null>(null);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [applyKey, setApplyKey] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<BulkDraft[]>([]);
   const [advanced, setAdvanced] = useState(false);
   const [mode, setMode] = useState<"valid_only" | "all_or_nothing">("valid_only");
@@ -110,6 +111,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
       setContent("");
       setPreview(null);
       setPreviewContent(null);
+      setApplyKey(null);
       setDrafts([]);
       setAdvanced(false);
       setMode("valid_only");
@@ -153,6 +155,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
       const result = await adapter.previewBulkProducts(workspaceId, content);
       setPreview(result);
       setPreviewContent(content);
+      setApplyKey(`stock-bulk-${globalThis.crypto.randomUUID()}`);
       setDrafts(draftsFromPreview(result));
       if (result.canApplyAllOrNothing) setMode("all_or_nothing");
     } catch (cause) {
@@ -170,10 +173,12 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
       const result = await adapter.applyBulkProducts(
         workspaceId,
         { content, mode, previewHash: preview.contentHash },
-        `stock-bulk-${globalThis.crypto.randomUUID()}`,
+        applyKey ?? `stock-bulk-${globalThis.crypto.randomUUID()}`,
       );
       if (!result.committed) {
         setPreview(result.preview);
+        setPreviewContent(content);
+        setDrafts(draftsFromPreview(result.preview));
         setError("Nada foi aplicado. Revise as linhas destacadas e gere uma nova prévia.");
         return;
       }
@@ -225,6 +230,7 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
                 setContent(event.target.value);
                 setPreview(null);
                 setPreviewContent(null);
+                setApplyKey(null);
                 setError(null);
               }}
               placeholder={"Arroz\nFeijão\nLeite"}
@@ -291,6 +297,19 @@ export function StockBulkDialog({ open, onOpenChange, adapter, workspaceId, onAp
                     ))}
                   </div>
                 </div>
+                {preview.fatalErrors.length > 0 ? (
+                  <div
+                    className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+                    role="alert"
+                  >
+                    <p className="font-medium">Não foi possível interpretar a tabela:</p>
+                    <ul className="mt-1 list-inside list-disc">
+                      {preview.fatalErrors.map((message) => (
+                        <li key={message}>{message}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
 
                 <fieldset className="flex flex-wrap items-center gap-2">
                   <legend className="text-sm font-medium">Mostrar:</legend>

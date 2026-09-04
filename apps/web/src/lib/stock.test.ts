@@ -126,6 +126,41 @@ describe("stock adapter", () => {
     await expect(requests[1]?.json()).resolves.toMatchObject({ mode: "valid_only" });
   });
 
+  it("preserves the operation key across a lost response and retry", async () => {
+    const keys: string[] = [];
+    let attempts = 0;
+    const adapter = createHttpStockAdapter({
+      fetch: async (_input, init) => {
+        attempts += 1;
+        keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+        if (attempts === 1) throw new TypeError("response lost");
+        return Response.json({ committed: true, preview: {}, applied: [] });
+      },
+    });
+    const input = { content: "Arroz", mode: "valid_only" as const, previewHash: "a".repeat(64) };
+    await expect(
+      adapter.applyBulkProducts(workspaceA, input, "stock-bulk-retry-0001"),
+    ).rejects.toThrow("Esta ação precisa de conexão.");
+    await expect(
+      adapter.applyBulkProducts(workspaceA, input, "stock-bulk-retry-0001"),
+    ).resolves.toMatchObject({ committed: true });
+    expect(keys).toEqual(["stock-bulk-retry-0001", "stock-bulk-retry-0001"]);
+  });
+
+  it("returns the server preview when all-or-nothing is rejected with 422", async () => {
+    const rejected = { committed: false, preview: { contentHash: "a".repeat(64) }, applied: [] };
+    const adapter = createHttpStockAdapter({
+      fetch: async () => Response.json(rejected, { status: 422 }),
+    });
+    await expect(
+      adapter.applyBulkProducts(workspaceA, {
+        content: "Arroz",
+        mode: "all_or_nothing",
+        previewHash: "a".repeat(64),
+      }),
+    ).resolves.toEqual(rejected);
+  });
+
   it("keeps fixture bulk confirmation explicit and skips invalid rows", async () => {
     const adapter = createFixtureStockAdapter();
     const content = "Arroz novo\n\nArroz novo";
@@ -141,6 +176,31 @@ describe("stock adapter", () => {
     expect(
       (await adapter.listProducts(workspaceA)).some((item) => item.name === "Arroz novo"),
     ).toBe(true);
+  });
+
+  it("supports semicolon tables, quantities and updates in fixtures", async () => {
+    const adapter = createFixtureStockAdapter();
+    const content = "Quantidade;Nome\n2;Leite";
+    const preview = await adapter.previewBulkProducts(workspaceA, content);
+    expect(preview.rows[0]).toMatchObject({ status: "update", name: "Leite" });
+    const applied = await adapter.applyBulkProducts(workspaceA, {
+      content,
+      mode: "valid_only",
+      previewHash: preview.contentHash,
+    });
+    expect(applied.applied[0]?.action).toBe("update");
+    expect(
+      (await adapter.listProducts(workspaceA)).find((item) => item.name === "Leite")?.quantity,
+    ).toBe("2");
+  });
+
+  it("reports invalid tabular headers in the fixture preview", async () => {
+    const preview = await createFixtureStockAdapter().previewBulkProducts(
+      workspaceA,
+      "Fornecedor;Quantidade\nAcme;2",
+    );
+    expect(preview.fatalErrors).toEqual(["O cabeçalho precisa conter Nome."]);
+    expect(preview.rows).toHaveLength(0);
   });
   it("reuses one operation-scoped idempotency key after a network retry", async () => {
     let attempts = 0;
