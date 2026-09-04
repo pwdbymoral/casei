@@ -45,11 +45,22 @@ describe("insight HTTP adapter", () => {
     const requests: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       requests.push(String(input));
+      const url = String(input);
       return new Response(
         JSON.stringify(
-          String(input).includes("safe-to-spend")
+          url.includes("safe-to-spend")
             ? { safe: null, gross: null, available: false, confidence: financial.confidence }
-            : financial,
+            : url.includes("projection")
+              ? {
+                  asOf: "2026-08-24",
+                  to: "2027-08-24",
+                  months: 12,
+                  currency: "BRL",
+                  startingBalance: financial.balance,
+                  points: [],
+                  confidence: financial.confidence,
+                }
+              : financial,
         ),
         { status: 200 },
       );
@@ -58,10 +69,12 @@ describe("insight HTTP adapter", () => {
 
     await adapter.getFinancial("space/1", { asOf: "2026-08-24" });
     await adapter.getSafeToSpend("space/1", { asOf: "2026-08-24", horizonDays: 30 });
+    await adapter.getProjection("space/1", { asOf: "2026-08-24", months: 12 });
 
     expect(requests).toEqual([
       "http://api.test/v1/workspaces/space%2F1/insights/financial?asOf=2026-08-24",
       "http://api.test/v1/workspaces/space%2F1/insights/safe-to-spend?asOf=2026-08-24&horizonDays=30",
+      "http://api.test/v1/workspaces/space%2F1/insights/projection?asOf=2026-08-24&months=12",
     ]);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.any(String),
