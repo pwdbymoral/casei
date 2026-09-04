@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 test("persiste excedente de pagamento como crédito reversível", async () => {
   const migration = await readFile(
-    fileURLToPath(new URL("../drizzle/0023_card_payment_credit.sql", import.meta.url)),
+    fileURLToPath(new URL("../drizzle/0024_card_payment_credit.sql", import.meta.url)),
     "utf8",
   );
 
